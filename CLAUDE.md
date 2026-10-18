@@ -9,6 +9,13 @@ in practice (MSYS2 CLANG64 toolchain). The runtime began as the gow3_pc project,
 stay `gow3` (`gow3-probe.exe`, `GOW3_*` variables, `gow3_*` files) — that is not God of War code
 unless it sits behind the game-hooks gate (below).
 
+**Locations.**
+- The repo lives in `C:\Users\marce\Downloads\Projetos\Uncharted-PC-Port`. `C:\dev\uncharted` is a junction to it; build through that path, because the CMake cache in `gow3_pc/out/gpu` was generated there.
+- The playable port is in `Downloads\Jogos_e_Mods\Jogos\Uncharted-PC-Port`: `Uncharted\` is the extracted package, `Jogo\CUSA02344\` the game.
+- Remotes:
+  - `origin` is the fork, `espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port`, and the work is on branch `claude/dlss-uncharted`.
+  - `upstream` is BilalReloaded's repo, which has moved on (0.3.0) and has not been merged here.
+
 ## Commands
 
 The toolchain is MSYS2 CLANG64. From Git Bash, wrap commands like this:
