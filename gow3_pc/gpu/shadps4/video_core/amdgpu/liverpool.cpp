@@ -291,10 +291,10 @@ bool PipelinedOpcode(PM4ItOpcode opcode) {
 } // namespace
 
 namespace {
-// gow3 diagnostics (GOW3_EOP_RANGE_TRACE=<lo>:<hi>[:<counter>] hex guest addresses): fence
-// writes into [lo, hi) with the time, the writing thread and the 8-byte value at <counter> (e.g. the
-// game's frame counter), 4000 lines at most.
-static void TraceEopWrite(u64 address, u64 data) {
+// gow3 diagnostics (GOW3_EOP_RANGE_TRACE=<lo>:<hi>[:<counter>] hex guest addresses): fence and
+// label writes (EOP, EOS, WRITE_DATA, compute RELEASE_MEM) into [lo, hi) with the time, the
+// writing thread and the 8-byte value at <counter> (e.g. the game's frame counter), 4000 lines.
+static void TraceEopWrite(u64 address, u64 data, const char* kind = "eop") {
     static const std::array<u64, 3> range = [] {
         std::array<u64, 3> out{};
         const char* env = std::getenv("GOW3_EOP_RANGE_TRACE");
@@ -317,7 +317,7 @@ static void TraceEopWrite(u64 address, u64 data) {
     if (range[2]) {
         std::memcpy(&counter, reinterpret_cast<const void*>(range[2]), sizeof(counter));
     }
-    std::printf("EOP trace: t=%.2f ms label %#llx = %#llx, counter %llu, thread %lu\n",
+    std::printf("EOP trace: %s t=%.2f ms label %#llx = %#llx, counter %llu, thread %lu\n", kind,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
                 static_cast<unsigned long long>(address), static_cast<unsigned long long>(data),
                 static_cast<unsigned long long>(counter), static_cast<unsigned long>(GetCurrentThreadId()));
@@ -325,9 +325,10 @@ static void TraceEopWrite(u64 address, u64 data) {
 
 void SignalEop(const PM4CmdEventWriteEop& eop) {
     eop.SignalFence(
-        [](void* address, u64 data, u32 num_bytes) {
+        [&eop](void* address, u64 data, u32 num_bytes) {
             auto* memory = Core::Memory::Instance();
-            TraceEopWrite(reinterpret_cast<u64>(address), data);
+            TraceEopWrite(reinterpret_cast<u64>(address), data,
+                          eop.int_sel.Value() == InterruptSelect::None ? "eop" : "eop+irq");
             Gow3WriteLog::Note(reinterpret_cast<u64>(address), &data, num_bytes, Gow3WriteLog::Fence);
             if (!memory->TryWriteBacking(address, &data, num_bytes)) {
                 memcpy(address, &data, num_bytes);
@@ -401,6 +402,7 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
         // thread was still reading).
         if (wait_readbacks &&
             cache.DeferUntilLastReadback([eop] { SignalEop(eop); }, label, value, bytes)) {
+            TraceEopWrite(label, value, "eop held");
             // The GPU starts on the ray casts now rather than when the frame's command buffer is
             // submitted at its end: the fence (and the guest waiting for it) follows sooner.
             if (results_pending) {
@@ -431,6 +433,10 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
     rasterizer.WaitHostCopies();
     rasterizer.WaitDeferredSignals();
     rasterizer.ProcessDownloadImages();
+    if (release.packet.data_sel.Value() != DataSelect::None &&
+        release.packet.data_sel.Value() != DataSelect::GdsMemStore) {
+        TraceEopWrite(release.packet.Address<u64>(), release.packet.DataQWord(), "release_mem");
+    }
     release.packet.SignalFence(
         [pipe_id] {
             Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(pipe_id));
@@ -498,6 +504,7 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
                      (header->type3.count.Value() - 2) * sizeof(u32), Gow3WriteLog::WriteData);
     Gow3WatchRange::Note("write data", 0, 0, write_data->Address<u64>(),
                          (header->type3.count.Value() - 2) * sizeof(u32));
+    TraceEopWrite(write_data->Address<u64>(), write_data->data[0], "write_data");
     std::memcpy(write_data->Address<u64*>(), write_data->data,
                 (header->type3.count.Value() - 2) * sizeof(u32));
 }
@@ -511,6 +518,7 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
     rasterizer.NoteLabelWrite(event_eos.Address<VAddr>(), 4);
     event_eos.SignalFence([](void* address, u64 value, u32 num_bytes) {
         auto* memory = Core::Memory::Instance();
+        TraceEopWrite(reinterpret_cast<u64>(address), value, "eos");
         Gow3WriteLog::Note(reinterpret_cast<u64>(address), &value, num_bytes, Gow3WriteLog::Fence);
         if (!memory->TryWriteBacking(address, &value, num_bytes)) {
             memcpy(address, &value, num_bytes);

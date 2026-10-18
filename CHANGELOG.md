@@ -13,8 +13,10 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   about 10 minutes (two threads changed the same readback bookkeeping). Fixed; on a 6-core Ryzen
   the option now gives +27% in the Uncharted 3 bar fight (62.8 -> 80 FPS at 1080p).
 - **DLSS works with multithreaded rendering** in Uncharted 2 (it silently did not run before).
-- Known: with multithreaded rendering Drake's Fortune can stop with the game assert
-  `m_gfxEopTick` within minutes (also before these changes); keep the option off there.
+- **Drake's Fortune no longer stops with the game assert `m_gfxEopTick`** (within minutes with
+  multithreaded rendering, sometimes while loading without it). The game checks that the frame
+  from three frames ago is done instead of waiting for it; it now waits. Same change in
+  Uncharted 2 and 3, which had the same check.
 - **Launcher:** NVIDIA DLSS option (Display tab) when the DLSS files are installed; packages built
   with them include NVIDIA's license and attribution.
 - **DLSS (and FSR 3/4, TAA) in Drake's Fortune and Uncharted 3** too, DLAA and the scaled modes,

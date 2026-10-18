@@ -36,8 +36,21 @@ GPU_WAIT_PATCH = ("wait for GPU frame completion without the 2 s timeout", [
     ("c5f258c0 c5f82e05 ???????? 7739 f390 beffffffff", 12, bytes.fromhex("7739"), bytes.fromhex("9090")),
     ("c5f258c0 c5f82e05 ???????? 7710 f390 498b00", 12, bytes.fromhex("7710"), bytes.fromhex("9090")),
 ])
+# FrameBegin(N) (fg-draw-mgr.cpp:234) frees frame N-3's instances and asserts that frame's
+# m_gfxEopTick is set; it does not wait. The tick is not written by the GPU: a game thread
+# (U1 1.02 0x51e630, one of eight) waits on the GPU end-of-pipe interrupt, finds the frame's
+# done label (the last of its three end-of-pipe writes) and stores rdtsc there. The game runs up
+# to three frames ahead, so the check holds only while that thread wakes within about a frame of
+# the interrupt: on PC it lagged during loading (shader compiles) and with multithreaded
+# rendering, and U1 stopped (int 0x41) within minutes. The assert block becomes `pause; jmp` back
+# to the check: FrameBegin waits for the tick. Same bytes in the three games (tick at +0xa08 in
+# U1, +0xa28 in U2/U3).
+FRAME_BEGIN_WAIT_PATCH = ("FrameBegin waits for frame N-3's end-of-pipe tick instead of asserting", [
+    ("4883bc08 ?? 0a000000 753b 488b05", 11, bytes.fromhex("488b05"), bytes.fromhex("f390ebf1")),
+])
 EBOOT_PATCHES = [
     GPU_WAIT_PATCH,
+    FRAME_BEGIN_WAIT_PATCH,
     # Silent sound effects (footsteps, gunfire, ambience; music and speech fine): the sound config
     # loader (biglib audio acm 0x515a50) opens reverbs/mixers/environments/prototypes.txt through
     # the sound file callback 0x8ef80 with flag 1, which `testb $5,%cl` at 0x8f1da turns into O_CREAT.
@@ -74,8 +87,8 @@ TORCH_FORWARD_PATCHES = [
 
 PATCHES = {
     "eboot.bin": EBOOT_PATCHES,
-    "big2-ps4_Shipping.elf": [GPU_WAIT_PATCH],
-    "big3-ps4_Shipping.elf": [GPU_WAIT_PATCH],
+    "big2-ps4_Shipping.elf": [GPU_WAIT_PATCH, FRAME_BEGIN_WAIT_PATCH],
+    "big3-ps4_Shipping.elf": [GPU_WAIT_PATCH, FRAME_BEGIN_WAIT_PATCH],
 }
 EXECUTABLES = tuple(PATCHES)
 # Exit code of sceSystemServiceLoadExec (runtime_services.c): the game asked for another

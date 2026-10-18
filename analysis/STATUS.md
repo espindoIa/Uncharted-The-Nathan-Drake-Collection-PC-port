@@ -932,3 +932,24 @@ sample (its UAC prompt was not accepted twice): no Nsight trace was taken.
     bound at 1080p (2300 draws per frame), like U2.
   - The intermittent U1 `m_gfxEopTick` assert also hit two single-threaded runs during loading
     (34 s and 93 s; the next three runs were fine).
+- **FrameBegin m_gfxEopTick assert fixed, 18 Oct (probe patch FRAME_BEGIN_WAIT_PATCH).**
+  boot-linked.bin addresses: image offset = file offset - 0xb6bc8 (G3PROBE5 header); the probe's
+  "image offset" lines are file offsets. U1 1.02 FrameBegin (image 0x4d2700 area) only checks
+  frame N-3's params slot (0x10cdb40 + (N & 31) * 0xa50, m_gfxEopTick at +0xa08); it never waits.
+  A hardware write watch (tools: watch_write.py on Uncharted.exe) showed the tick is written by
+  the CPU at 0x51ea7c, in a thread function 0x51e630 (eight threads, 0x522e94) that waits in
+  sceKernelWaitEqueue (1 ms timeout) for the graphics end-of-pipe event, walks the frames after the
+  last done one and, for each whose done label (table 0x11a2ba0 + (N & 31) * 0x40, pointers at
+  +0x18/+0x20/+0x28 into 0x1036221xxx) reads 1, stores rdtsc as the tick. GOW3_EOP_RANGE_TRACE
+  (now also EOS, WRITE_DATA, compute RELEASE_MEM, held fences and the interrupt flag) showed the
+  three labels per frame are all EOPs, in order clock, frame number, 1, the interrupt on the last.
+  So the tick needs that guest thread to wake within the game's margin, and the margin is nil:
+  sampling the table during multithreaded play, 97% of samples had three prepared frames without a
+  tick (the game runs exactly at its limit). Any lag of the handler thread (loading, multithreaded
+  rendering, readback-held fences) asserted. The patch turns the assert block after `cmp
+  [rax+rcx+0xa08],0; jne` into `pause; jmp` back to the compare (pattern
+  4883bc08??0a000000753b488b05: unique in U1, U2 at +0xa28, U3 at +0xa28): FrameBegin waits for
+  the tick. Safe because the GPU command thread lands held fences by itself while idle.
+  - U1 multithreaded, explore route replayed 10 minutes: no assert (63740 frames, 100.3 FPS mean,
+    p99 13.4 ms); before, 2 of 2 runs asserted after ~5 minutes. U1 single-threaded: 3 more boots
+    into gameplay fine. U2 and U3 multithreaded, 30 s of play each: patch applied, no assert.
