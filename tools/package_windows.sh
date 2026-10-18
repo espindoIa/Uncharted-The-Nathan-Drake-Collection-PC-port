@@ -32,21 +32,21 @@ ldd gow3_pc/out/gow3-probe.exe | awk '/clang64/ {print $3}' | sort -u | while re
 done
 
 # DLSS (optional): DLSS_BRIDGE=<gow3_dlss.dll, built with MSVC from gow3_pc/gpu/dlss_bridge> and
-# DLSS_SDK=<NVIDIA DLSS SDK root> add the bridge and NVIDIA's production nvngx_dlss.dll (lib/
-# Windows_x86_64/rel, not the watermarked dev build) next to the runtime. The runtime loads them
-# at run time and keeps its other upscalers without them. NVIDIA's license goes with them
-# (DLSS SDK license 2c: distributed under terms at least as protective; supplement 7.1(b):
-# attribution in README.txt).
+# DLSS_SDK=<NVIDIA DLSS SDK root, for its license> add the bridge next to the runtime. NVIDIA's
+# nvngx_dlss.dll is never packaged (18 Oct: its license does not fit the GPL runtime): players
+# download it from NVIDIA's DLSS repository and the launcher installs it after checking NVIDIA's
+# signature (Display tab). The bridge links NVIDIA's NGX static library, so NVIDIA's license goes
+# with it (DLSS SDK license 2c; supplement 7.1(b): attribution in README.txt).
 if [[ -n ${DLSS_BRIDGE:-} || -n ${DLSS_SDK:-} ]]; then
-    ngx=${DLSS_SDK:-}/lib/Windows_x86_64/rel/nvngx_dlss.dll
-    [[ -f ${DLSS_BRIDGE:-} && -f $ngx ]] || {
-        echo "DLSS: need DLSS_BRIDGE (gow3_dlss.dll) and DLSS_SDK (with $ngx)" >&2; exit 1; }
-    cp "$DLSS_BRIDGE" "$ngx" "$stage/gow3_pc/out/"
+    [[ -f ${DLSS_BRIDGE:-} && -f ${DLSS_SDK:-}/LICENSE.txt ]] || {
+        echo "DLSS: need DLSS_BRIDGE (gow3_dlss.dll) and DLSS_SDK (with LICENSE.txt)" >&2; exit 1; }
+    cp "$DLSS_BRIDGE" "$stage/gow3_pc/out/"
     mkdir -p "$stage/licenses/nvidia-dlss" "$stage/licenses/gow3-dlss-bridge"
     cp "$DLSS_SDK/LICENSE.txt" "$stage/licenses/nvidia-dlss/LICENSE.txt"
     cp gow3_pc/gpu/dlss_bridge/LICENSE.txt "$stage/licenses/gow3-dlss-bridge/LICENSE.txt"
-    echo "DLSS: gow3_dlss.dll and nvngx_dlss.dll included"
+    echo "DLSS: gow3_dlss.dll included (nvngx_dlss.dll comes from NVIDIA, added in the launcher)"
 fi
+[[ ! -e $stage/gow3_pc/out/nvngx_dlss.dll ]] || { echo "nvngx_dlss.dll must not be packaged" >&2; exit 1; }
 
 cp gow3_pc/scripts/*.py "$stage/gow3_pc/scripts/"
 cp tools/probe_uncharted.py tools/apply_update.py "$stage/tools/"

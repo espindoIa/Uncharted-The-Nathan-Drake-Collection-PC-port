@@ -18,6 +18,9 @@ from pathlib import Path
 
 DEFAULTS = ("analysis/uncharted-user/disabled-optimizations.txt",)
 KEEP = {"analysis", "update"}
+# Files the player added to program folders, carried into the new version when it has none:
+# NVIDIA's nvngx_dlss.dll (not packaged; installed from the launcher's Display tab).
+CARRY = ("gow3_pc/out/nvngx_dlss.dll",)
 TITLE = "Uncharted: The Nathan Drake Collection - Launcher by BilalReloaded"
 
 
@@ -75,6 +78,11 @@ def apply(root, staged, status):
             else:
                 added.append(name)
             copy_item(staged / name, current)
+        for relative in CARRY:
+            source = old / relative
+            if source.is_file() and not (root / relative).exists():
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, root / relative)
         for relative in DEFAULTS:
             if (staged / relative).is_file():
                 target = root / relative

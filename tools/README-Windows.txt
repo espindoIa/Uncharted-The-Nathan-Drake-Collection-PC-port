@@ -55,9 +55,12 @@ bundled libraries are in licenses\ (THIRD-PARTY.txt lists every DLL package, its
 license and source). Not affiliated with Sony, Naughty Dog or Bluepoint Games.
 
 NVIDIA DLSS
-Packages that include gow3_dlss.dll and nvngx_dlss.dll use NVIDIA DLSS (NVIDIA RTX, GeForce
-RTX GPUs only). NVIDIA, GeForce RTX and DLSS are trademarks of NVIDIA Corporation.
-nvngx_dlss.dll is NVIDIA's, under the NVIDIA RTX SDK license (licenses\nvidia-dlss\LICENSE.txt);
-it is a separate program the port loads at run time through gow3_dlss.dll (MIT,
-licenses\gow3-dlss-bridge\LICENSE.txt), not part of the GPL runtime. Without them, or on other
-GPUs, the port uses its other upscalers.
+NVIDIA DLSS works on NVIDIA RTX (GeForce RTX) GPUs. NVIDIA, GeForce RTX and DLSS are trademarks
+of NVIDIA Corporation. This package does not include NVIDIA's nvngx_dlss.dll: download it from
+NVIDIA's DLSS page, https://github.com/NVIDIA/DLSS/tree/main/lib/Windows_x86_64/rel
+(nvngx_dlss.dll), then in the launcher open Display -> NVIDIA DLSS -> "Add nvngx_dlss.dll..."
+(the launcher checks NVIDIA's signature and copies it next to the runtime). nvngx_dlss.dll is
+NVIDIA's, under NVIDIA's license; the port loads it at run time through gow3_dlss.dll (MIT,
+licenses\gow3-dlss-bridge\LICENSE.txt; it contains NVIDIA's NGX library, under
+licenses\nvidia-dlss\LICENSE.txt). Without it, or on other GPUs, the port uses its other
+upscalers.

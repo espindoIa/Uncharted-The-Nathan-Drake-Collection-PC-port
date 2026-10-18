@@ -81,9 +81,33 @@ DLSS_MODES = [("off", "Off"), ("0", "DLAA"), ("1", "Quality"), ("2", "Balanced")
 DLSS_GAMES = ("u1", "u2", "u3")  # games whose camera the runtime finds (tools/probe_uncharted.py)
 
 
+# NVIDIA's nvngx_dlss.dll is not shipped (its license does not fit the port's GPL): the player
+# downloads it from NVIDIA's DLSS repository and the launcher copies it next to the runtime after
+# checking NVIDIA's signature. gow3_dlss.dll (the bridge) is shipped.
+NGX_DLL = "nvngx_dlss.dll"
+NGX_DOWNLOAD_URL = "https://github.com/NVIDIA/DLSS/tree/main/lib/Windows_x86_64/rel"
+
+
+def dlss_bridge_present():
+    return (ROOT / "gow3_pc" / "out" / "gow3_dlss.dll").is_file()
+
+
 def dlss_available():
-    out = ROOT / "gow3_pc" / "out"
-    return all((out / name).is_file() for name in ("gow3_dlss.dll", "nvngx_dlss.dll"))
+    return dlss_bridge_present() and (ROOT / "gow3_pc" / "out" / NGX_DLL).is_file()
+
+
+def ngx_signature_ok(path):
+    """Whether `path` carries a valid Authenticode signature by NVIDIA Corporation."""
+    script = (f"$s = Get-AuthenticodeSignature -LiteralPath '{str(path)}'; "
+              "if ($s.Status -eq 'Valid' -and $s.SignerCertificate.Subject -like '*O=NVIDIA Corporation*') "
+              "{ exit 0 } else { exit 1 }")
+    try:
+        result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                                capture_output=True, timeout=60,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 LAUNCHER_DEFAULTS = {"game": "u1", "diagnostics": True, "game_dir": "", "check_updates": True}
@@ -880,14 +904,19 @@ class Launcher:
                                                "frame is shown (no extra delay).")
         self.ini_toggle(page, "fsr1", "Upscale with FSR 1",
                         "When the game draws below your screen's resolution, FSR 1 upscales it sharper than plain scaling.")
-        if dlss_available():
+        if dlss_bridge_present():
             def dlss(parent):
-                return Segmented(parent, DLSS_MODES, self.dlss_value(), self.change_dlss, self.f_small)
-            self.widgets["dlss"] = self.row(
+                holder = tk.Frame(parent, bg=BG)
+                self.dlss_holder = holder
+                self.fill_dlss(holder)
+                return holder
+            self.row(
                 page, "NVIDIA DLSS",
                 "NVIDIA RTX GPUs. DLAA smooths edges at the render resolution; the other modes draw the scene "
                 "smaller and rebuild it at the render resolution above (set it to your screen's). "
-                "On other GPUs the game runs without it.", dlss)
+                "On other GPUs the game runs without it. Needs NVIDIA's nvngx_dlss.dll, which is not "
+                "included: get it from NVIDIA's DLSS page (nvngx_dlss.dll in lib/Windows_x86_64/rel), "
+                "then add it here.", dlss)
 
         def sharpening(parent):
             value = self.ini.get("rcas_strength", "75") if self.ini.get("rcas", "1") == "1" else "off"
@@ -896,6 +925,43 @@ class Launcher:
         self.widgets["sharpening"] = self.row(page, "Sharpening (FSR RCAS)", "Sharpens the final image.", sharpening)
         self.ini_toggle(page, "show_fps", "Show FPS counter", "A small performance overlay in a corner of the screen.")
         return page
+
+    def fill_dlss(self, holder):
+        for child in holder.winfo_children():
+            child.destroy()
+        if dlss_available():
+            self.widgets["dlss"] = Segmented(holder, DLSS_MODES, self.dlss_value(), self.change_dlss,
+                                             self.f_small)
+            self.widgets["dlss"].pack()
+            return
+        self.widgets.pop("dlss", None)
+        self.flat_button(holder, "Get from NVIDIA", lambda: webbrowser.open(NGX_DOWNLOAD_URL)).pack(
+            side="left", padx=(0, self.px(8)))
+        self.flat_button(holder, f"Add {NGX_DLL}...", self.add_ngx).pack(side="left")
+
+    def add_ngx(self):
+        from tkinter import filedialog
+        source = filedialog.askopenfilename(
+            title=f"Select {NGX_DLL} downloaded from NVIDIA",
+            filetypes=[(NGX_DLL, NGX_DLL), ("DLL files", "*.dll")],
+            initialdir=str(Path.home() / "Downloads"))
+        if not source:
+            return
+        source = Path(source)
+        if source.name.lower() != NGX_DLL:
+            messagebox.showerror(APP_TITLE, f"Choose the file named {NGX_DLL}.")
+            return
+        if not ngx_signature_ok(source):
+            messagebox.showerror(APP_TITLE, f"{source.name} has no valid NVIDIA signature. Download it again "
+                                            "from NVIDIA's DLSS page.")
+            return
+        try:
+            shutil.copy2(source, ROOT / "gow3_pc" / "out" / NGX_DLL)
+        except OSError as error:
+            messagebox.showerror(APP_TITLE, f"Could not copy {NGX_DLL}: {error}")
+            return
+        self.fill_dlss(self.dlss_holder)
+        messagebox.showinfo(APP_TITLE, "NVIDIA DLSS is ready. Choose a DLSS mode.")
 
     def dlss_value(self):
         return self.ini.get("preset", "0") if self.ini.get("upscaler", "off") == "dlss" else "off"
