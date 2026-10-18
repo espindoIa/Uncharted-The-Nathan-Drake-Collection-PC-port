@@ -889,7 +889,16 @@ bool BufferCache::WriteThrough(VAddr address, const void* data, u64 size) {
         return false;
     }
     // The GPU's copy, in order with the work recorded so far (resident and synchronized first).
-    const auto [arena, offset] = ObtainBuffer(address, static_cast<u32>(size), false);
+    // Always the arena: ObtainBuffer can hand small read-only ranges the stream buffer, and the
+    // copy would then land there while the arena kept the old values (TryWriteBacking does not
+    // mark the pages CPU-modified, so the arena would never be refreshed).
+    texture_cache.ResolveReadbacks(address, size, true, ReadbackSource::BufferObtain);
+    const u64 first_block = address >> block_shift;
+    const u64 last_block = (address + size - 1) >> block_shift;
+    const Buffer* arena = GetArena(first_block, last_block);
+    EnsureResident(arena, first_block, last_block);
+    SynchronizeMemory(arena, address, static_cast<u32>(size), false, false);
+    const u64 offset = arena->Offset(address);
     const auto staging = staging_pool.Request(size, VideoCore::MemoryType::HostUncached, 4);
     std::memcpy(staging.mapped, data, size);
     staging.Flush();

@@ -896,7 +896,9 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
         return;
     }
     // Draws write the same buffers over and over: an entry for the range only moves on.
-    const u64 position = draw_pipe->Head();
+    // While PostDraw builds a packet, Head() is still the position before it: Reached() would
+    // hold before the recording thread ran the writing draw. Such entries wait for Commit().
+    const u64 position = building_packet ? UnreachedPosition : draw_pipe->Head();
     const VAddr end = address + size;
     for (auto& write : pending_writes) {
         if (address <= write.end && write.begin <= end) {
@@ -937,6 +939,8 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
     }
     return false;
 }
+
+static void FixAimFocusCentre(Core::MemoryManager* memory, VAddr address);
 
 void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
                            boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out) {
@@ -1001,6 +1005,10 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
             buffer_cache.IsRegionGpuModified(address, size) || PendingWriteOverlaps(address, size)) {
             continue;
         }
+        if (stage.pgm_hash == 0x9f801363 && size >= 32) {
+            // As BindBuffers does for the direct path: the ring copy must see the fixed centre.
+            FixAimFocusCentre(memory, address);
+        }
         copy(index, nullptr, address, size);
     }
 }
@@ -1017,20 +1025,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     }
     std::array<u16, AmdGpu::RegDirty::NumBlocks> blocks;
     u32 num_blocks = 0;
-#ifdef __GLIBCXX__
-    for (size_t block = dirty.blocks._Find_first(); block < dirty.blocks.size();
-         block = dirty.blocks._Find_next(block)) {
-        blocks[num_blocks++] = static_cast<u16>(block);
-    }
-#else
-    if (dirty.blocks.any()) {
-        for (size_t block = 0; block < dirty.blocks.size(); ++block) {
-            if (dirty.blocks.test(block)) {
-                blocks[num_blocks++] = static_cast<u16>(block);
-            }
-        }
-    }
-#endif
+    dirty.ForEach([&](u32 block) { blocks[num_blocks++] = static_cast<u16>(block); });
     const auto stages =
         pipeline ? pipeline->GetStages() : std::span<const Shader::Info* const>{};
     // Constants: copied here into the ring, the recording thread only binds them.
@@ -1045,6 +1040,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
             auto& ring = rings[num_stages];
             ring.clear();
             if (constant_ring && !Gow3Toggle::Disabled(Gow3Toggle::ConstantRing)) {
+                building_packet = true;
                 CollectRingBindings(*stage, used_prepared, ring);
             }
             ++num_stages;
@@ -1129,6 +1125,14 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     }
     dirty.Clear();
     draw_pipe->Commit(static_cast<u32>(out - start));
+    if (building_packet) {
+        building_packet = false;
+        for (auto& write : pending_writes) {
+            if (write.position == UnreachedPosition) {
+                write.position = draw_pipe->Head();
+            }
+        }
+    }
     PrintPipeStats();
 }
 
