@@ -20,6 +20,10 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 - **Multithreaded rendering is on by default** (Performance tab, per game; launcher settings saved
   before switch to it once). Uncharted 2's train flashed white for single frames with it (later
   draws were prepared before a compute copy of their constants ran); fixed.
+- **Much lighter on the CPU.** The games' job workers spun on their cores while waiting for work
+  (on a PS4 they own them); they now sleep and are woken when a job comes. Uncapped: Uncharted 3
+  4.9 instead of 8.2 cores busy, Uncharted 2 4.2 instead of 7.7, Drake's Fortune 4.8 instead of
+  8.2 and 105 instead of 79 FPS. On CPUs with few cores this leaves room for the game itself.
 - **Characters no longer leave trails with DLSS/FSR in the Uncharted games.** Nate, the other
   characters and wind-blown plants get their own motion vectors (before, only the camera's):
   76-90% of the picture in U1's jungle and U2's train scene, at no measurable frame-rate cost.

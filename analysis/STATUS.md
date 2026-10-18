@@ -1008,3 +1008,32 @@ sample (its UAC prompt was not accepted twice): no Nsight trace was taken.
   composites (ps b4fa3a82, 84adaaea, 53098288) left the flakes, so where the snow is drawn is not
   found yet. GOW3_UPSCALER_TRACE prints these events ("Scene effect", "Scene composite", the
   mask events per frame).
+
+## 18 October 2026: CPU load (job workers, draw pipe waits)
+
+- Process CPU at 60 FPS (vsync, cap 60) was 6.5-6.7 cores busy in U2/U3 (C:/dev/cpuuse.ps1,
+  per thread: C:/dev/threads.ps1 with thread descriptions): six NdJobWorkerThread at 80-99% each,
+  the GPU command, draw recording and Vulkan recording threads ~45% each. Sampling the workers
+  (C:/dev/tools/sample_workers.py): the job system's idle loop (U3 1.02 0xda6470-0xda66d6)
+  spins with `pause` unless the scheduler flag +0x59 is set; with it, after 1000 idle rounds it
+  locks the scheduler mutex (+0x60) and waits on its condition variable (+0x80, 10 ms timeout);
+  the producer (0xda589f) signals when the flag is set. SetWorkerSleep (0xd96440) stores the
+  flag and the workers' priority but is not called on the way into gameplay (patching it changed
+  nothing; the flag stayed 0). Writing the flag in a running U3: 6.7 -> 2.4 cores at 60 FPS,
+  uncapped 111-112 FPS either way; in a running U1 it asserted in movie-player.cpp:2152 (switch
+  while jobs were in flight). WORKER_SLEEP_PATCHES (probe) make the three readers act as if it
+  were set from the start and lower the timeout to 1 ms (the worker does not re-check its queues
+  under the mutex; a job queued in that window waits for the timeout). Same bytes in the three
+  games. Uncapped, patch vs UNCHARTED_WORKER_SPIN=1: U3 4.9 vs 8.2 cores, 112-117 vs 111 FPS;
+  U2 4.2 vs 7.7 cores, ~120 both (engine cap); U1 4.8 vs 8.2 cores, 104-107 vs 79-80 FPS. No
+  faults in these runs.
+- Draw pipe waits on the GPU command thread (profiles, GOW3_PROFILE=10 GOW3_PROFILE_MS=5): U2
+  stage A waited 30%: LandDeferredFenceFor 11.4% (drained the pipe before looking up a fence held
+  for its ray-cast readback) and DispatchDirect 5.8% (the copy-shader drains of ffc2956, now
+  covered by the SRT range check). deferred_values is now behind a mutex and read without a
+  drain when no later write to the label is in the pipe (toggle 1 << 63 restores the drain); the
+  copy-shader drains are off (toggle 1 << 62). A/B in one session: no FPS change (U3 109.6 vs
+  109.3, U2 at its 120 cap): these waits were not on the critical path.
+- Seen once in 7 U2 starts with multithreaded rendering (13:16, not reproduced in 6 more): a
+  read fault in Rasterizer::FindPreparedStage (bind_prepared pointing at a freed prepared draw)
+  on the draw recording thread during loading. Not fixed.

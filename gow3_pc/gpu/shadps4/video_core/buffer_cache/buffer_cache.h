@@ -488,6 +488,9 @@ private:
         u64 tick;
     };
     std::unordered_map<VAddr, DeferredValue> deferred_values; ///< newest value per label
+    /// deferred_values is read by the GPU command thread without draining the recording thread
+    /// (Liverpool::LandDeferredFenceFor).
+    mutable std::mutex deferred_values_mutex;
     /// Atomic: with multithreaded rendering the draw recording thread defers fences while the GPU
     /// command thread checks for them (it drains that thread before touching the rest).
     std::atomic<u32> deferred_signals{0};

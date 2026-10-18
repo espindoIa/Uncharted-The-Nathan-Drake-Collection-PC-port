@@ -574,6 +574,24 @@ bool Liverpool::LandDeferredFenceFor(const PM4CmdWaitRegMem& wait, const Regs& s
     if (!cache.HasDeferredSignals()) {
         return false;
     }
+    // gow3 18 Oct: the deferred value is readable here without draining the recording thread
+    // (deferred_values_mutex) when no later write to that label is still in the draw pipe: the
+    // wait passes at once. Draining first was 11.4% of this thread in Uncharted 2 (toggle 1 << 63
+    // restores it).
+    if (!Gow3Toggle::Disabled(1ull << 63)) {
+        u64 tick = 0;
+        u32 value = 0, pending = 0;
+        if (!PendingFenceValue(wait.Address<VAddr>(), pending) &&
+            cache.DeferredFenceTick(wait.Address<VAddr>(), tick, &value) && wait.TestValue(value)) {
+            static const bool land = [] {
+                const char* env = std::getenv("GOW3_DEFERRED_WAITS");
+                return env && std::string_view{env} == "land";
+            }();
+            if (!land) {
+                return true;
+            }
+        }
+    }
     // Multithreaded rendering: the deferred fences belong to the draw recording thread while it
     // runs (an unmet wait drains it anyway).
     rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands);

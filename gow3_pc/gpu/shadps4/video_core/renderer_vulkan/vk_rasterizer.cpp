@@ -1917,28 +1917,24 @@ void Rasterizer::DispatchDirect() {
     if (!pipeline) {
         return;
     }
-    // gow3 18 Oct: the constant copy shaders (2d215c3b, 6a6422a9; vk_shader_hle.cpp) and the
-    // ray-cast gather (c92150ba) run here after a drain. Their outputs are read when later draws
-    // are prepared on this thread (the SRT walker reads constant blocks in guest memory), but a
-    // dispatch handed to the recording thread binds and marks its outputs only there, so those
-    // draws were prepared from the previous frame's constants: Uncharted 2's train flashed white
-    // for single frames with multithreaded rendering. GOW3_DRAIN_CS=<hex hash>[,<hash>...] adds
-    // shaders (diagnostics).
+    // gow3 18 Oct: GOW3_DRAIN_CS=<hex hash>[,<hash>...]: these dispatches run here after a drain
+    // (diagnostics). Uncharted 2's train flashed white with multithreaded rendering: later draws
+    // were prepared from constants its copy shaders had yet to write. SyncSrtTables now waits for
+    // the dispatches whose written buffers it reads (pipe_write_ranges); draining before the copy
+    // shaders 2d215c3b/6a6422a9 and c92150ba as well (toggle 1 << 62) cost 5.8% of this thread.
     static const std::vector<u64> drain_cs = [] {
-        std::vector<u64> out{0x2d215c3b, 0x6a6422a9, 0xc92150ba};
-        const char* env = std::getenv("GOW3_DRAIN_CS");
-        if (env && std::string_view{env} == "none") {
-            return std::vector<u64>{}; // A/B: only the SRT walk's check
-        }
-        for (; env && *env;) {
+        std::vector<u64> out;
+        for (const char* env = std::getenv("GOW3_DRAIN_CS"); env && *env;) {
             char* end = nullptr;
             out.push_back(std::strtoull(env, &end, 16));
             env = end && *end == ',' ? end + 1 : nullptr;
         }
         return out;
     }();
-    if (pipelined && std::ranges::find(drain_cs, pipeline->GetStage(Shader::SwStage::Compute).pgm_hash) !=
-                         drain_cs.end()) {
+    const u64 cs_hash = pipeline->GetStage(Shader::SwStage::Compute).pgm_hash;
+    if (pipelined && (std::ranges::find(drain_cs, cs_hash) != drain_cs.end() ||
+                      (Gow3Toggle::Disabled(1ull << 62) &&
+                       (cs_hash == 0x2d215c3b || cs_hash == 0x6a6422a9 || cs_hash == 0xc92150ba)))) {
         pipelined = false;
         DrainDrawPipe();
     }

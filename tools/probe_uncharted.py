@@ -72,6 +72,32 @@ EBOOT_PATCHES = [
 # re-aims and take the joint path in every camera mode: the light follows the torch, like the
 # beam drawn from it. Optional (UNCHARTED_TORCH_FORWARD=0 keeps the original); 1.02 only (1.00
 # lays this code out differently).
+# The job system's workers (NdJobWorkerThread, six) spin with `pause` while their queues are
+# empty unless the scheduler's sleep flag (+0x59) is set; then, after 1000 idle rounds, they wait
+# on a condition variable (10 ms timeout) that the job producer signals when the flag is set.
+# SetWorkerSleep (U3 1.02 0xd96440) stores it, but on the way into gameplay it is never called:
+# the flag stays 0 and on a PC the spinning took about five cores (U3 bar fight at 60 FPS: 6.7
+# cores busy, 2.4 with the flag written in the running game; uncapped 111 vs 112 FPS). The three
+# places that read the flag act as if it were set: the idle loop takes the sleep path, the sleep
+# path waits, the producer signals. The worker does not look at its queues again under the mutex
+# before waiting, so a job queued just then waits for the timeout: 1 ms instead of 10.
+# UNCHARTED_WORKER_SPIN=1 keeps the original. Same code in the three games.
+WORKER_SLEEP_PATCHES = [
+    ("job workers: idle loop takes the sleep path", [
+        ("4d8d7001 807f5900 ???? 4981f8e8030000", 8, None, bytes.fromhex("9090")),
+    ]),
+    ("job workers: sleep path waits", [
+        ("498b07 80785900 ???? 4889c7 4883ef80 4883c060 ba????0000", 7, None, bytes.fromhex("9090")),
+    ]),
+    ("job workers: wait at most 1 ms (lost wake-ups)", [
+        ("498b07 80785900 ???? 4889c7 4883ef80 4883c060 ba????0000", 20, bytes.fromhex("ba10270000"),
+         bytes.fromhex("bae8030000")),
+    ]),
+    ("job producer: always wakes the workers", [
+        ("b301 80785900 0f84????????", 6, None, bytes.fromhex("909090909090")),
+    ]),
+]
+
 TORCH_FORWARD_PATCHES = [
     ("Uncharted 2 torch: no re-aim along the camera (frame update copy)", [
         ("488d05cc9fd500 8b4850 84c9 7440 8a50", 12, bytes.fromhex("7440"), bytes.fromhex("eb40")),
@@ -104,7 +130,7 @@ def apply_patches(image, patches):
             if len(found) != 1:
                 continue
             at = found[0] + offset
-            if data[at:at + len(original)] != original:
+            if original is not None and data[at:at + len(original)] != original:
                 raise SystemExit(f"Patch '{description}': unexpected bytes at {at:#x}")
             data[at:at + len(replacement)] = replacement
             print(f"Patched: {description} (image offset {at:#x})")
@@ -381,6 +407,8 @@ def run_game(args, game, executable, guest_args, loadexec):
             prepare_command += ["--executable", executable]
         subprocess.run(prepare_command, check=True)
     patches = list(PATCHES[executable])
+    if os.environ.get("UNCHARTED_WORKER_SPIN") != "1":
+        patches.extend(WORKER_SLEEP_PATCHES)
     if executable == "big2-ps4_Shipping.elf" and os.environ.get("UNCHARTED_TORCH_FORWARD", "1") != "0":
         patches.extend(TORCH_FORWARD_PATCHES)
     apply_patches(out / "boot-linked.bin", patches)

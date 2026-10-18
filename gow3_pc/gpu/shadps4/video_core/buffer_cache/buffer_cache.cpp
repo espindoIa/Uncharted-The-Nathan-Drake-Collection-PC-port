@@ -1360,12 +1360,16 @@ bool BufferCache::DeferUntilLastReadback(std::function<void()> fn, VAddr label, 
     };
     if (label) {
         deferred_labels.insert(label);
-        deferred_values[label] = {value, bytes ? bytes : 4u, pending_readbacks.back().tick};
+        {
+            std::scoped_lock lock{deferred_values_mutex};
+            deferred_values[label] = {value, bytes ? bytes : 4u, pending_readbacks.back().tick};
+        }
         pending_readbacks.back().on_landed.emplace_back([this, label, fn = std::move(fn)] {
             if (const auto it = deferred_labels.find(label); it != deferred_labels.end()) {
                 deferred_labels.erase(it);
             }
             if (!deferred_labels.contains(label)) {
+                std::scoped_lock lock{deferred_values_mutex};
                 deferred_values.erase(label);
             }
             fn();
@@ -1377,6 +1381,7 @@ bool BufferCache::DeferUntilLastReadback(std::function<void()> fn, VAddr label, 
 }
 
 bool BufferCache::DeferredFenceTick(VAddr address, u64& tick, u32* value) const {
+    std::scoped_lock lock{deferred_values_mutex};
     for (const auto& [label, deferred] : deferred_values) {
         if (address >= label && address + sizeof(u32) <= label + deferred.bytes) {
             tick = deferred.tick;
