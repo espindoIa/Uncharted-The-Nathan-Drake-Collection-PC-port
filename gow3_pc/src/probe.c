@@ -81,19 +81,34 @@ static void *allocate_low_image(size_t size) {
     fail("cannot allocate guest image below 2 GiB");
     return NULL;
 }
-/* A page within relative-call range (below 2 GiB) of a low guest image, for hook stubs; NULL when
- * none is free. allocate() may return memory far above it. */
-static void *allocate_below_2gib(size_t size) {
-    for (uintptr_t address=UINT64_C(0x400000); address+size<UINT64_C(0x80000000); address+=UINT64_C(0x100000)) {
+/* A page within relative-call range (+-2 GiB) of `target`, for hook stubs; any page when none is free.
+ * The guest image is low only with --low-image; allocate() may return memory far from it. */
+static void *allocate_near(uintptr_t target, size_t size) {
+    const uintptr_t reach=UINT64_C(0x7ff00000);
 #ifdef _WIN32
-        void *p=VirtualAlloc((void *)address,size,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
-        if (p) return p;
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    const uintptr_t granularity=info.dwAllocationGranularity, lowest=(uintptr_t)info.lpMinimumApplicationAddress;
+    const uintptr_t lo=target>lowest+reach ? target-reach : lowest, hi=target+reach;
+    for (uintptr_t address=(lo+granularity-1)&~(granularity-1); address+size<hi;) {
+        MEMORY_BASIC_INFORMATION region;
+        if (!VirtualQuery((void *)address,&region,sizeof(region))) break;
+        if (region.State==MEM_FREE) {
+            void *p=VirtualAlloc((void *)address,size,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+            if (p) return p;
+        }
+        const uintptr_t end=(uintptr_t)region.BaseAddress+region.RegionSize;
+        address=(end>address ? end : address+granularity)+granularity-1;
+        address&=~(granularity-1);
+    }
 #else
+    const uintptr_t lo=target>UINT64_C(0x10000)+reach ? target-reach : UINT64_C(0x10000);
+    for (uintptr_t address=lo&~UINT64_C(0xfffff); address+size<target+reach; address+=UINT64_C(0x100000)) {
         void *p=mmap((void *)address,size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
         if (p!=MAP_FAILED) return p;
-#endif
     }
-    return NULL;
+#endif
+    return allocate(size); /* callers check the range */
 }
 static void protect(void *p, size_t size, unsigned flags) {
 #ifdef _WIN32
@@ -596,7 +611,7 @@ static void install_cheats(Segment *segments, uint64_t count, uint64_t size) {
             printf("Cheats: %s unavailable (code not found in this eboot.bin)\n", names[id]);
             continue;
         }
-        unsigned char *stubs = allocate(page_size);
+        unsigned char *stubs = allocate_near((uintptr_t)image, page_size);
         int32_t relative[GOW3_CHEAT_HOOK_COUNT] = {0};
         for (unsigned i = 0; i < GOW3_CHEAT_HOOK_COUNT; ++i) {
             const Gow3CheatHook *hook = &gow3_cheat_hooks[i];
@@ -639,7 +654,7 @@ static void install_movie_pacing(Segment *segments, uint64_t count, uint64_t siz
         return;
     }
     float *data = allocate(page_size);
-    unsigned char *stub = allocate_below_2gib(page_size);
+    unsigned char *stub = allocate_near((uintptr_t)(image + at), page_size);
     const int64_t delta = stub ? (int64_t)(uintptr_t)stub - (int64_t)(uintptr_t)(image + at + 5) : INT64_MAX;
     if (delta < INT32_MIN || delta > INT32_MAX) {
         printf("Movies: frame pacing unavailable (hook outside relative-call range)\n");
@@ -662,7 +677,7 @@ static void install_actor_watch(Segment *segments, uint64_t count, uint64_t size
         printf("Health display: unavailable (code not found in this eboot.bin)\n");
         return;
     }
-    unsigned char *stub = allocate(page_size);
+    unsigned char *stub = allocate_near((uintptr_t)image, page_size);
     const int64_t delta = (int64_t)(uintptr_t)stub - (int64_t)(uintptr_t)(image + at + 5);
     if (delta < INT32_MIN || delta > INT32_MAX) {
         printf("Health display: unavailable (hook outside relative-jump range)\n");
@@ -690,7 +705,7 @@ static void install_orb_multiplier(Segment *segments, uint64_t count, uint64_t s
     }
     /* SysV call sites: preserve the receiver across the helper, then tail-call the original
      * setter. Its cap and upgrade notifications remain in the game's own code. */
-    unsigned char *stub = allocate(page_size);
+    unsigned char *stub = allocate_near((uintptr_t)image, page_size);
     uintptr_t helper = (uintptr_t)gow3_orbs_gain, setter = (uintptr_t)(image + setter_at);
     unsigned char code[26];
     gow3_orb_build_stub(code, helper, setter);

@@ -1084,6 +1084,9 @@ sample (its UAC prompt was not accepted twice): no Nsight trace was taken.
     GOW3_MOVIE_PACING=0 keeps the original step. tests/test_movie_hook.cpp: 600 frames in 10 s at
     60-240 FPS, signatures found once in each game. U3 at 120 FPS with the hook: 1.001x (9/9 cuts).
     U1/U2: hook installs (boot.log "Movies: frame pacing"); their cutscenes were not measured.
+    The stub page is allocated within +-2 GiB of the hook (probe.c allocate_near, VirtualQuery walk):
+    a page below 2 GiB only reached a --low-image guest, and a packaged U3 boot printed "frame pacing
+    unavailable (hook outside relative-call range)". The cheat, health bar and red orb stubs use it too.
   - New diagnostics: GOW3_FPS_LIMIT_FILE (frame limit from a file, read twice a second);
     GOW3_EXEC_WATCH_FILE takes up to 4 addresses, r: prefix for read/write watches;
     GOW3_EXEC_WATCH_UNIQUE=1 logs each instruction once and prints per-instruction counts when the
