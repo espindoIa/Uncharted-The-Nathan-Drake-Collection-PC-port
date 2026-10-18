@@ -361,6 +361,9 @@ private:
     /// Uncharted 2: the depth of a draw whose vertex user data may hold the camera (flat_camera.h).
     VideoCore::ImageId flat_camera_depth{};
     bool flat_scene_draw = false; ///< Uncharted: a draw with the jittered scene depth
+    /// Buffers written by dispatches in the draw pipe (not yet marked GPU-written; SyncSrtTables).
+    std::vector<std::pair<VAddr, u64>> pipe_write_ranges;
+    bool pipe_writes_overflow = false;
     /// Uncharted 2: a frame was started at the display pass and no scene draw followed yet.
     bool display_frame_open = false;
     std::unique_ptr<TemporalUpscaler> upscaler; // gow3: FSR (docs/upscaler.md)

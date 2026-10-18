@@ -88,7 +88,7 @@ def dlss_available():
 
 LAUNCHER_DEFAULTS = {"game": "u1", "diagnostics": True, "game_dir": "", "check_updates": True}
 GAME_KEYS = ("u1", "u2", "u3")
-GAME_SETTING_DEFAULTS = {"preset": "medium", "resolution": "1920x1080", "multithreaded": False,
+GAME_SETTING_DEFAULTS = {"preset": "medium", "resolution": "1920x1080", "multithreaded": True,
                          "async_readback": False, "controls": None, "mouse": True, "mouse_sens": "1.0",
                          "mouse_invert": False}
 
@@ -384,9 +384,14 @@ def read_config():
         for game, entry in games.items():
             if entry["preset"] in PRESETS:
                 write_ini(game, {"frames_queued": "1"})
+    # Version 7: multithreaded rendering on by default (its hang and the m_gfxEopTick assert are
+    # fixed, 18 Oct); configs saved before kept the old default, off.
+    if config.get("version", 1) < 7:
+        for entry in games.values():
+            entry["multithreaded"] = True
     for name in GAME_SETTING_DEFAULTS:
         config.pop(name, None)
-    config["version"] = 6
+    config["version"] = 7
     return config
 
 
@@ -930,10 +935,10 @@ class Launcher:
             return Toggle(parent, self.s, self.game_settings()["multithreaded"],
                           lambda v: self.change_game_setting("multithreaded", v))
         self.widgets["multithreaded"] = self.row(
-            page, "Multithreaded rendering (experimental)",
-            "Prepares draws on a second CPU thread: more FPS on CPUs with several cores. "
-            "Turn it off if the game hangs while loading. Uncharted 2: use it with 1 frame queued "
-            "(with 2 it can crash after a few minutes).", multithreaded)
+            page, "Multithreaded rendering",
+            "Prepares draws on a second CPU thread: more FPS on CPUs with several cores (on by "
+            "default). Turn it off if the game hangs while loading. Keep 1 frame queued with it.",
+            multithreaded)
 
         self.fps_note = tk.Label(page, text="", font=self.f_small, bg=BG, fg=GOLD, anchor="w")
         self.fps_note.pack(side="top", fill="x")

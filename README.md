@@ -41,8 +41,8 @@ plan and test list: [analysis/PLAN.md](analysis/PLAN.md).
   Every preset queues 1 frame. 2 frames queued is faster in heavy scenes, but GPU results
   reach the game a frame later: keep it at 1.
 
-  **Low-end PCs and laptops:** turn on **Multithreaded rendering** (launcher, **Performance**
-  tab, per game) and keep **Frames queued at 1**. The PS4's GPU commands are otherwise processed
+  **Low-end PCs and laptops:** keep **Multithreaded rendering** on (launcher, **Performance**
+  tab, per game; the default) and **Frames queued at 1**. The PS4's GPU commands are otherwise processed
   on one CPU core, which limits slower CPUs; with this option the Vulkan command recording runs on a
   second core. On fast desktop CPUs it makes no difference. With a weak GPU also pick the **Low**
   preset (720p + FSR 1). If a game hangs while loading, turn the option off again.
@@ -77,9 +77,8 @@ plan and test list: [analysis/PLAN.md](analysis/PLAN.md).
 - **Frame rate in the heaviest Uncharted 2 scenes is about 50 FPS** at any resolution: the
   PS4's GPU command processing runs on one CPU core here (3,000-5,600 draws per frame). Lighter
   scenes reach 60. More optimization is planned.
-- **Multithreaded rendering is experimental:** its crashes with 1 frame queued are fixed. It is
-  meant for low-end PCs and laptops (see the presets above) and gives no speed-up on fast CPUs;
-  with "Frames queued 2" Uncharted 2 can still stop with the game assert `m_gfxEopTick`, so keep 1.
+- **Multithreaded rendering is on by default** (Performance tab, per game): keep Frames queued at
+  1 with it. If a game hangs while loading, turn it off for that game.
 - **Uncharted 3:** Sully's shirt in the bar can flicker at 60 FPS (not at 30).
 - **Recording with OBS Game Capture:** if OBS keeps losing and re-hooking the game, the game's
   memory use grows (each hook creates DirectX devices in the game). With an NVIDIA card set

@@ -953,3 +953,21 @@ sample (its UAC prompt was not accepted twice): no Nsight trace was taken.
   - U1 multithreaded, explore route replayed 10 minutes: no assert (63740 frames, 100.3 FPS mean,
     p99 13.4 ms); before, 2 of 2 runs asserted after ~5 minutes. U1 single-threaded: 3 more boots
     into gameplay fine. U2 and U3 multithreaded, 30 s of play each: patch applied, no assert.
+- **Multithreaded rendering on by default, 18 Oct** (probe GOW3_DRAW_PIPE/GOW3_VK_RECORD_THREAD
+  default 1; launcher GAME_SETTING_DEFAULTS multithreaded True, config version 7 turns it on once
+  in saved configs). The user then saw U2's train flash white for single frames (opening train
+  scene). Measured with tools in C:/dev/cap (frames.ps1 grabs ~21 frames/s of a window region;
+  flick2.py counts pixels of luma >= 195 that are > 70 brighter than both neighbouring frames,
+  calibrated: 0 single-threaded, 7-12 per 150 frames on the bad build). Bisected: draw pipe only
+  (not the recording thread, not DLSS, not toggles 59/60); live toggles 38, 39 or 40 each hid it.
+  Cause: a dispatch handed to the recording thread binds and marks its written buffers only
+  there; the GPU command thread meanwhile prepares later draws and SyncSrtTables reads constant
+  tables from guest memory, checking only ranges already marked GPU-written, so those draws used
+  the previous frame's constants (cs 6a6422a9 copies the train's). Fix 1 (ffc2956): the copy
+  shaders and c92150ba drain first; the user still saw rare flashes. Fix 2: DispatchDirect records
+  the written buffer ranges of pipelined dispatches (desc.GetSharp at stage A), DrainDrawPipe
+  clears them, and SyncSrtTables drains before a read overlapping one (toggle 1 << 61 skips).
+  Draining before every walk instead cost 15% in U3's bar fight (56,000 drains/s). Results: only
+  the SRT check (GOW3_DRAIN_CS=none) 0 flashes in 600 frames, same session with toggle 61: 16 in
+  300; final build 0 in 1000; U3 bar fight uncapped 113-117 FPS with and without the check
+  (~5,300 drains/s both); U1 multithreaded 30 s fine.

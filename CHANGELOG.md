@@ -17,6 +17,9 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   multithreaded rendering, sometimes while loading without it). The game checks that the frame
   from three frames ago is done instead of waiting for it; it now waits. Same change in
   Uncharted 2 and 3, which had the same check.
+- **Multithreaded rendering is on by default** (Performance tab, per game; launcher settings saved
+  before switch to it once). Uncharted 2's train flashed white for single frames with it (later
+  draws were prepared before a compute copy of their constants ran); fixed.
 - **Launcher:** NVIDIA DLSS option (Display tab) when the DLSS files are installed; packages built
   with them include NVIDIA's license and attribution.
 - **DLSS (and FSR 3/4, TAA) in Drake's Fortune and Uncharted 3** too, DLAA and the scaled modes,

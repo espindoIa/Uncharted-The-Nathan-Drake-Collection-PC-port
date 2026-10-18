@@ -30,10 +30,9 @@ Notes
 - Settings are kept per game. Saves and logs are kept in analysis\ next to the launcher.
 - Logs for troubleshooting: Advanced tab -> Open log folder (boot.log).
 - Render resolutions above 1080p are new: if a game crashes there, choose Medium (1080p).
-- Low-end PCs and laptops: turn on Multithreaded rendering (Performance tab, per game) and keep
-  Frames queued at 1. The GPU commands then use a second CPU core; on fast desktop CPUs it makes
-  no difference. With a weak GPU also pick the Low preset. If a game hangs while loading, turn it
-  off again. (Experimental: with 2 frames queued Uncharted 2 can crash.)
+- Low-end PCs and laptops: keep Multithreaded rendering on (Performance tab, per game; the
+  default) and Frames queued at 1: the GPU commands then use a second CPU core. With a weak GPU
+  also pick the Low preset.
 - Changes: CHANGELOG.md.
 
 Known issues
@@ -42,8 +41,8 @@ Known issues
 - Uncharted 3: Sully's shirt in the bar can flicker at 60 FPS (not at 30).
 - Frames queued 2 is faster in heavy scenes, but GPU results reach the game a frame later
   (Uncharted 2's NPCs float, Nate's feet sink into the floor): keep it at 1.
-- Multithreaded rendering is experimental (see the low-end tip above): keep Frames queued at 1
-  with it.
+- Multithreaded rendering is on by default: keep Frames queued at 1 with it. If a game hangs
+  while loading, turn it off for that game (Performance tab).
 - Recording with OBS Game Capture: if OBS keeps losing and re-hooking the game, the game's memory
   use grows. With an NVIDIA card set NVIDIA Control Panel -> Manage 3D settings -> Program settings
   -> Uncharted.exe -> Vulkan/OpenGL present method: Prefer native, or use OBS Window Capture.

@@ -491,10 +491,11 @@ def run_game(args, game, executable, guest_args, loadexec):
     pad_file=user / "probe-pad.txt"
     pad_file.write_text("",encoding="ascii")
     env["GOW3_PAD_FILE"] = str(pad_file)
-    # Start with a serialized renderer while investigating Uncharted loading.
-    # The base runtime enables these concurrency optimizations for GOW3.
-    env.setdefault("GOW3_DRAW_PIPE", "0")
-    env.setdefault("GOW3_VK_RECORD_THREAD", "0")
+    # Multithreaded rendering (draw pipe and Vulkan recording thread) is on by default since
+    # 18 Oct: its hang and the FrameBegin m_gfxEopTick assert are fixed (+27% in U3's bar fight).
+    # UNCHARTED_MULTITHREADED_<GAME>=0 (the launcher's per-game switch) turns it off.
+    env.setdefault("GOW3_DRAW_PIPE", "1")
+    env.setdefault("GOW3_VK_RECORD_THREAD", "1")
     env.setdefault("GOW3_NATIVE_TSC", "1")
     # Grey-world diagnosis: timestamped opens/reads of level packs and streams (boot.log).
     # env.setdefault("GOW3_FILE_TRACE", ".pak")  # pack read trace (grey-world diagnosis, done)

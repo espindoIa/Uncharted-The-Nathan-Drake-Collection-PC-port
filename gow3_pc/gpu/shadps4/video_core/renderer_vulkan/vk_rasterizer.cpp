@@ -830,6 +830,8 @@ void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
         return;
     }
     static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
+    pipe_write_ranges.clear();
+    pipe_writes_overflow = false;
     if (!stats) {
         draw_pipe->Drain(reason);
         return;
@@ -1872,7 +1874,11 @@ void Rasterizer::DispatchDirect() {
     // shaders (diagnostics).
     static const std::vector<u64> drain_cs = [] {
         std::vector<u64> out{0x2d215c3b, 0x6a6422a9, 0xc92150ba};
-        for (const char* env = std::getenv("GOW3_DRAIN_CS"); env && *env;) {
+        const char* env = std::getenv("GOW3_DRAIN_CS");
+        if (env && std::string_view{env} == "none") {
+            return std::vector<u64>{}; // A/B: only the SRT walk's check
+        }
+        for (; env && *env;) {
             char* end = nullptr;
             out.push_back(std::strtoull(env, &end, 16));
             env = end && *end == ',' ? end + 1 : nullptr;
@@ -1885,6 +1891,23 @@ void Rasterizer::DispatchDirect() {
         DrainDrawPipe();
     }
     if (pipelined) {
+        // Its buffer writes are bound and marked GPU-written on the recording thread: SRT walks
+        // here that read them wait for it (SyncSrtTables).
+        const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
+        for (const auto& desc : cs.buffers) {
+            if (!desc.is_written || desc.IsSpecial()) {
+                continue;
+            }
+            const auto sharp = desc.GetSharp(cs);
+            if (!sharp.base_address || !sharp.GetSize()) {
+                continue;
+            }
+            if (pipe_write_ranges.size() < 256) {
+                pipe_write_ranges.emplace_back(sharp.base_address, sharp.GetSize());
+            } else {
+                pipe_writes_overflow = true;
+            }
+        }
         PostDraw(pipeline, nullptr, false, 0, &CsRegs());
         return;
     }
@@ -2543,6 +2566,24 @@ void Rasterizer::SyncSrtTables(const Shader::Info& info) {
     if (plan.nodes.empty()) {
         return;
     }
+    // gow3 18 Oct: a dispatch still in the draw pipe has not marked its buffer writes yet, so the
+    // GPU-written check below cannot see them: the walk read the tables before the GPU wrote
+    // them (Uncharted 2's train still flashed white, rarely, after the copy shaders drained).
+    // Reads overlapping a pending dispatch's written buffers drain the pipe first; draining
+    // before every walk cost 15% in U3's bar fight. Toggle 1 << 61 skips it (A/B).
+    const bool check_pipe = !Gow3Toggle::Disabled(1ull << 61);
+    const auto pipe_wait = [&](VAddr address, u64 size) {
+        if (!check_pipe || (pipe_write_ranges.empty() && !pipe_writes_overflow)) {
+            return;
+        }
+        bool overlap = pipe_writes_overflow;
+        for (const auto& [base, bytes] : pipe_write_ranges) {
+            overlap = overlap || (address < base + bytes && base < address + size);
+        }
+        if (overlap) {
+            DrainDrawPipe();
+        }
+    };
     const auto user_data = std::as_bytes(info.user_data);
     boost::container::small_vector<VAddr, 16> address(plan.nodes.size(), 0);
     for (size_t i = 0; i < plan.nodes.size(); ++i) {
@@ -2561,10 +2602,14 @@ void Rasterizer::SyncSrtTables(const Shader::Info& info) {
             if (!table || !IsMapped(table + node.offset, sizeof(value))) {
                 continue;
             }
+            pipe_wait(table + node.offset, sizeof(value));
             std::memcpy(&value, reinterpret_cast<const void*>(table + node.offset), sizeof(value));
         }
         const VAddr table = value & 0xFFFFFFFFFFFFULL;
         address[i] = table;
+        if (table && node.extent) {
+            pipe_wait(table, node.extent);
+        }
         if (!table || !node.extent || !buffer_cache.IsRangeGpuWrittenShared(table, node.extent) ||
             !IsMapped(table, node.extent)) {
             continue;
