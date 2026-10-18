@@ -29,6 +29,7 @@
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_depth_stencil_state.h"
 #include "video_core/renderer_vulkan/motion_history.h"
+#include "video_core/renderer_vulkan/scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
@@ -898,18 +899,36 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
     // Only potentially animated G-buffer draws may use the extra motion attachment. The
     // ordinary stage variant is needed first to inspect the vertex shader's resources.
     bool motion_possible = false;
+    bool flat_scene = false;
     {
         u32 bound = 0;
         for (s32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS && !skip_cb_binding; ++cb) {
             bound += (regs.color_buffers[cb] && regs.color_target_mask.GetMask(cb)) ? 1 : 0;
         }
-        motion_possible = Shader::MotionVectors::positions_address != 0 && bound >= 5 &&
+        // Uncharted (GOW3_CAMERA_SOURCE=flat) has no 5-target G-buffer: its opaque scene draws
+        // test the scene depth (D32, scene size) with one to four unblended targets, writing it
+        // or, after Drake's Fortune's depth pre-pass, with an equal test. The fragment's depth in
+        // the motion attachment lets the compose pass reject what was drawn over later.
+        static const bool flat_source = [] {
+            const char* source = std::getenv("GOW3_CAMERA_SOURCE");
+            return source && std::string_view{source} == "flat";
+        }();
+        flat_scene = flat_source && bound >= 1 && bound <= 4 && regs.depth_control.depth_enable &&
+            !regs.blend_control[0].enable &&
+            regs.depth_buffer.z_info.format == AmdGpu::DepthBuffer::ZFormat::Z32Float &&
+            // Not the half-resolution passes (pitches are tile-aligned: 1920 -> 2048).
+            regs.depth_buffer.Pitch() * 4 >= SceneResolution::Native().width * 3;
+        motion_possible = Shader::MotionVectors::positions_address != 0 &&
+                          (bound >= 5 || flat_scene) &&
                           !regs.color_buffers[Shader::MotionVectors::Output] &&
                           regs.depth_buffer.DepthValid() &&
                           regs.depth_buffer.NumSamples() == 1 && !regs.IsClipDisabled() &&
                           regs.stage_enable.raw == AmdGpu::ShaderStageEnable::VgtStages::Vs;
     }
-    sel.motion = false;
+    // Uncharted: every opaque scene draw takes the motion variant (below); chosen before the
+    // stages are refreshed, so they are refreshed once (each refresh flattens the user data and
+    // walks its SRT tables: refreshing twice cost U1 ~9% of its frame rate).
+    sel.motion = motion_possible && flat_scene;
 
     // First pass to fill render target information needed by shader recompiler
     for (s32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS && !skip_cb_binding; ++cb) {
@@ -933,7 +952,7 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
     if (!RefreshGraphicsStages(sel)) {
         return false;
     }
-    if (motion_possible) {
+    if (motion_possible && !flat_scene) {
         const auto* vs = sel.infos[static_cast<u32>(Shader::SwStage::Vertex)];
         if (vs) {
             // Shaders with a bone palette (motion_history.h). Small skeletons (weapons,

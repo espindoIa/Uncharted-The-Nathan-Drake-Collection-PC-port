@@ -52,6 +52,9 @@ public:
 
     /// A draw into a full-size RGBA16F target with the scene depth: the scene color.
     void OnSceneColor(VideoCore::ImageId color);
+    [[nodiscard]] VideoCore::ImageId SceneColor() const noexcept {
+        return scene_color;
+    }
 
     /// A blended (transparent) draw into the scene color that is not a full-screen pass: the
     /// first one of a frame snapshots the opaque scene for the reactive mask.
@@ -200,12 +203,14 @@ private:
     u32 trace_frame = 0;      ///< GOW3_UPSCALER_TRACE: frames since start
     u32 trace_dispatches = 0;  ///< GOW3_UPSCALER_TRACE: dispatches since the last scene draw
     u32 trace_scene_draws = 0; ///< GOW3_UPSCALER_TRACE: scene color draws this frame
+    u32 trace_blended = 0, trace_composites = 0; ///< GOW3_UPSCALER_TRACE: reactive mask events
     std::array<u64, 16> trace_after{}; ///< distinct in a row
     u32 preset_file_frames = 0; ///< GOW3_PRESET_FILE polling
     int applied_output = -1;
     bool snapshot_taken = false;
     bool opaque_valid = false;
     bool mask_ready = false;
+    bool dlss_bias = false; ///< the reactive mask is DLSS's bias-current-colour mask this frame
     std::array<float, 2> jitter{};
     u32 jitter_index = 0;
     bool reset = true;

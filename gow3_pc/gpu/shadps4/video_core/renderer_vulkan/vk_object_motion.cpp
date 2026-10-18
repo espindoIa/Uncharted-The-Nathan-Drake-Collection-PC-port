@@ -167,6 +167,10 @@ void ObjectMotion::EnsureImage(u32 width, u32 height) {
         return;
     }
     const auto device = instance.GetDevice();
+    static int resizes = 0;
+    if (resizes++ < 12) {
+        std::printf("Object motion: image %ux%u -> %ux%u\n", image_width, image_height, width, height);
+    }
     if (image) {
         scheduler.Finish();
     }

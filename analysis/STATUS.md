@@ -971,3 +971,40 @@ sample (its UAC prompt was not accepted twice): no Nsight trace was taken.
   the SRT check (GOW3_DRAIN_CS=none) 0 flashes in 600 frames, same session with toggle 61: 16 in
   300; final build 0 in 1000; U3 bar fight uncapped 113-117 FPS with and without the check
   (~5,300 drains/s both); U1 multithreaded 30 s fine.
+
+## 18 October 2026: object motion vectors in the Uncharted games; DLSS from NVIDIA
+
+- **nvngx_dlss.dll not packaged** (user decision: players get it from NVIDIA). package_windows.sh
+  ships gow3_dlss.dll (MIT bridge; it statically links NVIDIA's nvsdk_ngx_s.lib, so NVIDIA's
+  license still goes with it) and refuses a stage containing nvngx_dlss.dll. Launcher: "Get from
+  NVIDIA" (github.com/NVIDIA/DLSS lib/Windows_x86_64/rel) and "Add nvngx_dlss.dll..." (checks a
+  valid Authenticode signature by NVIDIA Corporation, copies to gow3_pc/out); apply_update.py
+  carries it into new versions (CARRY). Tested from an extracted package: without the file "DLSS
+  unavailable ... falling back to FSR 3.1"; after adding it through the launcher "DLSS: ready".
+- **Object motion for Uncharted** (GoW3's path, vk_object_motion: the vertex shader stores its
+  clip positions per vertex, the fragment writes previous - current with its depth; the compose
+  pass keeps it where that depth matches). Three gaps, all GoW3-specific selection:
+  1. Passes: GoW3's 5-target G-buffer only. Now also (GOW3_CAMERA_SOURCE=flat) draws testing a
+     scene-size D32 depth (pitch >= 3/4 of the native width: not the 960x540 passes, which made
+     the motion image alternate sizes and Finish() twice a frame) with 1-4 unblended targets,
+     with or without depth writes (U1 draws after a depth pre-pass with an equal test).
+  2. Selection: by bone-palette constant buffers (GoW3 sizes); Uncharted's vertex shaders have
+     none (only vertex streams: 12/8/4/28/36-byte strides) and their per-draw constants change
+     every frame for static objects too (GOW3_FLAT_DIFF: dword 0 and 34/38, pointers, and a
+     12-dword camera-relative matrix), so every such draw takes the motion variant, chosen
+     before the stage refresh (choosing after it refreshed the stages twice: RefreshFlatBuf and
+     SyncSrtTables per draw, -9% in U1, found with GOW3_PROFILE).
+  3. Geometry key: from the fetch shader's vertex attributes; Uncharted pulls vertices with
+     buffer loads, so the key is now the hash of the vertex shader's read buffers.
+  Results (GOW3_DUMP_TRIGGER now also dumps the DLAA path: motion, output, object attachment):
+  U1 jungle 77-78% of pixels with object vectors (Nate, Sully and wind-moved plants with their
+  own silhouettes in the motion image), also in Quality (1280x720 attachment); U2 train 90%; U3
+  bathroom 27%. 810-930k vertices of 4M per frame. U1 uncapped: ~75 FPS with, ~71-78 without
+  (noise); GPU 39% (CPU-bound). GOW3_OBJECT_MOTION=0 switches it off.
+- **Snow (U2) not done.** The DLSS bridge (ABI 2) now passes the reactive mask as NGX's
+  bias-current-colour mask, opt-in like FSR 3's mask (reactive setting). Tried as default for
+  Uncharted: U2's effects blended against its depth copy (vs e1b17168/ps ecd20bdd) are mist
+  cards, and the masks marked the rock, not the flakes; skipping the three full-screen effect
+  composites (ps b4fa3a82, 84adaaea, 53098288) left the flakes, so where the snow is drawn is not
+  found yet. GOW3_UPSCALER_TRACE prints these events ("Scene effect", "Scene composite", the
+  mask events per frame).

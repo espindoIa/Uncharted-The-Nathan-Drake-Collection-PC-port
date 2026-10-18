@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-#define GOW3_DLSS_BRIDGE_ABI 1
+#define GOW3_DLSS_BRIDGE_ABI 2
 
 typedef void (*Gow3DlssLogFn)(int warning, const char* message);
 
@@ -48,6 +48,9 @@ typedef struct Gow3DlssEvaluate {
     int32_t reset;
     float frame_ms;
     float sharpness; // 0..1; 0 leaves the output unsharpened
+    // Optional (image VK_NULL_HANDLE: none), render size, R8 0..1: how much to trust this
+    // frame's colour over the history (blended effects without motion vectors: snow, sparks).
+    Gow3DlssImage bias_mask;
 } Gow3DlssEvaluate;
 
 typedef struct Gow3DlssApi {

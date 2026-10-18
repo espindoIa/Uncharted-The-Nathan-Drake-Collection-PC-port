@@ -670,6 +670,26 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     if (upscaler->Enabled() && cb_descs[0].first) {
         upscaler->OnColorTarget(cb_descs[0].first);
     }
+    // GOW3_UPSCALER_TRACE: blended draws into the scene color without the scene depth (effects
+    // composited from other targets), 40 lines.
+    if (static const bool trace = std::getenv("GOW3_UPSCALER_TRACE") != nullptr;
+        trace && upscaler->Enabled() && cb_descs[0].first &&
+        cb_descs[0].first == upscaler->SceneColor() && db_desc.first != camera_motion->Depth() &&
+        regs.blend_control[0].enable && !regs.color_buffers[0].info.blend_bypass) {
+        static int lines = 0;
+        if (lines++ < 40) {
+            const auto* depth = db_desc.first ? &texture_cache.GetImage(db_desc.first).info : nullptr;
+            std::printf("Scene effect: vs %08llx ps %08llx indices %u instances %u depth %ux%u "
+                        "test %d write %d src %d dst %d\n",
+                        (unsigned long long)pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
+                        (unsigned long long)(key.mrt_mask ? pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash : 0),
+                        regs.num_indices, regs.num_instances.NumInstances(),
+                        depth ? depth->size.width : 0, depth ? depth->size.height : 0,
+                        int(regs.depth_control.depth_enable), int(regs.depth_control.depth_write_enable),
+                        int(regs.blend_control[0].color_src_factor),
+                        int(regs.blend_control[0].color_dst_factor));
+        }
+    }
     // gow3: scene color: a full-size RGBA16F target drawn with the scene depth.
     if (upscaler->Enabled() && db_desc.first && db_desc.first == camera_motion->Depth() &&
         cb_descs[0].first && std::popcount(key.mrt_mask) <= 2) {
@@ -688,6 +708,20 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 upscaler->OnBlendedSceneDraw();
             } else if (regs.num_indices <= 6 && regs.num_instances.NumInstances() <= 1) {
                 // A full-screen pass over the scene (the fog composite): the transparents are in.
+                static const bool trace_composite = std::getenv("GOW3_UPSCALER_TRACE") != nullptr;
+                static int composite_lines = 0;
+                if (trace_composite && composite_lines < 24) {
+                    ++composite_lines;
+                    std::printf("Scene composite: vs %08llx ps %08llx blend %d src %d dst %d func %d "
+                                "depth test %d write %d\n",
+                                (unsigned long long)pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
+                                (unsigned long long)(key.mrt_mask ? pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash : 0),
+                                int(regs.blend_control[0].enable && !regs.color_buffers[0].info.blend_bypass),
+                                int(regs.blend_control[0].color_src_factor),
+                                int(regs.blend_control[0].color_dst_factor),
+                                int(regs.blend_control[0].color_func),
+                                int(regs.depth_control.depth_enable), int(regs.depth_control.depth_write_enable));
+                }
                 upscaler->OnSceneComposite();
             }
         }
@@ -1521,6 +1555,19 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     push_data.xoffset *= target_scale[0];
     push_data.yscale *= target_scale[1];
     push_data.yoffset *= target_scale[1];
+    // Uncharted pulls its vertices with buffer loads (no fetch shader, so SetupVertexInputs
+    // leaves motion_geometry 0): the geometry is the set of buffers its vertex shader reads.
+    if (motion_draw && !motion_geometry && camera_motion->FlatSource()) {
+        const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
+        u64 hash = 0;
+        for (const auto& resource : vs.buffers) {
+            if (resource.IsSpecial() || resource.is_written) continue;
+            const auto buffer = resource.GetSharp(vs);
+            if (!buffer.Valid()) continue;
+            hash = XXH3_64bits_withSeed(&buffer, sizeof(buffer), hash);
+        }
+        motion_geometry = hash;
+    }
     if (motion_draw && motion_geometry) {
         const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
         const auto [base_vertex, first_instance] =
@@ -1536,9 +1583,14 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             const char* value = std::getenv("GOW3_OBJECT_MOTION_ALL");
             return value && value[0] == '1';
         }();
-        bool gated = !all_motion;
+        // Uncharted: no bone palettes to gate on, and its per-draw constants change every frame
+        // for static objects too (pointers into per-frame memory, camera-relative matrices; the
+        // camera always sways): every opaque scene draw gets history. Gating it cost a user
+        // data hash and three map lookups per draw and kept nothing out while playing.
+        bool gated = !all_motion && !camera_motion->FlatSource();
         u64 palette = 0;
         for (const auto& resource : vs.buffers) {
+            if (!gated) break;
             if (resource.IsSpecial()) continue;
             const auto buffer = resource.GetSharp(vs);
             const u32 size = buffer.GetSize();

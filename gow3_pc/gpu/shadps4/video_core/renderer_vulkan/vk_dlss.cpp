@@ -249,7 +249,8 @@ bool Dlss::Evaluate(vk::CommandBuffer command, const Frame& frame) {
     };
     const Gow3DlssEvaluate parameters{image(frame.color),  image(frame.depth), image(frame.motion),
                                     image(frame.output), frame.jitter_x,     frame.jitter_y,
-                                    frame.reset ? 1 : 0, frame.frame_ms,     frame.sharpness};
+                                    frame.reset ? 1 : 0, frame.frame_ms,     frame.sharpness,
+                                    frame.bias_mask.image ? image(frame.bias_mask) : Gow3DlssImage{}};
     return impl->api->Evaluate(command, &parameters) != 0;
 }
 

@@ -57,6 +57,7 @@ public:
         bool reset;
         float frame_ms;
         float sharpness;
+        Resource bias_mask{}; ///< optional (null image): R8 reactive mask, render size
     };
 
     /// DLSS quality mode for an output/render size ratio (0 DLAA .. 4 Ultra Performance).

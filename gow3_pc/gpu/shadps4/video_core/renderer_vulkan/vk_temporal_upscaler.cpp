@@ -61,6 +61,9 @@ int DumpFrame() {
         return -1;
     }
     if (remaining == 0) {
+        if (polls == 0) {
+            std::printf("Upscaler dump: trigger %s\n", trigger);
+        }
         if (++polls % 30 != 0 || std::remove(trigger) != 0) {
             return -1;
         }
@@ -238,8 +241,10 @@ bool TemporalUpscaler::Active() const {
 
 bool TemporalUpscaler::ReactiveOn() const {
     // FSR 4 takes no reactive mask: the opaque snapshot and the mask pass would be wasted.
-    return Gow3Settings::Get().reactive && !Gow3Toggle::Disabled(1u << 27) && !UseFsr4() && !UseDlss() &&
-           Gow3Settings::Get().upscaler != Gow3Settings::UpscalerTaa;
+    // DLSS takes it as its bias-current-colour mask (opt-in like FSR 3's: in Uncharted 2 the
+    // mask caught its mist cards, not its snow, 18 Oct); toggle 1 << 27 switches it off live.
+    return Gow3Settings::Get().reactive && !Gow3Toggle::Disabled(1u << 27) &&
+           !UseFsr4() && Gow3Settings::Get().upscaler != Gow3Settings::UpscalerTaa;
 }
 
 void TemporalUpscaler::OnSceneColor(VideoCore::ImageId color) {
@@ -349,6 +354,8 @@ bool TemporalUpscaler::OnFrameStart() {
         std::printf("Upscaler trace: frame %u, scene color %ux%u %s, %u scene draws, then cs",
                     trace_frame, color.info.size.width, color.info.size.height,
                     vk::to_string(color.info.pixel_format).c_str(), trace_scene_draws);
+        std::printf(" [blended %u composites %u snapshot %d mask %d]", trace_blended,
+                    trace_composites, int(opaque_valid), int(mask_ready));
         for (u32 i = 0; i < trace_dispatches; ++i) {
             std::printf(" %08llx", static_cast<unsigned long long>(trace_after[i]));
         }
@@ -356,6 +363,7 @@ bool TemporalUpscaler::OnFrameStart() {
     }
     trace_dispatches = 0;
     trace_scene_draws = 0;
+    trace_blended = trace_composites = 0;
     ldr_target = {};
     scene_color = {};
     snapshot_taken = false;
@@ -854,6 +862,7 @@ void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, 
 }
 
 void TemporalUpscaler::OnBlendedSceneDraw() {
+    ++trace_blended;
     // The mask is opt-in (menu, GOW3_REACTIVE=1): on thin mist it traded trails for
     // jitter shimmer, which looked worse. Toggle 1 << 27 switches it off.
     if (snapshot_taken || !scene_color || !Active() || !ReactiveOn()) {
@@ -928,6 +937,7 @@ void TemporalUpscaler::OnBlendedSceneDraw() {
 }
 
 void TemporalUpscaler::OnSceneComposite() {
+    ++trace_composites;
     if (!opaque_valid || mask_ready || failed || !ReactiveOn()) {
         return;
     }
@@ -1128,6 +1138,7 @@ void TemporalUpscaler::Run() {
                 vk::ImageLayout::eGeneral, all, vk::AccessFlagBits2::eShaderRead);
 
     const bool has_reactive = mask_ready || RecordReactive(input_color_view);
+    dlss_bias = has_reactive;
 
     const auto now = std::chrono::steady_clock::now();
     float frame_ms = std::chrono::duration<float, std::milli>(now - last_frame).count();
@@ -1150,6 +1161,22 @@ void TemporalUpscaler::Run() {
             {input_color, input_color_view, color.info.pixel_format, vk::ImageAspectFlagBits::eColor, w, h},
             {input_depth, input_depth_view, depth_format, vk::ImageAspectFlagBits::eDepth, w, h}, w, h,
             ow, oh, frame_ms, true);
+        // GOW3_DUMP_TRIGGER (DumpFrame): the motion vectors DLSS read and its output.
+        if (const int dump = dispatched ? DumpFrame() : -1; dump >= 0) {
+            DumpImages(instance, scheduler, cmdbuf, dump,
+                       {{vk::Image(motion_image), w, h, 4, "motion", "rg16f"},
+                        {vk::Image(output_image), ow, oh, 8, "output", "rgba16f"}});
+            if (dlss_bias) {
+                DumpImages(instance, scheduler, cmdbuf, dump,
+                           {{vk::Image(reactive_image), w, h, 1, "bias", "r8"}});
+            }
+            if (const vk::Image object = camera_motion.ObjectMotionImage(w, h)) {
+                DumpImages(instance, scheduler, cmdbuf, dump,
+                           {{object, w, h, 16, "object", "rgba32f"}});
+            } else {
+                std::printf("Upscaler dump: no object motion image at %ux%u\n", w, h);
+            }
+        }
     } else {
         FfxVkPortableUpscaleDispatchInfo info{};
         info.structSize = sizeof(info);
@@ -1681,6 +1708,7 @@ void TemporalUpscaler::RunScaled() {
                 vk::ImageLayout::eUndefined, all, vk::AccessFlagBits2::eNone,
                 vk::ImageLayout::eGeneral, all, rw);
         bool ok4 = true;
+        dlss_bias = mask_ready && ReactiveOn();
         if (Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa) {
             RecordTaa(cmdbuf, color_view, depth_view);
         } else if (UseDlss()) {
@@ -2076,6 +2104,10 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
             .reset = reset,
             .frame_ms = frame_ms,
             .sharpness = settings.sharpen ? std::min(settings.sharpness.load(), 1.0f) : 0.0f,
+            .bias_mask = dlss_bias ? Dlss::Resource{vk::Image(reactive_image), *reactive_view,
+                                                    vk::Format::eR8Unorm,
+                                                    vk::ImageAspectFlagBits::eColor, w, h}
+                                   : Dlss::Resource{},
         });
     }
     if (!ok) {

@@ -237,6 +237,11 @@ int32_t Evaluate(VkCommandBuffer command, const Gow3DlssEvaluate* evaluate) {
     parameters.InMVScaleX = parameters.InMVScaleY = 1.0f;
     parameters.InPreExposure = parameters.InExposureScale = 1.0f;
     parameters.InFrameTimeDeltaInMsec = evaluate->frame_ms;
+    NVSDK_NGX_Resource_VK bias{};
+    if (evaluate->bias_mask.image != VK_NULL_HANDLE) {
+        bias = Wrap(evaluate->bias_mask, false);
+        parameters.pInBiasCurrentColorMask = &bias;
+    }
     return Check("DLSS evaluation", NGX_VULKAN_EVALUATE_DLSS_EXT(command, state.feature,
                                                                 state.parameters, &parameters))
                ? 1

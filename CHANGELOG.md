@@ -20,6 +20,12 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 - **Multithreaded rendering is on by default** (Performance tab, per game; launcher settings saved
   before switch to it once). Uncharted 2's train flashed white for single frames with it (later
   draws were prepared before a compute copy of their constants ran); fixed.
+- **Characters no longer leave trails with DLSS/FSR in the Uncharted games.** Nate, the other
+  characters and wind-blown plants get their own motion vectors (before, only the camera's):
+  76-90% of the picture in U1's jungle and U2's train scene, at no measurable frame-rate cost.
+  The snow in Uncharted 2 still has none (its flakes can double faintly).
+- **DLSS is installed from NVIDIA:** packages no longer include nvngx_dlss.dll; the launcher's
+  DLSS row opens NVIDIA's download page and adds the file (it checks NVIDIA's signature).
 - **Launcher:** NVIDIA DLSS option (Display tab) when the DLSS files are installed; packages built
   with them include NVIDIA's license and attribution.
 - **DLSS (and FSR 3/4, TAA) in Drake's Fortune and Uncharted 3** too, DLAA and the scaled modes,
