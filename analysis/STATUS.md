@@ -833,3 +833,79 @@ Plan and test list: analysis/PLAN.md.
 - GitHub: #1 (U3 crash) and #4 (U1 crash after the boat scene, v0.1.1; user-tested fixed) answered
   and closed.
 
+
+## 18 October 2026: performance pass (GPU command thread), multithreaded-rendering hang
+
+Measurement setup (RTX 5070, Ryzen 5 5600, 1080p native, vsync and frame limit off, engine cap
+120 FPS): GOW3_FRAME_TIMES (every flip interval; tools/frametimes.py: mean/p50/p95/p99/1% low),
+nvidia-smi utilization, the 5 s Frame stats line; routes replayed with GOW3_PAD_REPLAY
+(C:\dev\routes: U3 bar fight, generic explore route); A/B with live toggles in alternating 5 s
+windows. Profiles: GOW3_PROFILE with GOW3_PROFILE_MS=5 (the default 1 ms suspension inflated waits
+from ~8% to ~30%), symbolized with llvm-symbolizer. Nsight Systems needs administrator rights to
+sample (its UAC prompt was not accepted twice): no Nsight trace was taken.
+
+- **U3 bar fight was CPU-bound**: 52.7-54.2 FPS, p99 25-27.7 ms, GPU 41-46%, GPU command thread
+  busy 99.9%. Profile (inclusive): pipeline lookup 12.4% -> RefreshFlatBuf 10.5% -> SyncSrtTables
+  10.1% -> Rasterizer::IsMapped 5.4%, whose shared lock allocated and freed a thread_local
+  unordered_map node per acquisition (~7% in lock bookkeeping); host-copy waits 13.9%; GPU
+  readback waits 7%.
+  - IsMapped: per-thread cache of mapped intervals, valid while mapped_generation (bumped before
+    and after every map/unmap under the lock) is unchanged (toggle bit 59 off).
+  - Recursive locks: held locks in a 16-entry per-thread array (toggle bit 60: map only).
+  - Same session, alternating 5 s windows: 16.11 vs 16.85 ms (-4.4%), p99 19.4 vs 20.0 ms.
+    SyncSrtTables 10.1% -> 3.9%, pipeline lookup 12.4% -> 6.1%. The thread now waits for the GPU
+    ~30% of its time (Frame stats "GPU ticks 29.4%"): CPU writes into pages holding GPU data in
+    flight (1852 per 5 s, 1561 of them beside the GPU bytes) wait for the readback
+    (DownloadMemory -> Scheduler::Finish). Inherent to the readback protocol; the lazy-write
+    shortcut stays off (it corrupted U2's skinning tables on 15 Oct).
+- **Multithreaded rendering** (GOW3_DRAW_PIPE/GOW3_VK_RECORD_THREAD, launcher option, off by
+  default): U3 bar 62.8 -> 80.0 FPS (+27%), p99 18.7 -> 14.0 ms, worst 20.6 -> 14.9 ms.
+  - It hung U3 after ~10.6 minutes (bathroom after the bar): no frames, GPU command thread at
+    100% CPU in std::set::find under BufferCache::WriteBackGpuData (a readback range tree with a
+    cycle), a job thread waiting in a write fault. tools/hangdump (dbghelp StackWalk64 of every
+    thread of a live process) found it. GOW3_READBACK_RACE=1 (owner check in every function that
+    touches pending_readbacks) reported 7 overlaps in 3 minutes: the GPU command thread running a
+    queued ReadMemory request while DrawRec was in CompleteReadbacks / ObtainBuffer /
+    WriteThrough. Cause: Liverpool::ProcessCommands drained the draw pipe only if num_commands was
+    set on entry; a command queued just after that check ran beside the recording thread. Fixed:
+    drain before each command. After: 0 overlaps; 15-minute U3 soak (route replayed, game
+    progressed past the hang point): no hang/crash/assert, 136521 frames, p99 12.3 ms.
+  - U2 DLSS did not run with multithreaded rendering: the flat user data reaches BindBuffers as a
+    constant-ring copy, so the flat-camera hook never saw it. The ring branch now feeds the camera
+    search; "DLSS 960x540 -> 1920x1080" with UNCHARTED_MULTITHREADED_U2=1.
+- Tests (MSYS2 CLANG64): flat-camera, scene-coord and the other host tests that build on Windows
+  pass, except orb-multiplier-test and stat-multipliers-test (God of War III settings asserts in
+  gow3_settings.cpp, untouched since 05e81f4; not rerun at that commit). camera-motion,
+  fiber, graphics-settings, motion-shader, pipeline-binary-cache, scene-resolution, taa-shader,
+  upscaler-support and videodec2 tests do not build on Windows (Linux-only stubs).
+- Research (primary sources, 18 Oct): no Claude Code skill or plugin for Vulkan/C++/emulator
+  profiling in the official catalogs (claude-plugins-official, anthropics/skills); useful MCP
+  servers: Tracy's own MCP server (wolfpld/tracy extra/mcp, Tracy 0.14; upstream shadPS4 already
+  links Tracy 0.11.1, which would need an update), RenderDoc MCPs (JiaboLi-GitHub/renderdoc-mcp),
+  an ETW trace MCP (nijosmsft/etw-mcp). None was installed or tested here.
+- **More checks, 18 Oct (after the fixes above):**
+  - U2, multithreaded + DLSS Performance (launcher-written ini: upscaler=dlss, preset=3), explore
+    route replayed 5 minutes: 0 readback-race reports, no assert, 40125 frames, p99 10.1 ms.
+  - U1, multithreaded: game assert `GetRenderFrameParams(frameToFreeInstancesFor)->m_gfxEopTick`
+    after ~5 minutes (2 of 2 runs); single-threaded 5 minutes fine (p99 15.9 ms). The pre-change
+    build (01b17c9, worktree) asserts too, after ~30 s of play: not introduced here. Lead: U1
+    defers ~1800 end-of-pipe fences per second behind ray-cast readbacks ("ray-cast fences written
+    after their readback", 2.2-2.6 ms on average, up to 98 ms with multithreaded rendering); the
+    game checks a frame's EOP tick two frames later. Multithreaded rendering stays off by default.
+  - Vulkan validation layer (SDK 1.4.363, sync validation on), U3 bar fight replayed ~2 minutes:
+    the same 5 ids in the pre-change build, current single-threaded and current multithreaded
+    (VUID-vkCmdCopyImage-srcImage-01548/-srcSubresource-10211/-10212, SYNC-HAZARD-WRITE-AFTER-WRITE
+    and READ-AFTER-WRITE on U3's 960x540 D32S8 half-resolution depth): nothing new.
+  - Pixel check of toggles 59+60 on a paused U3 frame: inconclusive (the paused frame is not static:
+    two captures with the same settings differ in 90626 pixels, max 32; on vs off 52436, max 24).
+  - Package (DLSS_BRIDGE/DLSS_SDK set): extracted to an empty folder and run with its own Python:
+    "DLSS: ready", "DLSS 1920x1080 -> 1920x1080, quality 0, preset 11", 60 FPS; without the two DLLs
+    "DLSS unavailable (...not installed); falling back to FSR 3.1", 60 FPS, no errors. A non-NVIDIA
+    GPU was not available (the integrated Radeon is no longer in the Vulkan device list).
+  - U1 and U3 cameras: UNCHARTED_UPSCALER_EXPERIMENT=1 finds them with the same flat-user-data
+    search (U3: vertex user data float 86, U1: float 77; depth 1 - 0.24/z as in U2). U1 jungle,
+    fast pan: plain frame-to-frame 36.5% of pixels below 24/255, debug view mode 4 (reprojected)
+    83.4-85.4% (residue: wind-animated foliage, the revealed screen edge). U3 not validated: the
+    reached scenes (bathroom brawl) have a scripted camera (plain frames already 98.6% equal).
+    Still to find per game: the HDR scene color and the first post-processing dispatch (U2's
+    aec539f0) before DLSS can be enabled there.

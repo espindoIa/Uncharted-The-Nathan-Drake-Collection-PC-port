@@ -4,6 +4,20 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 18 October 2026 (unreleased)
+
+- **Faster in CPU-heavy scenes.** The PS4 GPU command processing spent much of its time checking
+  memory mappings and in lock bookkeeping; both are cheaper now (Uncharted 3's bar fight: frame
+  time -4.4%).
+- **Multithreaded rendering no longer hangs.** With the option on, Uncharted 3 could freeze after
+  about 10 minutes (two threads changed the same readback bookkeeping). Fixed; on a 6-core Ryzen
+  the option now gives +27% in the Uncharted 3 bar fight (62.8 -> 80 FPS at 1080p).
+- **DLSS works with multithreaded rendering** in Uncharted 2 (it silently did not run before).
+- Known: with multithreaded rendering Drake's Fortune can stop with the game assert
+  `m_gfxEopTick` within minutes (also before these changes); keep the option off there.
+- **Launcher:** NVIDIA DLSS option (Display tab) when the DLSS files are installed; packages built
+  with them include NVIDIA's license and attribution.
+
 ## 17 October 2026 (unreleased)
 
 - **Uncharted 2: DLSS (DLAA) and the temporal upscalers work.** The game's camera is read from the
