@@ -452,20 +452,13 @@ def run_game(args, game, executable, guest_args, loadexec):
         # GPU-written images now come back with the frame's end-of-pipe fence (16 Oct). Drake's
         # Fortune and Uncharted 3 aim sharp without it, so they skip the copy and the wait.
         env.setdefault("GOW3_TINY_IMAGE_READBACK", "1")
-    # Temporal upscalers need the camera and scene depth of each frame. Uncharted 2 copies its
-    # camera into every scene vertex shader's user data (flat_camera.h, 17 Oct capture) and starts
-    # post-processing with cs aec539f0 (bloom downsample of the HDR scene color): with
+    # Temporal upscalers need the camera and scene depth of each frame. The three games copy their
+    # camera into every scene vertex shader's user data (flat_camera.h; U2 17 Oct, U1 and U3
+    # 18 Oct) and start post-processing with the same cs aec539f0 (bloom downsample of the HDR
+    # scene color; GOW3_UPSCALER_TRACE=1 lists the dispatches after the last scene draw): with
     # upscaler=dlss (or fsr3/fsr4/taa) in its settings file the runtime runs it on that color.
-    # The other games keep it off until their cameras are found.
     upscaler = ini_value(Path(env["GOW3_CONFIG"]), "upscaler", "off")
-    # UNCHARTED_UPSCALER_EXPERIMENT=1: the same camera search in the other games (finding their
-    # cameras and post-processing start; GOW3_UPSCALE_BEFORE_CS from the environment).
-    experiment = os.environ.get("UNCHARTED_UPSCALER_EXPERIMENT") == "1"
-    if experiment and upscaler not in ("off", "none", ""):
-        env.setdefault("GOW3_CAMERA_SOURCE", "flat")
-        env.setdefault("GOW3_SCENE_SIZE", f"{render_size[0]}x{render_size[1]}")
-        env.setdefault("GOW3_SCENE_HALF_RES", "0")
-    elif executable == "big2-ps4_Shipping.elf" and upscaler not in ("off", "none", ""):
+    if upscaler not in ("off", "none", ""):
         env.setdefault("GOW3_CAMERA_SOURCE", "flat")
         env.setdefault("GOW3_UPSCALE_BEFORE_CS", "aec539f0")
         # The render resolution above is the upscaler's output: DLSS/FSR presets below DLAA draw

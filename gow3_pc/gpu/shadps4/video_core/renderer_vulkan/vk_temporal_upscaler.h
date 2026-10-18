@@ -197,6 +197,10 @@ private:
     u64 trigger_hash = 0x9a9cf8a9;
     VideoCore::ImageId scene_color{};
     bool done_this_frame = false;
+    u32 trace_frame = 0;      ///< GOW3_UPSCALER_TRACE: frames since start
+    u32 trace_dispatches = 0;  ///< GOW3_UPSCALER_TRACE: dispatches since the last scene draw
+    u32 trace_scene_draws = 0; ///< GOW3_UPSCALER_TRACE: scene color draws this frame
+    std::array<u64, 16> trace_after{}; ///< distinct in a row
     u32 preset_file_frames = 0; ///< GOW3_PRESET_FILE polling
     int applied_output = -1;
     bool snapshot_taken = false;

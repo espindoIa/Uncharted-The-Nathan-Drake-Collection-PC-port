@@ -909,3 +909,26 @@ sample (its UAC prompt was not accepted twice): no Nsight trace was taken.
     reached scenes (bathroom brawl) have a scripted camera (plain frames already 98.6% equal).
     Still to find per game: the HDR scene color and the first post-processing dispatch (U2's
     aec539f0) before DLSS can be enabled there.
+- **U1 and U3 DLSS, 18 Oct.** GOW3_UPSCALER_TRACE=1 now prints, every 60th frame, the scene color
+  and the distinct compute shaders dispatched after the frame's last scene color draw. Both games
+  use U2's chain: RGBA16F 1920x1080 scene color, then cs 6a6422a9 (copies), e8746089, aec539f0
+  (bloom downsample), 7095d6c2, 04f81a8f... so all three trigger before aec539f0; the probe now
+  sets the upscaler environment for every game with upscaler != off (the experiment switch is
+  gone) and the launcher's DLSS text no longer says U2 only.
+  - U3 camera validated in the bar fight with DLSS's own motion vectors: while the camera moves,
+    Laplacian sharpness of a wall crop 1.47-1.52 with the computed vectors vs 1.14-1.24 with zero
+    vectors (toggle 58; the graffiti doubles). The debug overlay cannot run there (the frame before
+    the display pass is R8). The camera search finds float 86 or 71 depending on the first scene
+    shader of the frame.
+  - U1 in scaled presets showed only characters and some foliage on a fog-colored world.
+    GOW3_SCENE_DEBUG (now with guest addresses and native writes): U1 lays down its scene depth
+    (1130438000) in ~94 depth-only draws before the first color draw; the scene only started at a
+    draw with a color target, so the pre-pass stayed native and the reduced world draws (equal
+    depth test) ran against a resampled depth and failed. flat_scene_draw no longer needs a color
+    target. After it: U1 Quality correct, 142 of 207 scene passes reduced; U3 Quality and U2
+    Quality unchanged (U2 still 22 of ~190, as before the change).
+  - Checked at 1080p, RTX 5070: U1 DLAA (walking Nate, no trails; grass edges smoother than
+    without), U1/U3/U2 Quality 1280x720 -> 1920x1080. U1 at Quality 68 FPS vs ~70-77 at DLAA: CPU
+    bound at 1080p (2300 draws per frame), like U2.
+  - The intermittent U1 `m_gfxEopTick` assert also hit two single-threaded runs during loading
+    (34 s and 93 s; the next three runs were fine).

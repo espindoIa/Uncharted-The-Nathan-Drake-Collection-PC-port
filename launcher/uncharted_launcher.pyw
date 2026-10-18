@@ -78,7 +78,7 @@ INI_DEFAULTS = {
 # Performance). With a mode below DLAA the render resolution above is DLSS's output.
 DLSS_MODES = [("off", "Off"), ("0", "DLAA"), ("1", "Quality"), ("2", "Balanced"), ("3", "Performance"),
               ("4", "Ultra Perf.")]
-DLSS_GAMES = ("u2",)  # games whose camera the runtime finds (tools/probe_uncharted.py)
+DLSS_GAMES = ("u1", "u2", "u3")  # games whose camera the runtime finds (tools/probe_uncharted.py)
 
 
 def dlss_available():
@@ -881,8 +881,8 @@ class Launcher:
             self.widgets["dlss"] = self.row(
                 page, "NVIDIA DLSS",
                 "NVIDIA RTX GPUs. DLAA smooths edges at the render resolution; the other modes draw the scene "
-                "smaller and rebuild it at the render resolution above (set it to your screen's). Uncharted 2 "
-                "only for now; on other GPUs the game runs without it.", dlss)
+                "smaller and rebuild it at the render resolution above (set it to your screen's). "
+                "On other GPUs the game runs without it.", dlss)
 
         def sharpening(parent):
             value = self.ini.get("rcas_strength", "75") if self.ini.get("rcas", "1") == "1" else "off"

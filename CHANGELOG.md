@@ -17,6 +17,10 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   `m_gfxEopTick` within minutes (also before these changes); keep the option off there.
 - **Launcher:** NVIDIA DLSS option (Display tab) when the DLSS files are installed; packages built
   with them include NVIDIA's license and attribution.
+- **DLSS (and FSR 3/4, TAA) in Drake's Fortune and Uncharted 3** too, DLAA and the scaled modes,
+  like Uncharted 2: the same camera search and the same point before the bloom. Drake's Fortune
+  in the scaled modes first showed only characters on a fog-colored world (its depth pre-pass was
+  drawn at full size); fixed.
 
 ## 17 October 2026 (unreleased)
 

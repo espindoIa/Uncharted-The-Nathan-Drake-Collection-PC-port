@@ -244,6 +244,8 @@ bool TemporalUpscaler::ReactiveOn() const {
 
 void TemporalUpscaler::OnSceneColor(VideoCore::ImageId color) {
     scene_color = color;
+    trace_dispatches = 0;
+    ++trace_scene_draws;
 }
 
 namespace {
@@ -341,6 +343,19 @@ bool TemporalUpscaler::OnFrameStart() {
     ui_phase = false;
     ui_read_barrier = false;
     done_this_frame = false;
+    static const bool trace = std::getenv("GOW3_UPSCALER_TRACE") != nullptr;
+    if (trace && scene_color && ++trace_frame % 60 == 0 && trace_frame <= 3600) {
+        const auto& color = texture_cache.GetImage(scene_color);
+        std::printf("Upscaler trace: frame %u, scene color %ux%u %s, %u scene draws, then cs",
+                    trace_frame, color.info.size.width, color.info.size.height,
+                    vk::to_string(color.info.pixel_format).c_str(), trace_scene_draws);
+        for (u32 i = 0; i < trace_dispatches; ++i) {
+            std::printf(" %08llx", static_cast<unsigned long long>(trace_after[i]));
+        }
+        std::printf("\n");
+    }
+    trace_dispatches = 0;
+    trace_scene_draws = 0;
     ldr_target = {};
     scene_color = {};
     snapshot_taken = false;
@@ -363,6 +378,12 @@ bool TemporalUpscaler::OnFrameStart() {
 void TemporalUpscaler::OnDispatch(u64 cs_hash) {
     // GOW3_UPSCALER_TRACE=1: why the trigger dispatch did not run the upscaler (first 40).
     static const bool trace = std::getenv("GOW3_UPSCALER_TRACE") != nullptr;
+    // The dispatches after the frame's last scene color draw (finding a game's post-processing
+    // start for GOW3_UPSCALE_BEFORE_CS), printed at the next frame start.
+    if (trace && scene_color && trace_dispatches < trace_after.size() &&
+        (trace_dispatches == 0 || trace_after[trace_dispatches - 1] != cs_hash)) {
+        trace_after[trace_dispatches++] = cs_hash;
+    }
     if (trace && cs_hash == trigger_hash) {
         static int lines = 0;
         if (lines++ < 40) {

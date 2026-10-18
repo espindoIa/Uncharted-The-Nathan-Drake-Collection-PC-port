@@ -662,8 +662,10 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         }
     }
     // Uncharted: scene geometry (light pre-pass, materials) draws with the jittered scene depth;
-    // its textures take the upscaler's LOD bias (BindResources).
-    flat_scene_draw = camera_motion->FlatSource() && db_desc.first && cb_descs[0].first &&
+    // its textures take the upscaler's LOD bias (BindResources). Depth-only draws count too:
+    // Drake's Fortune lays down the scene depth first and draws the world with an equal depth
+    // test, which fails everywhere against a depth drawn at the native size and resampled.
+    flat_scene_draw = camera_motion->FlatSource() && db_desc.first &&
                       (db_desc.first == flat_camera_depth || JitteredDepth(db_desc.first));
     if (upscaler->Enabled() && cb_descs[0].first) {
         upscaler->OnColorTarget(cb_descs[0].first);
@@ -4365,7 +4367,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
                 image.binding.needs_rebind || desc.view_info.range.base.layer ||
                 !same_size(image, desc.view_info.range.base.level)) reduced = false;
             if (debug_pass) {
-                why += fmt::format(" [{} {}x{} eligible {} bound {} rebind {} level {} layer {}]",
+                why += fmt::format(" [{:x} {} {}x{} eligible {} bound {} rebind {} level {} layer {}]",
+                                   image.info.guest_address,
                                    vk::to_string(image.info.pixel_format), image.info.size.width,
                                    image.info.size.height, scene_targets->Eligible(image),
                                    u32(image.binding.is_bound), u32(image.binding.needs_rebind),
@@ -4381,7 +4384,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     if (debug_pass) {
         if (db_desc.first) {
             const auto& depth = texture_cache.GetImage(db_desc.first);
-            why += fmt::format(" depth [{} {}x{} eligible {}]",
+            why += fmt::format(" depth [{:x} {} {}x{} eligible {}]", depth.info.guest_address,
                                vk::to_string(depth.info.pixel_format), depth.info.size.width,
                                depth.info.size.height, scene_targets->Eligible(depth));
         }
