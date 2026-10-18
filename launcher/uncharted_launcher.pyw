@@ -1685,8 +1685,8 @@ class Launcher:
         self.widgets["multithreaded"] = self.row(
             page, "Multithreaded rendering (experimental)",
             "Prepares the picture on a second CPU core: more FPS on some PCs, mostly in Uncharted 2 and 3 "
-            "(on by default; keep Frames queued at 1 with it). Turn it off if a game hangs while loading. Drake's "
-            "Fortune always runs without it.", multithreaded)
+            "(on by default; keep Frames queued at 1 with it). Turn it off if a game hangs while loading, or "
+            "in Drake's Fortune if its guns flicker grey.", multithreaded)
 
         def job_threads(parent):
             value = "off" if self.config.get("job_sleep", "auto") == "off" else "on"

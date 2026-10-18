@@ -23,8 +23,8 @@ adds the work below on top of 0.3.0. Where both did the same thing, one was kept
 - **NVIDIA's nvngx_dlss.dll is not in the package** (its license does not fit the port's GPL): the
   launcher opens NVIDIA's download page and adds the file after checking NVIDIA's signature. DLSS
   is then listed under Anti-aliasing.
-- **Multithreaded rendering is on by default** in Uncharted 2 and 3 (Drake's Fortune keeps it off,
-  as in 0.3.0): its hang after about 10 minutes is fixed, and on a 6-core Ryzen it gives +27% in
+- **Multithreaded rendering is on by default** in all three games (0.3.0 kept it off in Drake's
+  Fortune for flickering grey guns, GitHub #23: turn it off there if they show up): its hang after about 10 minutes is fixed, and on a 6-core Ryzen it gives +27% in
   the Uncharted 3 bar fight (62.8 -> 80 FPS at 1080p). Uncharted 2's train flashing white with it
   is fixed, and so are three rare ordering problems (among them Uncharted 2's crosshair centre).
 - **Faster GPU command processing.** Memory-mapping checks and lock bookkeeping are cheaper

@@ -905,15 +905,11 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         if limit.isdigit() and (int(limit) == 0 or int(limit) > 60):
             env["GOW3_VBLANK_HZ"] = "0"
     multithreaded = os.environ.get(f"UNCHARTED_MULTITHREADED_{game_key.upper()}")
-    # Drake's Fortune: its weapons (and at times other objects) drew with another draw's look on
-    # some frames with multithreaded rendering (flat grey guns, the player and GitHub #23, 18 Oct
-    # 2026), and it gains nothing from it (4 cores: 101.8 vs 103.2 FPS). Off until that is fixed,
-    # also when no launcher choice is given (the default below is on);
-    # UNCHARTED_U1_MULTITHREADED_TEST=1 keeps the launcher's choice (tests).
-    if executable == "eboot.bin" and multithreaded != "0" and \
-            os.environ.get("UNCHARTED_U1_MULTITHREADED_TEST") != "1":
-        print("Multithreaded rendering: off for Drake's Fortune (its weapons flicker with it)")
-        multithreaded = "0"
+    # Drake's Fortune follows the launcher too (on by default, as the other two; user, 19 Oct). 0.3.0
+    # forced it off: its weapons (and at times other objects) drew with another draw's look on
+    # some frames (flat grey guns, GitHub #23, 18 Oct 2026). The fork's draw-pipe ordering fixes
+    # (constant ring drains, register scan) may cover it; not verified. If the guns flicker grey,
+    # turn the option off for Drake's Fortune.
     if multithreaded is not None:
         env["GOW3_DRAW_PIPE"] = multithreaded
         env["GOW3_VK_RECORD_THREAD"] = multithreaded

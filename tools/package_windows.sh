@@ -91,15 +91,17 @@ done
     "$pacman" -Qi "${packages[@]}" | awk '/^Name /{print ""} /^(Name|Version|Licenses|URL) /{print}'
 } > "$licenses/THIRD-PARTY.txt"
 
-# DLAA and FSR 4 Native AA (tools/fetch_aa_files.sh), when fetched: NVIDIA's DLSS DLL and the
-# bridge under their own licenses, and the FSR 4 native model. Without them the menus leave the
-# two out.
-if [[ -f gow3_pc/out/gow3_dlss.dll && -f gow3_pc/out/nvngx_dlss.dll ]]; then
-    cp gow3_pc/out/gow3_dlss.dll gow3_pc/out/nvngx_dlss.dll "$stage/gow3_pc/out/"
+# DLSS and FSR 4 (tools/fetch_aa_files.sh), when fetched: the DLSS bridge under its own license
+# (not NVIDIA's nvngx_dlss.dll: see above; the launcher adds it) and the FSR 4 native model.
+# Without them the menus leave the two out.
+if [[ -f gow3_pc/out/gow3_dlss.dll && ! -f $stage/gow3_pc/out/gow3_dlss.dll ]] &&
+        compgen -G "downloads/dlss-sdk-*/LICENSE.txt" > /dev/null; then
+    cp gow3_pc/out/gow3_dlss.dll "$stage/gow3_pc/out/"
     mkdir -p "$licenses/nvidia-dlss" "$licenses/gow3-dlss-bridge"
     cp downloads/dlss-sdk-*/LICENSE.txt "$licenses/nvidia-dlss/LICENSE.txt"
     cp gow3_pc/gpu/dlss_bridge/LICENSE.txt "$licenses/gow3-dlss-bridge/LICENSE.txt"
 fi
+[[ ! -e $stage/gow3_pc/out/nvngx_dlss.dll ]] || { echo "nvngx_dlss.dll must not be packaged" >&2; exit 1; }
 if [[ -f gow3_pc/fsr4_shaders/fsr4_model_v07_i8_native_1080_pre.spv ]]; then
     mkdir -p "$stage/gow3_pc/fsr4_shaders" "$licenses/fsr4"
     cp gow3_pc/fsr4_shaders/LICENSE-FSR4-v07.txt gow3_pc/fsr4_shaders/*.spv gow3_pc/fsr4_shaders/*.bin \

@@ -1461,7 +1461,8 @@ Merge choices (details in the sections below and in CHANGELOG.md):
 - IsMapped cache: the fork's (generation bumped before and after map/unmap, Gow3Toggle switch);
   ring copies: the fork's reuse plus 0.3.0's GOW3_RING_STATS; exec watches accept both r: forms.
 - nvngx_dlss.dll stays out of the package (launcher adds it); multithreaded rendering on by
-  default in U2/U3 (U1 forced off as in 0.3.0).
+  default in all three (0.3.0 forced it off in U1 for GitHub #23's grey guns; the user wants it
+  on, 19 Oct; the fork's draw-pipe ordering fixes may cover #23, not verified).
 
 
 ## 18 October 2026: performance pass (GPU command thread), multithreaded-rendering hang
