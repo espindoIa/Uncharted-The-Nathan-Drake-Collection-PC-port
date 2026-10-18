@@ -647,6 +647,20 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     if (gbuffer_draw) {
         camera_motion->OnGBufferPass(db_desc.first);
     }
+    // Uncharted 2: the first scene-size D32 draw of a frame whose vertex user data carries a
+    // perspective camera gives the camera and the scene depth (light pre-pass normals).
+    flat_camera_depth = {};
+    if (camera_motion->FlatSource() && db_desc.first) {
+        const auto& depth = texture_cache.GetImage(db_desc.first);
+        const auto format = depth.info.pixel_format;
+        if ((format == vk::Format::eD32Sfloat || format == vk::Format::eD32SfloatS8Uint) &&
+            depth.info.size.width >= 1024) {
+            display_frame_open = false;
+            if (camera_motion->WantsCamera()) {
+                flat_camera_depth = db_desc.first;
+            }
+        }
+    }
     if (upscaler->Enabled() && cb_descs[0].first) {
         upscaler->OnColorTarget(cb_descs[0].first);
     }
@@ -688,6 +702,24 @@ static std::pair<u32, u32> GetDrawOffsets(
         }
     }
     return {vertex_offset, instance_offset};
+}
+
+bool Rasterizer::JitteredDepth(VideoCore::ImageId depth) {
+    if (!depth || !camera_motion->Depth()) {
+        return false;
+    }
+    if (depth == camera_motion->Depth()) {
+        return true;
+    }
+    // Uncharted 2 copies the scene depth (cs 6a6422a9) and draws its last scene layers
+    // (characters' effects, weather) against the copy: same size and format as the scene depth.
+    if (!camera_motion->FlatSource()) {
+        return false;
+    }
+    const auto& scene = texture_cache.GetImage(camera_motion->Depth()).info;
+    const auto& info = texture_cache.GetImage(depth).info;
+    return info.pixel_format == scene.pixel_format && info.size.width == scene.size.width &&
+           info.size.height == scene.size.height;
 }
 
 void Rasterizer::EliminateFastClear() {
@@ -1393,8 +1425,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const auto& regs = Regs();
     // gow3: the pass copying a finished frame to a display buffer; the previous draw's
     // target is that frame.
+    // Uncharted 2 draws into the display buffer four times a frame (composite, UI, and a copy
+    // back after a pass elsewhere): only the first one after scene drawing starts a frame.
     if (camera_motion->Enabled() && regs.color_buffers[0] &&
-        FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
+        FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address()) &&
+        !(camera_motion->FlatSource() && display_frame_open)) {
+        display_frame_open = true;
         scene_started = false;
         camera_motion->OnDisplayPass(cb_descs[0].first);
         if (upscaler->OnFrameStart()) {
@@ -1411,7 +1447,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // gow3: without camera motion (Uncharted) the GPU profiler marks frames at the display pass
     // too. Its results are read with a wait four frames later, so everything recorded so far is
     // submitted first (a wait on unsubmitted timestamps hung the menu).
-    else if (GpuProfiler::Get() && regs.color_buffers[0] &&
+    else if (!camera_motion->Enabled() && GpuProfiler::Get() && regs.color_buffers[0] &&
              FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
         Flush();
         NoteFrameStart();
@@ -1563,7 +1599,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // gow3: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
     draw_jitter = {};
-    if (upscaler->Enabled() && db_desc.first && db_desc.first == camera_motion->Depth() &&
+    if (upscaler->Enabled() && JitteredDepth(db_desc.first) &&
         (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
         draw_jitter = upscaler->Jitter();
     }
@@ -1750,7 +1786,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     push_data.yoffset *= target_scale[1];
     pipeline->BindResources(set_writes, push_data);
     draw_jitter = {};
-    if (upscaler->Enabled() && db_desc.first && db_desc.first == camera_motion->Depth()) {
+    if (upscaler->Enabled() && JitteredDepth(db_desc.first)) {
         draw_jitter = upscaler->Jitter();
     }
     UpdateDynamicState(pipeline, is_indexed);
@@ -3371,6 +3407,12 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 if (FrameCapture::Active()) {
                     FrameCapture::Buffer(stage.pgm_hash, binding.buffer, 0,
                                          stage.FlatUserData().data(), ubo_size);
+                }
+                if (flat_camera_depth && stage.sw_stage == Shader::SwStage::Vertex &&
+                    camera_motion->OnFlatConstants(stage.FlatUserData().data(),
+                                                   stage.FlatUserData().size(),
+                                                   flat_camera_depth)) {
+                    flat_camera_depth = {};
                 }
                 const u64 offset =
                     vk_buffer.Copy(stage.FlatUserData().data(), ubo_size, alignment);

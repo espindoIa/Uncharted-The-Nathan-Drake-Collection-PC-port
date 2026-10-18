@@ -4,6 +4,15 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## 17 October 2026 (unreleased)
+
+- **Uncharted 2: DLSS (DLAA) and the temporal upscalers work.** The game's camera is read from the
+  data it copies into every scene shader, so the runtime can make motion vectors and jitter the
+  scene. With `upscaler=dlss` (or `fsr3`, `fsr4`, `taa`) in `probe-u2.ini` and `gow3_dlss.dll` plus
+  NVIDIA's `nvngx_dlss.dll` next to the runtime, Uncharted 2 runs DLAA on its HDR scene before the
+  bloom (60 FPS on an RTX 5070 at 1080p). Characters and snow have no motion vectors of their own
+  yet; Uncharted 1 and 3 and lower render resolutions are not done.
+
 ## 16 October 2026 (0.1.2)
 
 - **Uncharted 2: blurry background while aiming fixed.** The aiming depth of field reads its focus

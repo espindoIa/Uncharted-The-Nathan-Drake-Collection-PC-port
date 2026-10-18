@@ -452,7 +452,17 @@ def run_game(args, game, executable, guest_args, loadexec):
         # GPU-written images now come back with the frame's end-of-pipe fence (16 Oct). Drake's
         # Fortune and Uncharted 3 aim sharp without it, so they skip the copy and the wait.
         env.setdefault("GOW3_TINY_IMAGE_READBACK", "1")
-    env["GOW3_UPSCALER"] = "none"
+    # Temporal upscalers need the camera and scene depth of each frame. Uncharted 2 copies its
+    # camera into every scene vertex shader's user data (flat_camera.h, 17 Oct capture) and starts
+    # post-processing with cs aec539f0 (bloom downsample of the HDR scene color): with
+    # upscaler=dlss (or fsr3/fsr4/taa) in its settings file the runtime runs it on that color.
+    # The other games keep it off until their cameras are found.
+    upscaler = ini_value(Path(env["GOW3_CONFIG"]), "upscaler", "off")
+    if executable == "big2-ps4_Shipping.elf" and upscaler not in ("off", "none", ""):
+        env.setdefault("GOW3_CAMERA_SOURCE", "flat")
+        env.setdefault("GOW3_UPSCALE_BEFORE_CS", "aec539f0")
+    else:
+        env["GOW3_UPSCALER"] = "none"
     if extra_mib:
         env["GOW3_DMEM_MB"] = str(5056 + extra_mib + 64)
     # The movie player reads its (1080p) movies with the render size: the decoder scales them to it

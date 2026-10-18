@@ -72,6 +72,19 @@ public:
     /// A bound constant buffer of 864 bytes: checks the scene constant signature.
     void OnConstants(const float* data);
 
+    /// GOW3_CAMERA_SOURCE=flat (Uncharted 2): the camera comes from the flat user data of scene
+    /// vertex shaders (flat_camera.h), not from the 864-byte scene constants.
+    [[nodiscard]] bool FlatSource() const noexcept {
+        return flat_source && Enabled();
+    }
+    /// Whether this frame still needs its camera (the first match of a frame is the main one).
+    [[nodiscard]] bool WantsCamera() const noexcept {
+        return !frame_has_camera;
+    }
+    /// The flat user data of a vertex shader drawing into `depth`: takes the frame's camera and
+    /// scene depth when the view + projection block is found. Returns whether it was.
+    bool OnFlatConstants(const u32* data, std::size_t count, VideoCore::ImageId depth);
+
     /// The G-buffer pass (5+ color targets): its depth is the scene depth.
     void OnGBufferPass(VideoCore::ImageId depth);
 
@@ -95,6 +108,7 @@ private:
     Runtime& runtime;
     bool debug_overlay = false;
     bool for_upscaler = false;
+    bool flat_source = false;
     vk::UniqueDescriptorSetLayout motion_desc_layout;
     vk::UniquePipelineLayout motion_pipeline_layout;
     vk::UniquePipeline motion_pipeline;

@@ -362,6 +362,9 @@ set_source_files_properties(../tests/test_taa_shader.cpp PROPERTIES
 target_link_libraries(taa-shader-test PRIVATE gow3gpu)
 add_dependencies(taa-shader-test host_shaders)
 
+add_executable(flat-camera-test EXCLUDE_FROM_ALL ../tests/test_flat_camera.cpp)
+target_compile_options(flat-camera-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(flat-camera-test PRIVATE shadps4)
 add_executable(camera-motion-test EXCLUDE_FROM_ALL ../tests/test_camera_motion.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_include_directories(camera-motion-test PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include)
 target_compile_options(camera-motion-test PRIVATE -UNDEBUG -fPIC)

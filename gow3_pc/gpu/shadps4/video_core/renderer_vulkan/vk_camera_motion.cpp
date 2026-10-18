@@ -10,6 +10,7 @@
 
 #include "video_core/host_shaders/camera_motion_comp.h"
 #include "video_core/host_shaders/camera_motion_debug_comp.h"
+#include "video_core/renderer_vulkan/flat_camera.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_object_motion.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -57,6 +58,8 @@ CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
     // The upscaler can be switched on from the menu at any time: the camera is always tracked
     // unless GOW3_UPSCALER=none.
     for_upscaler = !(upscaler && std::strcmp(upscaler, "none") == 0);
+    const char* source = std::getenv("GOW3_CAMERA_SOURCE");
+    flat_source = source && std::strcmp(source, "flat") == 0;
     const auto device = instance.GetDevice();
     if (for_upscaler) {
         const std::array<vk::DescriptorSetLayoutBinding, 3> motion_bindings = {{
@@ -238,6 +241,32 @@ void CameraMotion::OnConstants(const float* data) {
         render_size = size;
     }
     frame_has_camera = true;
+}
+
+bool CameraMotion::OnFlatConstants(const u32* data, std::size_t count,
+                                   VideoCore::ImageId depth) {
+    if (frame_has_camera || !depth) {
+        return false;
+    }
+    const auto camera = FindFlatCamera(reinterpret_cast<const float*>(data), count);
+    if (!camera) {
+        return false;
+    }
+    previous = current;
+    current.view = camera->view;
+    current.inv_view = camera->inv_view;
+    current.proj = camera->proj;
+    current.valid = true;
+    const auto& image = texture_cache.GetImage(depth);
+    const std::array<u32, 2> size{image.info.size.width, image.info.size.height};
+    if (size != render_size) {
+        std::printf("Camera motion: flat camera (user data float %zu), scene depth %ux%u\n",
+                    camera->offset, size[0], size[1]);
+        render_size = size;
+    }
+    depth_id = depth;
+    frame_has_camera = true;
+    return true;
 }
 
 void CameraMotion::OnGBufferPass(VideoCore::ImageId depth) {

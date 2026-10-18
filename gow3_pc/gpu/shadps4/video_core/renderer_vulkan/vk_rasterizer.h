@@ -216,6 +216,8 @@ private:
     u64 begin_memo_hits = 0, begin_memo_misses = 0;
     void Resolve();
     void DepthStencilCopy(bool is_depth, bool is_stencil);
+    /// Whether draws into `depth` get the upscaler's sub-pixel jitter (scene depth or its copy).
+    bool JitteredDepth(VideoCore::ImageId depth);
     void EliminateFastClear();
 
     void UpdateDynamicState(const GraphicsPipeline* pipeline, bool is_indexed) const;
@@ -353,6 +355,10 @@ private:
     bool motion_draw = false;
     u64 motion_geometry{};    ///< vertex-stream identity of the current direct draw
     bool gbuffer_draw = false;
+    /// Uncharted 2: the depth of a draw whose vertex user data may hold the camera (flat_camera.h).
+    VideoCore::ImageId flat_camera_depth{};
+    /// Uncharted 2: a frame was started at the display pass and no scene draw followed yet.
+    bool display_frame_open = false;
     std::unique_ptr<TemporalUpscaler> upscaler; // gow3: FSR (docs/upscaler.md)
     std::array<float, 2> draw_jitter{};         ///< viewport offset of the current draw, pixels
     std::array<float, 2> target_scale{1.0f, 1.0f}; ///< pass drawn into the upscaler's output-size images
