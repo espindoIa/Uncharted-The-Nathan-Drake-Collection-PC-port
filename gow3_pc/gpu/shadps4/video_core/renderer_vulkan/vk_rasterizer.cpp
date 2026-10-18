@@ -3388,6 +3388,16 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             }
         }
         if (ring) {
+            // Uncharted 2's camera in the vertex user data: with multithreaded rendering the flat
+            // user data reaches this stage as a ring copy made at stage A (the stage's own copy
+            // may already hold a later draw's), so the camera is read from the ring.
+            if (desc.buffer_type == Shader::BufferType::Flatbuf && flat_camera_depth &&
+                stage.sw_stage == Shader::SwStage::Vertex &&
+                camera_motion->OnFlatConstants(
+                    reinterpret_cast<const u32*>(constant_ring->Data(ring->offset)),
+                    ring->size / sizeof(u32), flat_camera_depth)) {
+                flat_camera_depth = {};
+            }
             // Copied by the GPU command thread into the constant ring (read-only).
             if (FrameCapture::Active() && memory->IsValidGpuMapping(ring->address, 0)) {
                 FrameCapture::Buffer(stage.pgm_hash, buffer_index, ring->address,

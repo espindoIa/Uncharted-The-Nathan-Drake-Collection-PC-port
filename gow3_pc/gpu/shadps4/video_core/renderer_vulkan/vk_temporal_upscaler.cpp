@@ -361,6 +361,16 @@ bool TemporalUpscaler::OnFrameStart() {
 }
 
 void TemporalUpscaler::OnDispatch(u64 cs_hash) {
+    // GOW3_UPSCALER_TRACE=1: why the trigger dispatch did not run the upscaler (first 40).
+    static const bool trace = std::getenv("GOW3_UPSCALER_TRACE") != nullptr;
+    if (trace && cs_hash == trigger_hash) {
+        static int lines = 0;
+        if (lines++ < 40) {
+            std::printf("Upscaler trigger: done %d failed %d scaled %d scene_color %d camera %d "
+                        "active %d\n", done_this_frame, failed, Scaled(), bool(scene_color),
+                        camera_motion.Ready(), Active());
+        }
+    }
     if (cs_hash != trigger_hash || done_this_frame || failed || Scaled()) {
         return;
     }

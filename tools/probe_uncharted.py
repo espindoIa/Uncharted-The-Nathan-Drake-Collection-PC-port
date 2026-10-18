@@ -458,7 +458,14 @@ def run_game(args, game, executable, guest_args, loadexec):
     # upscaler=dlss (or fsr3/fsr4/taa) in its settings file the runtime runs it on that color.
     # The other games keep it off until their cameras are found.
     upscaler = ini_value(Path(env["GOW3_CONFIG"]), "upscaler", "off")
-    if executable == "big2-ps4_Shipping.elf" and upscaler not in ("off", "none", ""):
+    # UNCHARTED_UPSCALER_EXPERIMENT=1: the same camera search in the other games (finding their
+    # cameras and post-processing start; GOW3_UPSCALE_BEFORE_CS from the environment).
+    experiment = os.environ.get("UNCHARTED_UPSCALER_EXPERIMENT") == "1"
+    if experiment and upscaler not in ("off", "none", ""):
+        env.setdefault("GOW3_CAMERA_SOURCE", "flat")
+        env.setdefault("GOW3_SCENE_SIZE", f"{render_size[0]}x{render_size[1]}")
+        env.setdefault("GOW3_SCENE_HALF_RES", "0")
+    elif executable == "big2-ps4_Shipping.elf" and upscaler not in ("off", "none", ""):
         env.setdefault("GOW3_CAMERA_SOURCE", "flat")
         env.setdefault("GOW3_UPSCALE_BEFORE_CS", "aec539f0")
         # The render resolution above is the upscaler's output: DLSS/FSR presets below DLAA draw
