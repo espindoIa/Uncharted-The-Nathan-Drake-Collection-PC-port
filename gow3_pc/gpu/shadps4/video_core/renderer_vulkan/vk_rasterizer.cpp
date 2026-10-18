@@ -1855,13 +1855,34 @@ void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
     Gow3Stats::dispatches.fetch_add(1, std::memory_order_relaxed);
     // gow3: like draws, handed to the draw recording thread after the pipeline selection.
-    const bool pipelined = UseDrawPipe() && !Gow3Toggle::Disabled(Gow3Toggle::PipelinedDispatch);
+    bool pipelined = UseDrawPipe() && !Gow3Toggle::Disabled(Gow3Toggle::PipelinedDispatch);
     if (!pipelined) {
         DrainDrawPipe();
     }
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
     if (!pipeline) {
         return;
+    }
+    // gow3 18 Oct: the constant copy shaders (2d215c3b, 6a6422a9; vk_shader_hle.cpp) and the
+    // ray-cast gather (c92150ba) run here after a drain. Their outputs are read when later draws
+    // are prepared on this thread (the SRT walker reads constant blocks in guest memory), but a
+    // dispatch handed to the recording thread binds and marks its outputs only there, so those
+    // draws were prepared from the previous frame's constants: Uncharted 2's train flashed white
+    // for single frames with multithreaded rendering. GOW3_DRAIN_CS=<hex hash>[,<hash>...] adds
+    // shaders (diagnostics).
+    static const std::vector<u64> drain_cs = [] {
+        std::vector<u64> out{0x2d215c3b, 0x6a6422a9, 0xc92150ba};
+        for (const char* env = std::getenv("GOW3_DRAIN_CS"); env && *env;) {
+            char* end = nullptr;
+            out.push_back(std::strtoull(env, &end, 16));
+            env = end && *end == ',' ? end + 1 : nullptr;
+        }
+        return out;
+    }();
+    if (pipelined && std::ranges::find(drain_cs, pipeline->GetStage(Shader::SwStage::Compute).pgm_hash) !=
+                         drain_cs.end()) {
+        pipelined = false;
+        DrainDrawPipe();
     }
     if (pipelined) {
         PostDraw(pipeline, nullptr, false, 0, &CsRegs());
