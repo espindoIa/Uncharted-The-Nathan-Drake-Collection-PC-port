@@ -107,11 +107,17 @@ void Liverpool::ProcessCommands() {
             cache.PollReadbacksNow();
         }
     }
-    if (num_commands && rasterizer) {
-        rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands); // gow3: commands touch the caches
-    }
     // Process incoming commands with high priority
     while (num_commands) {
+        // gow3: commands touch the caches the draw recording thread uses: it runs dry first,
+        // before every command. A drain only when num_commands was set on entry let a command
+        // queued just after that check (a guest page fault's ReadMemory) run beside the
+        // recording thread: both changed the pending readbacks, the range tree got a cycle and
+        // this thread looped forever (Uncharted 3, multithreaded rendering, 18 Oct; found with
+        // GOW3_READBACK_RACE=1). Free when the pipe is already empty.
+        if (rasterizer) {
+            rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands);
+        }
         Common::UniqueFunction<void> callback{};
         {
             std::scoped_lock lk{submit_mutex};

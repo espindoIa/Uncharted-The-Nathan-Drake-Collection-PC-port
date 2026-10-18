@@ -430,6 +430,18 @@ private:
     };
     PageManager* page_manager = nullptr;
     std::deque<PendingReadback> pending_readbacks;
+    /// gow3 diagnostics (GOW3_READBACK_RACE=1): the thread inside a function that touches
+    /// pending_readbacks, to report two threads in them at once (a multithreaded-rendering hang
+    /// looped forever in a corrupted readback range set, 18 Oct).
+    mutable std::atomic<u32> readback_owner{0};
+    mutable std::atomic<const char*> readback_where{nullptr};
+    struct ReadbackScope {
+        const BufferCache& cache;
+        u32 previous = 0;
+        bool active = false;
+        ReadbackScope(const BufferCache& cache, const char* where);
+        ~ReadbackScope();
+    };
     /// gow3: pages where a CPU read faulted on other data than a pending readback's GPU bytes
     /// (false sharing: the CPU's own data next to small GPU results in the same 4 KiB) -> until
     /// when async readbacks leave them unprotected. Uncharted 2: 89% of the read faults, each one

@@ -309,6 +309,64 @@ static bool LazyWritesEnabled() {
     return enabled && EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Relaxed;
 }
 
+
+#ifdef _WIN32
+extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
+#endif
+static u32 CurrentThreadIdForRace() {
+#ifdef _WIN32
+    return static_cast<u32>(GetCurrentThreadId());
+#else
+    static std::atomic<u32> next{1};
+    thread_local const u32 id = next.fetch_add(1);
+    return id;
+#endif
+}
+
+// gow3: GOW3_READBACK_RACE=1 reports a function touching pending_readbacks entered by one thread
+// while another thread is inside one (both threads and functions, first 20 reports).
+static bool ReadbackRaceCheck() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_READBACK_RACE");
+        return env && env[0] == '1';
+    }();
+    return enabled;
+}
+
+BufferCache::ReadbackScope::ReadbackScope(const BufferCache& cache_, const char* where)
+    : cache{cache_} {
+    if (!ReadbackRaceCheck()) {
+        return;
+    }
+    active = true;
+    const u32 self = CurrentThreadIdForRace();
+    previous = cache.readback_owner.exchange(self, std::memory_order_acq_rel);
+    if (previous && previous != self) {
+        static std::atomic<int> reports{0};
+        if (reports.fetch_add(1) < 20) {
+            const char* other = cache.readback_where.load(std::memory_order_relaxed);
+            std::printf("Readback race: thread %u enters %s while thread %u is in %s\n", self, where,
+                        previous, other ? other : "?");
+            std::fflush(stdout);
+        }
+    }
+    if (previous != self) {
+        cache.readback_where.store(where, std::memory_order_relaxed);
+    }
+}
+
+BufferCache::ReadbackScope::~ReadbackScope() {
+    if (!active) {
+        return;
+    }
+    const u32 self = CurrentThreadIdForRace();
+    // Nested scopes of one thread keep the owner; the outermost one clears it.
+    if (previous != self) {
+        u32 expected = self;
+        cache.readback_owner.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+    }
+}
+
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks) {
     {
         // gow3: GOW3_FAULT_STATS=1 — every GPU-to-guest download request (CPU read of GPU data,
@@ -423,6 +481,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         }
     }
     const auto flush_request = [this, device_addr, size, is_write] {
+        const ReadbackScope readback_scope{*this, "ReadMemory request"};
         if (!is_write && FaultStatsEnabled() && gpu_modified_ranges.Intersects(device_addr, size)) {
             std::scoped_lock lock{g_writers_mutex};
             auto& [reads, addresses] = g_gpu_byte_reads[device_addr >> 20];
@@ -758,6 +817,7 @@ bool BufferCache::PrepareHostWrite(VAddr address, u64 size) {
 }
 
 bool BufferCache::GpuBytesInFlight(VAddr page) {
+    const ReadbackScope readback_scope{*this, "GpuBytesInFlight"};
     std::bitset<4096> covered;
     if (const auto it = page_writes.find(page >> 12); it != page_writes.end()) {
         auto* semaphore = scheduler.GetWorkSemaphore();
@@ -796,6 +856,7 @@ u32 BufferCache::TakeLabelsInReadbacks() {
 }
 
 void BufferCache::NoteCpuWrite(VAddr address, u64 size) {
+    const ReadbackScope readback_scope{*this, "NoteCpuWrite"};
     bool inside = false;
     for (auto& readback : pending_readbacks) {
         readback.rewritten.Add(address, size);
@@ -820,6 +881,7 @@ void BufferCache::NoteCpuWrite(VAddr address, u64 size) {
 }
 
 bool BufferCache::WriteThrough(VAddr address, const void* data, u64 size) {
+    const ReadbackScope readback_scope{*this, "WriteThrough"};
     if (size == 0 || size > 64_KB || address % 4 != 0 || size % 4 != 0) {
         return false;
     }
@@ -1007,6 +1069,7 @@ void BufferCache::WriteBackGpuData(VAddr address, const u8* data, u64 size,
 
 void BufferCache::DownloadRangesAsync(std::span<const std::pair<VAddr, u64>> ranges, bool protect,
                                       bool yield_to_cpu) {
+    const ReadbackScope readback_scope{*this, "DownloadRangesAsync"};
     last_readback_tick = scheduler.CurrentTick();
     PendingReadback readback;
     struct Copy {
@@ -1178,6 +1241,7 @@ void BufferCache::SweepTracking() {
 }
 
 void BufferCache::CompleteReadbacks(bool wait, u64 wait_until) {
+    const ReadbackScope readback_scope{*this, "CompleteReadbacks"};
     // Pages of a readback are read-protected once its submission is out: a read fault waits
     // for submitted work only (never for the command buffer this thread is still recording).
     for (auto& readback : pending_readbacks) {
@@ -1268,6 +1332,7 @@ void BufferCache::CompleteReadbacks(bool wait, u64 wait_until) {
 }
 
 bool BufferCache::DeferUntilLastReadback(std::function<void()> fn, VAddr label, u64 value, u32 bytes) {
+    const ReadbackScope readback_scope{*this, "DeferUntilLastReadback"};
     if (pending_readbacks.empty()) {
         return false;
     }
@@ -1333,6 +1398,7 @@ bool BufferCache::HasUnsubmittedReadback() const {
 }
 
 void BufferCache::PollReadbacksNow() {
+    const ReadbackScope readback_scope{*this, "PollReadbacksNow"};
     if (pending_readbacks.empty()) {
         return;
     }
@@ -1342,6 +1408,7 @@ void BufferCache::PollReadbacksNow() {
 }
 
 void BufferCache::UnwatchPage(VAddr page) {
+    const ReadbackScope readback_scope{*this, "UnwatchPage"};
     for (auto& readback : pending_readbacks) {
         for (size_t i = 0; i < readback.watched.size(); ++i) {
             const auto [address, size] = readback.watched[i];
@@ -1482,6 +1549,7 @@ void PrintBufferStats() {
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer) {
+    const ReadbackScope readback_scope{*this, "ObtainBuffer"};
     texture_cache.ResolveReadbacks(device_addr, size, true, ReadbackSource::BufferObtain);
     const bool stats = BufferStatsEnabled();
     if (stats) {
