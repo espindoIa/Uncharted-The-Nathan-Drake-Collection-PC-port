@@ -74,6 +74,12 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         }
     } else if (key == "preset") {
         v.preset = std::clamp(i, 0, PresetCount - 1);
+    } else if (key == "dlss_model") {
+        for (int m = 0; m < DlssModelCount; ++m) {
+            if (!value.empty() && (value[0] | 0x20) == DlssModelName(m)[0]) {
+                v.dlss_model = m;
+            }
+        }
     } else if (key == "sharpen") {
         v.sharpen = i != 0;
     } else if (key == "sharpness") {
@@ -192,6 +198,7 @@ void Load() {
         {"GOW3_ASYNC_SHADERS", "async_shaders"},      {"GOW3_DEFERRED_READBACK", "deferred_readback"},
         {"GOW3_STALE_READBACK", "stale_readback"},     {"GOW3_FSR1", "fsr1"},
         {"GOW3_RCAS", "rcas"},                        {"GOW3_FRAMES_AHEAD", "frames_queued"},
+        {"GOW3_DLSS_MODEL", "dlss_model"},
     };
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env); value && value[0]) {
@@ -217,6 +224,16 @@ bool GraphicsNeedRestart() {
     const auto& v = Get();
     return v.deferred_readback != v.startup_deferred_readback ||
            v.stale_readback != v.startup_stale_readback;
+}
+
+void RequestUpscaler(int upscaler) {
+    auto& v = Get();
+    if ((upscaler == UpscalerOff) == (v.startup_upscaler == UpscalerOff)) {
+        v.upscaler = upscaler;
+        v.pending_upscaler = -1;
+    } else {
+        v.pending_upscaler = upscaler;
+    }
 }
 
 void ConfigureUpscalerSupport(bool fsr4, bool fsr411) {
@@ -312,12 +329,14 @@ KeyValues Current() {
                  "upscaler=%s\npreset=%d\nsharpen=%d\nsharpness=%.2f\njitter=%d\n"
                  "reactive=%d\nobject_motion=%d\nreactive_scale=%.2f\nreactive_threshold=%.2f\nreactive_max=%.2f\n"
                  "debug_view=%d\nshow_fps=%d\nfsr4_auto_exposure=%d\nfsr4_invert_jitter=%d\n",
-                 UpscalerName(v.upscaler), v.preset.load(), int(v.sharpen.load()),
+                 UpscalerName(v.pending_upscaler >= 0 ? v.pending_upscaler.load() : v.upscaler.load()),
+                 v.preset.load(), int(v.sharpen.load()),
                  v.sharpness.load(), int(v.jitter.load()), int(v.reactive.load()),
                  int(v.object_motion.load()),
                  v.reactive_scale.load(), v.reactive_threshold.load(), v.reactive_max.load(),
                  v.debug_view.load(), int(v.show_fps.load()),
                  int(v.fsr4_auto_exposure.load()), int(v.fsr4_invert_jitter.load()));
+    Append(text, "dlss_model=%s\n", DlssModelName(v.dlss_model));
     Append(text, "output_res=%dx%d\n", OutputWidths[v.output_res], OutputHeights[v.output_res]);
     Append(text,
                  "overlay_fps=%d\noverlay_frametime=%d\noverlay_upscaler=%d\noverlay_gpu=%d\n"
@@ -392,6 +411,11 @@ const char* PresetName(int preset) {
 const char* UpscalerName(int upscaler) {
     static constexpr const char* names[UpscalerCount] = {"off", "fsr3", "fsr4", "fsr411", "taa", "dlss"};
     return names[std::clamp(upscaler, 0, UpscalerCount - 1)];
+}
+
+const char* DlssModelName(int model) {
+    static constexpr const char* names[DlssModelCount] = {"j", "k", "l", "m"};
+    return names[std::clamp(model, 0, DlssModelCount - 1)];
 }
 
 } // namespace Gow3Settings

@@ -6,6 +6,10 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## 18 October 2026 (unreleased)
 
+- **Choose the DLSS model, and DLSS in the in-game menu.** The launcher's DLSS card and the in-game
+  menu (Image tab) now pick NVIDIA's transformer model J, K, L or M (K stays the default: the
+  fastest). The menu also has the DLSS mode; modes and models change live, turning DLSS on or off
+  applies on restart.
 - **Cutscenes play at the right speed above 60 FPS.** The cutscenes of all three games are videos
   whose player showed one frame per game frame, as on the PS4 at 60 Hz: at 120 FPS they ran twice
   as fast as their sound. They now follow the game's clock (Uncharted 3 at 120 FPS: 1.00x, was

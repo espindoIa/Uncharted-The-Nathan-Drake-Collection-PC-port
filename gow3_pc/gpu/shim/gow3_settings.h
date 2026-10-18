@@ -23,6 +23,9 @@ inline bool IsFsr4(int upscaler) {
 }
 enum Preset : int { NativeAA = 0, Quality, Balanced, Performance, UltraPerformance, PresetCount };
 enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugViewCount };
+/// DLSS models J, K, L, M (NVSDK_NGX_DLSS_Hint_Render_Preset 10-13).
+inline constexpr int DlssModelCount = 4;
+inline constexpr int DlssModelDefault = 1; ///< K
 
 /// Live output resolutions: the upscaler's output and the UI host targets.
 inline constexpr int OutputWidths[] = {1280, 1920, 2560, 3840};
@@ -102,6 +105,11 @@ struct Values {
     /// DLSS (gow3_dlss.dll, NVIDIA RTX) is ready, or why not (null before the device exists).
     std::atomic<bool> dlss_supported{false};
     std::atomic<const char*> dlss_problem{nullptr};
+    /// DLSS transformer model (dlss_model=j|k|l|m, GOW3_DLSS_MODEL): 0 J, 1 K, 2 L, 3 M. Live.
+    std::atomic<int> dlss_model{DlssModelDefault};
+    /// The menu's upscaler choice that waits for a restart (turning the upscaler on or off:
+    /// run.py prepares it at start), or -1. Saved in place of the running one.
+    std::atomic<int> pending_upscaler{-1};
 
     /// Startup settings for the explicit GOW3_RENDER_RES compatibility patch only.
     int startup_preset = NativeAA;
@@ -125,6 +133,9 @@ int RenderPreset();
 bool ResolutionNeedsRestart();
 /// A startup graphics option differs from the one this launch started with.
 bool GraphicsNeedRestart();
+/// Turns the upscaler on or off from the menu: live when this launch started with one in the
+/// same state, else on the next start (pending_upscaler).
+void RequestUpscaler(int upscaler);
 /// Writes the file (menu changes).
 /// Key and value lines as the settings file holds them.
 using KeyValues = std::vector<std::pair<std::string, std::string>>;
@@ -136,5 +147,7 @@ void Save();
 float PresetScale(int preset);
 const char* PresetName(int preset);
 const char* UpscalerName(int upscaler);
+/// The model's letter as the settings file holds it ("j" to "m").
+const char* DlssModelName(int model);
 
 } // namespace Gow3Settings

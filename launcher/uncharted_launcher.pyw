@@ -78,6 +78,9 @@ INI_DEFAULTS = {
 # Performance). With a mode below DLAA the render resolution above is DLSS's output.
 DLSS_MODES = [("off", "Off"), ("0", "DLAA"), ("1", "Quality"), ("2", "Balanced"), ("3", "Performance"),
               ("4", "Ultra Perf.")]
+# DLSS transformer models (the runtime's dlss_model key, also in the in-game menu): K is the
+# fastest; M is sharper in Performance mode but costs ~0.8 ms more per 4K frame (RTX 5070).
+DLSS_MODELS = [("j", "Model J"), ("k", "Model K"), ("l", "Model L"), ("m", "Model M")]
 DLSS_GAMES = ("u1", "u2", "u3")  # games whose camera the runtime finds (tools/probe_uncharted.py)
 
 
@@ -701,6 +704,8 @@ class Launcher:
                 widget.set(self.ini.get(key, INI_DEFAULTS[key]))
         if isinstance(self.widgets.get("dlss"), Segmented):
             self.widgets["dlss"].set(self.dlss_value())
+        if isinstance(self.widgets.get("dlss_model"), Segmented):
+            self.widgets["dlss_model"].set(self.ini.get("dlss_model", "k"))
         settings = self.game_settings()
         if isinstance(self.widgets.get("resolution"), Segmented):
             self.widgets["resolution"].set(settings["resolution"])
@@ -914,6 +919,7 @@ class Launcher:
                 page, "NVIDIA DLSS",
                 "NVIDIA RTX GPUs. DLAA smooths edges at the render resolution; the other modes draw the scene "
                 "smaller and rebuild it at the render resolution above (set it to your screen's). "
+                "Model K is the fastest; M is sharper in Performance mode but costs a little more. "
                 "On other GPUs the game runs without it. Needs NVIDIA's nvngx_dlss.dll, which is not "
                 "included: get it from NVIDIA's DLSS page (nvngx_dlss.dll in lib/Windows_x86_64/rel), "
                 "then add it here.", dlss)
@@ -932,9 +938,13 @@ class Launcher:
         if dlss_available():
             self.widgets["dlss"] = Segmented(holder, DLSS_MODES, self.dlss_value(), self.change_dlss,
                                              self.f_small)
-            self.widgets["dlss"].pack()
+            self.widgets["dlss"].pack(anchor="w")
+            self.widgets["dlss_model"] = Segmented(holder, DLSS_MODELS, self.ini.get("dlss_model", "k"),
+                                                   self.change_dlss_model, self.f_small)
+            self.widgets["dlss_model"].pack(anchor="w", pady=(self.px(6), 0))
             return
         self.widgets.pop("dlss", None)
+        self.widgets.pop("dlss_model", None)
         self.flat_button(holder, "Get from NVIDIA", lambda: webbrowser.open(NGX_DOWNLOAD_URL)).pack(
             side="left", padx=(0, self.px(8)))
         self.flat_button(holder, f"Add {NGX_DLL}...", self.add_ngx).pack(side="left")
@@ -970,6 +980,10 @@ class Launcher:
         updates = {"upscaler": "off"} if value == "off" else {"upscaler": "dlss", "preset": value}
         self.ini.update(updates)
         self.save_ini(updates)
+
+    def change_dlss_model(self, value):
+        self.ini["dlss_model"] = value
+        self.save_ini({"dlss_model": value})
 
     def change_sharpening(self, value):
         if value == "off":

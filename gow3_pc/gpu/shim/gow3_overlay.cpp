@@ -250,6 +250,39 @@ const char* UpscalerLabel(int upscaler) {
     }
 }
 
+// DLSS mode (off or a preset) and model. Modes and models change live; turning DLSS on or off
+// waits for a restart when this launch started the other way (run.py prepares the upscaler).
+void DlssRows() {
+    auto& s = Gow3Settings::Get();
+    if (!s.dlss_supported) {
+        const char* problem = s.dlss_problem;
+        InfoRow("DLSS", problem ? problem : "Not available on this system");
+        return;
+    }
+    const int requested = s.pending_upscaler >= 0 ? s.pending_upscaler.load() : s.upscaler.load();
+    int mode = requested == Gow3Settings::UpscalerDlss ? s.preset + 1 : 0;
+    static const char* const modes[] = {"Off", "DLAA", "Quality", "Balanced", "Performance", "Ultra Performance"};
+    Row("DLSS mode");
+    if (ImGui::Combo("##value", &mode, modes, int(std::size(modes)))) {
+        if (mode > 0) {
+            s.preset = mode - 1;
+        }
+        Gow3Settings::RequestUpscaler(mode > 0 ? Gow3Settings::UpscalerDlss : Gow3Settings::UpscalerOff);
+        dirty = true;
+    }
+    Help(s.pending_upscaler >= 0 ? "Applied on restart: this launch started with DLSS the other way."
+                                 : "DLAA smooths edges at the render resolution; the other modes draw the scene "
+                                   "smaller and rebuild it.");
+    ImGui::PopID();
+    static const char* const models[] = {"J", "K (recommended)", "L", "M"};
+    static_assert(std::size(models) == Gow3Settings::DlssModelCount);
+    ImGui::BeginDisabled(mode == 0);
+    ChoiceRow("DLSS model", s.dlss_model, models, nullptr, Gow3Settings::DlssModelCount,
+              "NVIDIA's transformer models. K is the fastest; M is sharper in Performance mode but "
+              "costs about 0.8 ms more per 4K frame.");
+    ImGui::EndDisabled();
+}
+
 const Vulkan::Instance* overlay_instance = nullptr; // for the overlay's measurements
 
 // The performance overlay's text with the current settings (also the menu's preview).
@@ -275,6 +308,11 @@ void ImageTab() {
         ChoiceRow("Display mode", s.display_mode, G::DisplayModeNames.data(), nullptr, G::DisplayModeCount,
                   "Windowed, borderless window or exclusive fullscreen.");
         CheckRow("VSync", s.vsync, "Waits for the monitor: no tearing, a little more input delay.");
+        ImGui::EndTable();
+    }
+    ImGui::SeparatorText("NVIDIA DLSS");
+    if (BeginRows("##dlss")) {
+        DlssRows();
         ImGui::EndTable();
     }
     const int iw = s.image_width, ih = s.image_height, ww = s.window_width, wh = s.window_height;
@@ -403,7 +441,8 @@ void OverlayTab() {
 // Startup options changed since this launch (applied by "Apply and restart").
 int RestartChanges() {
     const auto& s = Gow3Settings::Get();
-    return (s.deferred_readback != s.startup_deferred_readback) + (s.stale_readback != s.startup_stale_readback);
+    return (s.deferred_readback != s.startup_deferred_readback) + (s.stale_readback != s.startup_stale_readback) +
+           (s.pending_upscaler >= 0);
 }
 
 void Menu() {

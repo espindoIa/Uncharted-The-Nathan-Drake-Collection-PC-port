@@ -43,12 +43,14 @@ public:
         vk::ImageAspectFlags aspect;
         u32 width, height;
     };
-    /// NVSDK_NGX_DLSS_Hint_Render_Preset value: a transformer model, per mode (quality 0-4).
-    static u32 TransformerPreset(int quality);
+    /// NVSDK_NGX_DLSS_Hint_Render_Preset value of a transformer model (0 J, 1 K, 2 L, 3 M).
+    static u32 TransformerPreset(int model);
     struct FeatureDesc {
         u32 input_width, input_height, output_width, output_height;
         int quality;
         bool hdr;
+        u32 preset; ///< TransformerPreset: a new model recreates the feature
+
         bool operator==(const FeatureDesc&) const = default;
     };
     struct Frame {
