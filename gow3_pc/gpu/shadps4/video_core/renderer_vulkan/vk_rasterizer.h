@@ -346,6 +346,9 @@ private:
     Core::MemoryManager* memory;
     boost::icl::interval_set<VAddr> mapped_ranges;
     Common::SharedFirstMutex mapped_ranges_mutex;
+    /// gow3: changes before and after every map/unmap (IsMapped's per-thread cache of mapped
+    /// intervals is valid while it stays the same).
+    std::atomic<u64> mapped_generation{0};
     PipelineCache pipeline_cache;
     std::unique_ptr<DrawPreparation> draw_prep;
     std::unique_ptr<CameraMotion> camera_motion; // gow3: motion vectors (docs/upscaler.md)

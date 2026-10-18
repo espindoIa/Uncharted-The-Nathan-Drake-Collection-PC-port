@@ -325,6 +325,15 @@ void VideoOutDriver::Flip(const Request& req) {
         static std::vector<double> intervals;
         intervals.push_back(frame_ms);
         last = now;
+        // GOW3_FRAME_TIMES=<file>: every flip interval in ms, one per line (percentiles in
+        // measurements; the file is rewritten each start and flushed with the 5 s stats).
+        static FILE* frame_times = [] {
+            const char* path = std::getenv("GOW3_FRAME_TIMES");
+            return path && path[0] ? std::fopen(path, "w") : nullptr;
+        }();
+        if (frame_times) {
+            std::fprintf(frame_times, "%.3f\n", frame_ms);
+        }
         // Stall diagnostics: what happened during a long frame.
         static u64 last_gpu_ns, last_images, last_image_bytes, last_buffer_bytes;
         static u64 last_t[6], last_minflt, last_sigf, last_pc, last_pp, last_rc, last_rp;
@@ -541,6 +550,7 @@ void VideoOutDriver::Flip(const Request& req) {
             window_start = now;
             frames = 0;
             worst_ms = 0;
+            if (frame_times) std::fflush(frame_times);
             stalls_shown = 0;
             std::fill(std::begin(last_wait) + 1, std::begin(last_wait) + 6, 0);
         }

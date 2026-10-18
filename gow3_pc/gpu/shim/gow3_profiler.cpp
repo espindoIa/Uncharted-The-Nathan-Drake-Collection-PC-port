@@ -296,8 +296,14 @@ void Start(unsigned long thread_id, const char* name) {
         stacks.reserve(samples.capacity());
         std::vector<Module> modules = LoadModules();
         auto last = std::chrono::steady_clock::now();
+        // GOW3_PROFILE_MS: milliseconds between samples (default 1). Each sample suspends the
+        // thread; a longer interval disturbs its waits less.
+        const DWORD interval = [] {
+            const char* ms = std::getenv("GOW3_PROFILE_MS");
+            return ms && std::atoi(ms) > 0 ? DWORD(std::atoi(ms)) : DWORD(1);
+        }();
         for (int report = 0;;) {
-            Sleep(1);
+            Sleep(interval);
             if (SuspendThread(thread) == DWORD(-1)) {
                 break;
             }

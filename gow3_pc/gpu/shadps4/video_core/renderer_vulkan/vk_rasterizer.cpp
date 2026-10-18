@@ -4873,16 +4873,45 @@ bool Rasterizer::IsMapped(VAddr addr, u64 size) {
         // Memory range wrapped the address space, cannot be mapped.
         return false;
     }
+    // gow3: mapped intervals found before, per thread, while no map/unmap happened since
+    // (Gow3Toggle::IsMappedCache). A range inside one is mapped without taking the lock.
+    struct CachedInterval {
+        VAddr lo = 0, hi = 0;
+        u64 generation = ~0ull;
+    };
+    thread_local std::array<CachedInterval, 8> cached{};
+    thread_local u32 next_slot = 0;
+    const bool use_cache = !Gow3Toggle::Disabled(Gow3Toggle::IsMappedCache);
+    if (use_cache) {
+        const u64 generation = mapped_generation.load(std::memory_order_acquire);
+        for (const auto& entry : cached) {
+            if (entry.generation == generation && addr >= entry.lo && addr + size <= entry.hi) {
+                return true;
+            }
+        }
+    }
     const auto range = decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
 
     Common::RecursiveSharedLock lock{mapped_ranges_mutex};
-    return boost::icl::contains(mapped_ranges, range);
+    if (!use_cache) {
+        return boost::icl::contains(mapped_ranges, range);
+    }
+    // Read under the lock: map/unmap change it while holding it exclusively.
+    const u64 generation = mapped_generation.load(std::memory_order_acquire);
+    const auto it = mapped_ranges.find(addr);
+    if (it == mapped_ranges.end() || it->upper() < addr + size) {
+        return false;
+    }
+    cached[next_slot++ % cached.size()] = {it->lower(), it->upper(), generation};
+    return true;
 }
 
 void Rasterizer::MapMemory(VAddr addr, u64 size) {
     {
         std::scoped_lock lock{mapped_ranges_mutex};
+        mapped_generation.fetch_add(1, std::memory_order_acq_rel);
         mapped_ranges += decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
+        mapped_generation.fetch_add(1, std::memory_order_acq_rel);
     }
 }
 
@@ -4896,7 +4925,9 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
     texture_cache.UnmapMemory(addr, size);
     {
         std::scoped_lock lock{mapped_ranges_mutex};
+        mapped_generation.fetch_add(1, std::memory_order_acq_rel);
         mapped_ranges -= decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
+        mapped_generation.fetch_add(1, std::memory_order_acq_rel);
     }
 }
 

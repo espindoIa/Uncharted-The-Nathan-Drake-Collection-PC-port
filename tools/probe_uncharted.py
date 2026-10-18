@@ -551,6 +551,8 @@ def run_game(args, game, executable, guest_args, loadexec):
     # and details of frames over 40 ms.
     if diagnostics:
         env.setdefault("GOW3_FRAME_STATS", "1")
+        # Every flip interval, for frame time percentiles (tools/frametimes.py).
+        env.setdefault("GOW3_FRAME_TIMES", str(user / "frametimes.txt"))
     # DMA sync mode for the tiled lighting shader, switchable live: write "full", "off" or
     # "pointers <KiB>" into this file (the full sync costs ~10 ms/frame in the temple).
     if diagnostics:

@@ -71,6 +71,13 @@ enum : std::uint64_t {
     SceneMipBias = 1ull << 57, ///< negative LOD bias of G-buffer samplers at reduced scene sizes
     /// Tests only (bit set: zero): the upscaler gets zero motion vectors (negative control).
     UpscalerMotion = 1ull << 58,
+    /// Bit set: off. Lock-free per-thread cache of mapped ranges for Rasterizer::IsMapped (the
+    /// SRT walker sync asks several times per draw; the shared lock's bookkeeping cost ~7% of
+    /// the GPU command thread in Uncharted 3, 18 Oct profile).
+    IsMappedCache = 1ull << 59,
+    /// Bit set: off. Held recursive locks in a per-thread array (common/recursive_lock.cpp)
+    /// instead of a map node allocated and freed per acquisition.
+    RecursiveLockArray = 1ull << 60,
     // Bits 20-29 are used as raw debug toggles by the camera/object motion and the upscaler.
 };
 inline bool Disabled(std::uint64_t bit) {
