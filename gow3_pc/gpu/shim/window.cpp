@@ -241,6 +241,12 @@ bool WindowSDL::PollEvents() {
         }
         case SDL_EVENT_QUIT:
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+            // The process ends with exit code 0 right after (gow3gpu.cpp): say why in the log,
+            // which otherwise just stops (players reported such ends as crashes, 19 Oct).
+            std::printf("Window: closing (%s)\n", event.type == SDL_EVENT_QUIT
+                                                      ? "quit request: Alt+F4, console close or system"
+                                                      : "window close button");
+            std::fflush(stdout);
             is_open = false;
             break;
         default:

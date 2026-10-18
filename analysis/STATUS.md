@@ -1464,6 +1464,27 @@ Merge choices (details in the sections below and in CHANGELOG.md):
   default in all three (0.3.0 forced it off in U1 for GitHub #23's grey guns; the user wants it
   on, 19 Oct; the fork's draw-pipe ordering fixes may cover #23, not verified).
 
+### U3 multithreaded freeze / "Invalid packet" (FIXED 19 Oct)
+- User: U3 "crashes" seconds into gameplay (port package, 4K, 120 FPS, DLAA model M, MT on). The
+  run's log simply stopped, exit code 0: the window thread's _Exit(0) after a close request (the
+  frozen window closed by hand). shim/window.cpp now logs "Window: closing (...)".
+- Repro (Continue -> chapter 1 gameplay, C:\dev\repro_u3b.sh): pre-merge build froze (game threads
+  in sceKernelWaitEqueue, GPU threads idle: thread dump via tools/hang_report.thread_report);
+  merged build stopped at 111 s, "Invalid packet ... in a command buffer ... Unreachable code"
+  (the game had reused a command buffer stage A was still parsing). MT off: 6 min clean.
+- GOW3_TEST_OVERTAKE_LOG=1 (0.3.0 diagnostic): end-of-shader labels, WRITE_DATA and the flip
+  interrupt reached the guest while an earlier EOP fence was held for its ray-cast readback
+  (BufferCache::DeferUntilLastReadback); WaitDeferredSignals only covers the recorder-thread
+  signals. Fix: liverpool.cpp BehindHeldFence queues them on the same readback (label/value
+  passed, so LandDeferredFenceFor still answers GPU waits on them). After: 491 s at the user's
+  settings with MT, no freeze, 66-78 FPS (52 without MT); remaining overtakes: compute-queue
+  releases (another queue: no order on PS4 either) and 2 DMA writes (left: deferring a DMA off the
+  recording thread is unsafe; not seen to matter). U1 and U2 boot and play with MT (U2 60 FPS).
+- Also found: VideoOut's 60 Hz movie fallback read GOW3_MOVIE_PACED at PresentThread start, before
+  probe.c installs the hook and sets it, so it was always on (cutscenes at ~13 FPS in a 4K run);
+  now read when the first movie plays. Cutscenes are 1080p movies drawn as one quad (2 draws a
+  frame, no upscaler run): their 4K scale (videodec2 WriteMovieCopy) is now Lanczos.
+
 
 ## 18 October 2026: performance pass (GPU command thread), multithreaded-rendering hang
 

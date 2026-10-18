@@ -9,6 +9,19 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 This fork ([espindoIa](https://github.com/espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port))
 adds the work below on top of 0.3.0. Where both did the same thing, one was kept:
 
+- **Uncharted 3 no longer freezes or crashes seconds into gameplay with multithreaded
+  rendering** (reported at 4K, 120 FPS, DLAA). Fence labels, `WRITE_DATA` writes and the flip
+  interrupt could reach the game before an earlier end-of-frame fence that waits for GPU ray-cast
+  results: the game then waited for events in the wrong order (a freeze; closing the frozen window
+  looked like a crash) or reused a command buffer still being read ("Invalid packet"). They now
+  queue behind that fence. 8 minutes of play at those settings without a problem, 66-78 FPS
+  against 52 without multithreading.
+- **Sharper cutscenes above 1080p.** The cutscenes are 1080p movies (DLSS and FSR never touch
+  them: the game draws each movie frame as one picture); their scale to the render resolution now
+  uses Lanczos instead of bicubic (`GOW3_MOVIE_SCALER=bicubic` for the old filter).
+- **The log says why the game window closed** ("Window: closing ..."), so a window closed by
+  hand or by Alt+F4 is no longer mistaken for a crash.
+
 - **Anti-aliasing and upscaling in one place.** The 0.3.0 Anti-aliasing option (launcher Display
   tab, in-game menu Image tab, switches live) now also offers FSR and DLSS **quality modes**
   (Quality, Balanced, Performance, Ultra Performance: the scene is drawn smaller and rebuilt at the
@@ -19,7 +32,8 @@ adds the work below on top of 0.3.0. Where both did the same thing, one was kept
 - **Cutscenes keep the frame rate.** Above 60 FPS both versions fix the movies' speed: 0.3.0 by
   dropping the whole game to 60 Hz while a movie plays, this fork by pacing the movie player by the
   game's clock (Uncharted 3 at 120 FPS: 1.00x, was 2.0x), so cutscenes keep 120 FPS. The 60 Hz
-  switch stays as the fallback for a game build the fork's patch does not recognise.
+  switch stays as the fallback for a game build the fork's patch does not recognise (checked when
+  the first movie plays: checked at start, it was always on, and cutscenes dropped to ~13 FPS).
 - **NVIDIA's nvngx_dlss.dll is not in the package** (its license does not fit the port's GPL): the
   launcher opens NVIDIA's download page and adds the file after checking NVIDIA's signature. DLSS
   is then listed under Anti-aliasing.

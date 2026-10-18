@@ -5,6 +5,7 @@
 
 #include "common/alignment.h"
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -374,12 +375,29 @@ bool VdecDecoder::WriteMovieCopy(const AVFrame& frame, u64 base) {
             return false;
         }
     }
+    // The cutscenes are 1080p movies: above 1080p this scale is all the detail they get (the
+    // temporal upscalers never see them: the game draws a movie frame as one quad, no scene).
+    // Lanczos keeps edges sharper than bicubic (19 Oct, user: soft cutscenes at 4K);
+    // GOW3_MOVIE_SCALER=bicubic keeps the earlier filter.
+    static const int filter = [] {
+        const char* env = std::getenv("GOW3_MOVIE_SCALER");
+        return env && std::strcmp(env, "bicubic") == 0 ? SWS_BICUBIC : SWS_LANCZOS | SWS_ACCURATE_RND;
+    }();
+    const auto start = std::chrono::steady_clock::now();
     m_scale_context = sws_getCachedContext(m_scale_context, frame.width, frame.height, AV_PIX_FMT_NV12,
-                                           (int)width, (int)height, AV_PIX_FMT_NV12, SWS_BICUBIC,
+                                           (int)width, (int)height, AV_PIX_FMT_NV12, filter,
                                            nullptr, nullptr, nullptr);
     if (!m_scale_context || sws_scale(m_scale_context, frame.data, frame.linesize, 0, frame.height,
                                       m_scaled->data, m_scaled->linesize) < 0) {
         return false;
+    }
+    // The cost per frame, once (a movie runs at 30 frames a second on the decoder's thread).
+    static int timed = 0;
+    static double total_ms = 0.0;
+    total_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (++timed == 120) {
+        std::printf("Movie: %ux%u -> %ux%u scaled with %s, %.1f ms a frame\n", frame.width, frame.height,
+                    width, height, filter == SWS_BICUBIC ? "bicubic" : "Lanczos", total_ms / timed);
     }
     const u32 pitch = Gow3Movie::ScaledPitch(), rows = Gow3Movie::ScaledRows();
     const u32 chroma_pitch = Gow3Movie::ScaledChromaPitch();

@@ -824,10 +824,30 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     }
 }
 
+// gow3 19 Oct 2026: guest-visible writes after an end-of-pipe fence that waits for its ray-cast
+// readback (BufferCache::DeferUntilLastReadback) queue behind it, in order. Written at once they
+// reached the guest first (GOW3_TEST_OVERTAKE_LOG: end-of-shader labels, WRITE_DATA, the flip
+// interrupt): Uncharted 3 with multithreaded rendering then reused a command buffer the command
+// processor was still reading ("Invalid packet", 4K/120 FPS) or froze waiting for an event in the
+// wrong order. `label`/`value` let a GPU wait on that label land the readback (LandDeferredFenceFor).
+template <typename Fn>
+bool BehindHeldFence(Vulkan::Rasterizer& rasterizer, Fn&& fn, VAddr label = 0, u64 value = 0,
+                     u32 bytes = 0) {
+    auto& cache = rasterizer.GetBufferCache();
+    if (!cache.HasDeferredSignals() || Gow3Toggle::Disabled(Gow3Toggle::OrderedGuestWrites)) {
+        return false;
+    }
+    return cache.DeferUntilLastReadback(std::function<void()>(std::forward<Fn>(fn)), label, value, bytes);
+}
+
 void SignalFlip(Vulkan::Rasterizer& rasterizer, const u8*) {
     rasterizer.WaitDeferredSignals();
+    const auto signal = [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip); };
+    if (BehindHeldFence(rasterizer, signal)) {
+        return;
+    }
     NoteOvertake(rasterizer, "flip interrupt", 0);
-    Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
+    signal();
 }
 
 void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
@@ -837,15 +857,23 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     // precede writes the guest sees.
     rasterizer.WaitHostCopies();
     rasterizer.WaitDeferredSignals();
-    NoteOvertake(rasterizer, "write data", write_data->Address<u64>());
-    Gow3WriteLog::Note(write_data->Address<u64>(), write_data->data,
-                     (header->type3.count.Value() - 2) * sizeof(u32), Gow3WriteLog::WriteData);
-    Gow3WatchRange::Note("write data", 0, 0, write_data->Address<u64>(),
-                         (header->type3.count.Value() - 2) * sizeof(u32));
-    TraceEopWrite(write_data->Address<u64>(), write_data->data[0], "write_data");
-    const Vulkan::GpuWriteSite site{1};
-    std::memcpy(write_data->Address<u64*>(), write_data->data,
-                (header->type3.count.Value() - 2) * sizeof(u32));
+    const u32 bytes = (header->type3.count.Value() - 2) * sizeof(u32);
+    const u64 address = write_data->Address<u64>();
+    Gow3WriteLog::Note(address, write_data->data, bytes, Gow3WriteLog::WriteData);
+    Gow3WatchRange::Note("write data", 0, 0, address, bytes);
+    TraceEopWrite(address, write_data->data[0], "write_data");
+    u64 first = 0;
+    std::memcpy(&first, write_data->data, std::min<u32>(bytes, sizeof(first)));
+    std::vector<u32> payload(write_data->data, write_data->data + bytes / sizeof(u32));
+    const auto write = [address, payload = std::move(payload), bytes] {
+        const Vulkan::GpuWriteSite site{1};
+        std::memcpy(reinterpret_cast<void*>(address), payload.data(), bytes);
+    };
+    if (BehindHeldFence(rasterizer, write, address, first, std::min<u32>(bytes, 8))) {
+        return;
+    }
+    NoteOvertake(rasterizer, "write data", address);
+    write();
 }
 
 void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
@@ -855,8 +883,7 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
     rasterizer.WaitDeferredSignals();
     rasterizer.ProcessDownloadImages();
     rasterizer.NoteLabelWrite(event_eos.Address<VAddr>(), 4);
-    NoteOvertake(rasterizer, "end-of-shader label", event_eos.Address<VAddr>());
-    event_eos.SignalFence([](void* address, u64 value, u32 num_bytes) {
+    const auto write_label = [](void* address, u64 value, u32 num_bytes) {
         auto* memory = Core::Memory::Instance();
         TraceEopWrite(reinterpret_cast<u64>(address), value, "eos");
         Gow3WriteLog::Note(reinterpret_cast<u64>(address), &value, num_bytes, Gow3WriteLog::Fence);
@@ -864,7 +891,17 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
             const Vulkan::GpuWriteSite site{5};
             memcpy(address, &value, num_bytes);
         }
-    });
+    };
+    if (event_eos.command == PM4CmdEventWriteEos::Command::SignalFence) {
+        void* const address = event_eos.Address<void*>();
+        const u32 value = event_eos.DataDWord();
+        if (BehindHeldFence(rasterizer, [write_label, address, value] { write_label(address, value, 4); },
+                            reinterpret_cast<VAddr>(address), value, 4)) {
+            return;
+        }
+    }
+    NoteOvertake(rasterizer, "end-of-shader label", event_eos.Address<VAddr>());
+    event_eos.SignalFence(write_label);
     if (event_eos.command == PM4CmdEventWriteEos::Command::GdsStore) {
         ASSERT(event_eos.size == 1);
         rasterizer.Finish();

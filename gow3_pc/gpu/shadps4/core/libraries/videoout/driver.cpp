@@ -888,11 +888,19 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     // the configured rate. The fork's fix paces the movie player by game time instead
     // (src/movie_hook.h, cutscenes keep the frame rate): this stays the fallback for builds
     // whose player the hook does not find (probe.c sets GOW3_MOVIE_PACED=1 when it installs).
+    // Read when the first movie plays: this thread starts before the hook is installed.
     constexpr std::chrono::nanoseconds movie_period{1000000000 / 60};
-    const bool movie_paced_by_game = [] {
-        const char* env = std::getenv("GOW3_MOVIE_PACED");
-        return env && env[0] == '1';
-    }();
+    int movie_paced_by_game = -1;
+    const auto paced_by_game = [&movie_paced_by_game] {
+        if (movie_paced_by_game < 0) {
+            const char* env = std::getenv("GOW3_MOVIE_PACED");
+            movie_paced_by_game = env && env[0] == '1';
+            if (movie_paced_by_game) {
+                std::printf("VideoOut: movies paced by the game's clock; no 60 Hz vblank for them\n");
+            }
+        }
+        return movie_paced_by_game == 1;
+    };
     auto next_movie_vblank = std::chrono::steady_clock::now();
     bool movie_shown = false;
 
@@ -930,7 +938,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         // Check if it's time to take a request.
         auto& vblank_status = main_port.vblank_status;
         const auto now = std::chrono::steady_clock::now();
-        const bool movie = !movie_paced_by_game && fast_vblank && MovieActive(now);
+        const bool movie = fast_vblank && MovieActive(now) && !paced_by_game();
         if (movie != movie_shown) {
             movie_shown = movie;
             std::printf("VideoOut: %s\n", movie ? "movie playing, 60 Hz vblank" : "movie ended");

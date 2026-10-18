@@ -910,6 +910,9 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     # some frames (flat grey guns, GitHub #23, 18 Oct 2026). The fork's draw-pipe ordering fixes
     # (constant ring drains, register scan) may cover it; not verified. If the guns flicker grey,
     # turn the option off for Drake's Fortune.
+    # Uncharted 3 froze or crashed seconds into gameplay with it (19 Oct, 4K/120 FPS/DLAA): labels
+    # and interrupts overtook end-of-pipe fences held for their ray-cast readbacks. They now queue
+    # behind them (liverpool.cpp BehindHeldFence): 8 minutes clean, 66-78 FPS against 52 without.
     if multithreaded is not None:
         env["GOW3_DRAW_PIPE"] = multithreaded
         env["GOW3_VK_RECORD_THREAD"] = multithreaded
