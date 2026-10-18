@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -107,9 +108,30 @@ struct Values {
     std::atomic<const char*> dlss_problem{nullptr};
     /// DLSS transformer model (dlss_model=j|k|l|m, GOW3_DLSS_MODEL): 0 J, 1 K, 2 L, 3 M. Live.
     std::atomic<int> dlss_model{DlssModelDefault};
-    /// The menu's upscaler choice that waits for a restart (turning the upscaler on or off:
-    /// run.py prepares it at start), or -1. Saved in place of the running one.
-    std::atomic<int> pending_upscaler{-1};
+    /// Set by the renderer: temporal anti-aliasing can run in this game (Uncharted: the camera
+    /// from the scene shaders' user data, or the motion blur's velocity pass with
+    /// UNCHARTED_MOTION_SOURCE=velocity; off with UNCHARTED_TEMPORAL_AA=0).
+    std::atomic<bool> temporal_aa_available{false};
+    /// Set by the renderer: FSR/DLSS can also draw the scene smaller (preset above Native AA).
+    std::atomic<bool> upscale_modes_available{false};
+
+    /// Controls (gow3gpu.h Gow3Controls; the menu's Controls tab). The maps are guarded by
+    /// ControlsMutex(); a change calls ControlsChanged() so the pad reapplies them.
+    std::string pad_map, key_map, mouse_map;
+    std::atomic<bool> mouse{true}, mouse_invert{false};
+    std::atomic<float> mouse_sens{1.0f}, stick_speed{1.0f};
+    std::atomic<int> prompts{-1};
+    std::atomic<unsigned> controls_generation{0};
+    /// The controller shortcut for the in-game menu (GitHub #15: LT + R3 is also the sniper
+    /// zoom): 0 LT + right stick click, 1 View + Menu together, 2 none (Insert on the keyboard).
+    std::atomic<int> menu_shortcut{0};
+    /// gow3 18 Oct (GitHub #15, #19): menu_shortcut 3 = this custom controller shortcut, one or
+    /// two SDL gamepad button names ("lefttrigger"/"righttrigger" for the triggers) joined by
+    /// '+'; and the keyboard key that opens the menu (SDL key name). Guarded by ControlsMutex().
+    std::string menu_pad = "lefttrigger+rightstick", menu_key = "Insert";
+    /// The games' own draw distances in percent (Uncharted 2 and 3, src/runtime_gamesettings.c):
+    /// object fade distance, sun and point/spot light shadow distances.
+    std::atomic<int> fade_distance{100}, sun_shadow_distance{100}, light_shadow_distance{100};
 
     /// Startup settings for the explicit GOW3_RENDER_RES compatibility patch only.
     int startup_preset = NativeAA;
@@ -120,6 +142,14 @@ struct Values {
 };
 
 Values& Get();
+
+/// Guards the control maps (pad_map, key_map, mouse_map).
+std::mutex& ControlsMutex();
+/// After a change to the controls: the pad reapplies them on its next read.
+void ControlsChanged();
+/// The prompts setting as the file holds it ("auto", "keyboard", ...) and parsed (-1 auto).
+const char* PromptsName(int prompts);
+int ParsePrompts(const std::string& value);
 
 /// Reads the file, then the environment overrides. Called once at start.
 void Load();
@@ -133,9 +163,6 @@ int RenderPreset();
 bool ResolutionNeedsRestart();
 /// A startup graphics option differs from the one this launch started with.
 bool GraphicsNeedRestart();
-/// Turns the upscaler on or off from the menu: live when this launch started with one in the
-/// same state, else on the next start (pending_upscaler).
-void RequestUpscaler(int upscaler);
 /// Writes the file (menu changes).
 /// Key and value lines as the settings file holds them.
 using KeyValues = std::vector<std::pair<std::string, std::string>>;

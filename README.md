@@ -18,12 +18,28 @@ By **BilalReloaded** ([YouTube](https://www.youtube.com/@BilalReloaded/videos),
 | Game | Plays | Notes |
 |---|---|---|
 | Uncharted: Drake's Fortune | Yes | 60 FPS in the tested areas. Native rendering up to 2880x1620 (4K output through FSR 1). |
-| Uncharted 2: Among Thieves | Yes | Played at 1440p and 4K. Light scenes 60 FPS; the heaviest scenes 40-45 FPS (CPU-bound, see below). |
-| Uncharted 3: Drake's Deception | Yes | 1080p tested in play; 1440p and 4K start, play testing in progress. |
+| Uncharted 2: Among Thieves | Yes | Played at 1440p and 4K. 60 FPS and more; the heaviest view 99 FPS at 4K on an RTX 5080 (frame limit 120). |
+| Uncharted 3: Drake's Deception | Yes | Played at 1080p and 1440p, 4K tested: the Cartagena crowd 90 FPS at 4K on an RTX 5080 (frame limit 120). |
 
 The Collection menu, switching between the three games, saves, audio (music, speech, effects),
 cutscene movies and controllers work. Details and open issues: [analysis/STATUS.md](analysis/STATUS.md);
 plan and test list: [analysis/PLAN.md](analysis/PLAN.md).
+
+## System requirements and the lowest PC that plays
+
+- **Needs:** Windows 10 or 11 (64-bit); a CPU from **Intel's 4th-generation Core (Haswell, 2013)
+  or newer, or any AMD Ryzen** (the games need AVX, F16C, BMI1, MOVBE and LZCNT); a graphics card
+  or integrated GPU with **Vulkan 1.3** and a current driver; about **6 GB of free RAM** for the
+  game (16 GB in the PC recommended).
+- **Weakest GPU tested: the integrated AMD Radeon graphics of a Ryzen 7000/9000 desktop CPU**
+  (2 compute units, about a quarter of a PS4's GPU). At **720p**: Uncharted 3 27-39 FPS,
+  Uncharted 2 27 FPS, Drake's Fortune 24 FPS; at **540p** Uncharted 3 33 FPS. Playable, not
+  smooth. Settings: preset **Low**, render resolution **540p or 720p** with FSR 1, anti-aliasing
+  off.
+- **4 CPU cores:** 60 FPS in Drake's Fortune and Uncharted 3 (title screen and in play; a 4-core
+  test with a fast GPU), with **Idle game threads: Sleep** (the default). On a 4-6 core CPU also
+  try **Multithreaded rendering** (per game) and keep **Frames queued at 1**.
+- **Players report:** Core i5-10400F + RTX 3050 6 GB plays Uncharted 2 and 3.
 
 ## Features
 
@@ -41,25 +57,39 @@ plan and test list: [analysis/PLAN.md](analysis/PLAN.md).
   Every preset queues 1 frame. 2 frames queued is faster in heavy scenes, but GPU results
   reach the game a frame later: keep it at 1.
 
-  **Low-end PCs and laptops:** keep **Multithreaded rendering** on (launcher, **Performance**
-  tab, per game; the default) and **Frames queued at 1**. The PS4's GPU commands are otherwise processed
-  on one CPU core, which limits slower CPUs; with this option the Vulkan command recording runs on a
-  second core. On fast desktop CPUs it makes no difference. With a weak GPU also pick the **Low**
-  preset (720p + FSR 1). If a game hangs while loading, turn the option off again.
+  **Low-end PCs and laptops:** keep **Idle game threads** (launcher, **Performance** tab) on
+  **Sleep** (the default). With **Spin** the games' six job threads keep their cores busy while
+  they wait for work, as on the PS4 where each has its own core; on a 4-6 core CPU that took
+  nearly all of it (a 4-core test: 19-27 FPS on the title screen, 60 with Sleep). Keep
+  **Multithreaded rendering** on (per game; the default) and **Frames queued at 1**. The PS4's
+  GPU commands are otherwise processed on one CPU core, which limits slower CPUs; with this option
+  the Vulkan command recording runs on a second core. If a game hangs while loading, turn that
+  option off again. With a weak GPU also pick the **Low** preset (720p + FSR 1), or a DLSS/FSR
+  quality mode; integrated GPUs: render resolution **540p** with FSR 1.
 
-- **Display:** windowed, borderless or exclusive fullscreen; render resolution 720p, 900p, 1080p,
-  1440p, 1620p or 4K; FSR 1 upscaling; RCAS sharpening; FPS counter.
-- **Performance:** frame rate limit 30 / 40 / 45 / 50 / 55 / 60 / 120 (60 is the PS4's; 120 is
-  experimental, and faster rates break the games' movement, so they are not offered); frames
-  queued; background shader compilation; multithreaded rendering (experimental).
+- **Display:** windowed, borderless or exclusive fullscreen; render resolution 540p, 720p, 900p, 1080p,
+  1440p, 1620p or 4K; aspect ratio 16:9, 21:9, 32:9; anti-aliasing and upscaling (TAA, FSR 3.1,
+  FSR 4, NVIDIA DLSS: Native AA / DLAA or the Quality to Ultra Performance modes; DLSS model J, K,
+  L or M); FSR 1 upscaling; RCAS sharpening; FPS counter.
+- **Performance:** frame rate limit 30 / 40 / 45 / 50 / 55 / 60 / 75 / 90 / 100 / 120 (60 is the
+  PS4's; above 60 is experimental, and faster than 120 breaks the games' movement, so it is not
+  offered; with VSync a limit at or above the monitor's refresh rate follows the monitor; cutscene
+  movies keep their speed at any frame rate); frames queued; background shader compilation;
+  multithreaded rendering (on by default); idle game threads (sleep or spin).
 - **Keyboard and mouse:** mouse look (sensitivity, invert Y), right mouse aim, left mouse fire, WASD,
   and every action remappable per game in the **Controls** tab (two bindings per action, keys or
   mouse buttons). Controllers (DualSense, DualShock 4, Xbox) work at the same time.
+- **Language** (Advanced tab): any of the 22 languages the games have text for; each game's main
+  menu then offers it next to English (Square). Voices: the languages in your copy of the game.
+- **Unlock all chapters** (Advanced tab, off by default): every chapter and the Brutal difficulty
+  from the start in all three games; saves are untouched.
 - **Game update 1.02** is used automatically when it sits next to the game folder (see below).
 - Log and save folders, desktop shortcut, shader cache reset, game folder selection, links to the
   author's [YouTube](https://www.youtube.com/@BilalReloaded/videos) and GitHub.
 
-**In game:** `Insert` or `R3 + L2` opens the menu (display mode, frame rate, sharpening, overlay).
+**In game:** `Insert` or `LT + R3` opens the menu (display, anti-aliasing, draw distance, frame rate,
+overlay, controls). Both shortcuts can be changed in its Controls tab (any key; any one or two
+controller buttons).
 
 **Under the hood**
 - Native execution of the three game executables; the Collection's game switching (LoadExec).
@@ -74,11 +104,13 @@ plan and test list: [analysis/PLAN.md](analysis/PLAN.md).
 
 ## Known issues
 
-- **Frame rate in the heaviest Uncharted 2 scenes is about 50 FPS** at any resolution: the
-  PS4's GPU command processing runs on one CPU core here (3,000-5,600 draws per frame). Lighter
-  scenes reach 60. More optimization is planned.
+- **Drake's Fortune:** the grenade launcher can kill the player (GitHub #6). Being looked at.
+- **Slower CPUs:** the PS4's GPU commands are processed on one CPU core (3,000-5,600 draws per frame
+  in the heaviest scenes); on older CPUs those scenes can drop below 60 FPS.
 - **Multithreaded rendering is on by default** (Performance tab, per game): keep Frames queued at
-  1 with it. If a game hangs while loading, turn it off for that game.
+  1 with it. If a game hangs while loading, turn it off for that game. Drake's Fortune always runs
+  without it (its guns flickered grey with it, GitHub #23). With "Frames queued 2" Uncharted 2 can
+  still stop with the game assert `m_gfxEopTick`, so keep 1.
 - **Uncharted 3:** Sully's shirt in the bar can flicker at 60 FPS (not at 30).
 - **Recording with OBS Game Capture:** if OBS keeps losing and re-hooking the game, the game's
   memory use grows (each hook creates DirectX devices in the game). With an NVIDIA card set
@@ -164,6 +196,15 @@ tag `v0.1.1`; GitHub Actions then builds the package and publishes the release w
 - The runtime started from the [gow3_pc](https://github.com/FelipePrado0/gow3_pc) project
   (whose internal names, such as `GOW3_*` settings, it keeps) and the
   [shadPS4](https://github.com/shadps4-emu/shadPS4) video core.
+- Temporal anti-aliasing for Uncharted takes the camera from the games' motion-blur velocity
+  pass as SuperMedo's [Uncharted port](https://github.com/Supermedo/uncharted_pc) does (GPL v2;
+  `CameraMotion::OnVelocityConstants` and the motion vector mode come from it).
+- **NVIDIA DLSS:** DLAA uses NVIDIA DLSS technology: the NVIDIA DLSS SDK 310.9.16
+  (`nvngx_dlss.dll`, under NVIDIA's license, in `licenses/nvidia-dlss`) through the DLSS bridge adapted from
+  [IFreemz/shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR) (MIT).
+  NVIDIA, RTX and DLSS are trademarks of NVIDIA Corporation.
+- AMD FSR 4: the v07 INT8 model as built by [Q2RTX](https://github.com/FireBurn/Q2RTX) from AMD's
+  MIT-licensed FidelityFX SDK source.
 - Third-party code: FSR (AMD), imgui, magic_enum, miniz, xbyak, LibAtrac9, FFmpeg, SDL3.
 - Licensed under the GNU GPL v2 or later (see `gow3_pc/LICENSE`). The Windows package carries
   `LICENSE.txt` and a `licenses` folder with the license of every bundled library

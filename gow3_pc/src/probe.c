@@ -12,6 +12,8 @@
 #include "actor_hook.h"
 #include "damage_hook.h"
 #include "movie_hook.h"
+#include "runtime_mouselook.h"
+#include "runtime_gamesettings.h"
 #include "gpu/gow3gpu.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
@@ -258,7 +260,8 @@ static LONG watch_hit(EXCEPTION_POINTERS *info) {
         InterlockedExchange(&watch_lock,0);
         if (!fresh) return EXCEPTION_CONTINUE_EXECUTION;
     }
-    if (InterlockedIncrement(&watch_hits)<=400 && image) {
+    /* Only guest code is logged: runtime copies of the watched memory would fill the 400 lines. */
+    if (image && c->Rip-(uintptr_t)image<0x2000000 && InterlockedIncrement(&watch_hits)<=400) {
         char line[1024], s1[64], s2[64];
         watch_string(s1,sizeof(s1),c->Rsi); watch_string(s2,sizeof(s2),c->Rdx);
         int n=snprintf(line,sizeof(line),"Watch: dr6 %#llx rip guest %#llx rax %#llx rcx %#llx rdx %#llx rsi %#llx rdi %#llx r8 %#llx r9 %#llx [rsi '%s'] [rdx '%s'] callers",
@@ -291,6 +294,8 @@ void runtime_exec_watch_retarget(uint64_t address) {
     printf("Exec watch: data watch moved to %#llx\n",(unsigned long long)address);
     fflush(stdout);
 }
+static const char *exec_watch_file;
+static void poll_exec_watch_file(void);
 static DWORD WINAPI exec_watch_thread(LPVOID unused) {
     (void)unused;
     DWORD *armed=exec_watch_armed;
@@ -301,7 +306,8 @@ static DWORD WINAPI exec_watch_thread(LPVOID unused) {
     ULONGLONG start=GetTickCount64();
     const char *secs=getenv("GOW3_EXEC_WATCH_SECONDS");
     const ULONGLONG limit=(secs && atoi(secs)>0 ? (ULONGLONG)atoi(secs) : 600)*1000;
-    for (int round=0; GetTickCount64()-start<limit; ++round) {
+    for (int round=0; exec_watch_file || GetTickCount64()-start<limit; ++round) {
+        if (round%50==0) poll_exec_watch_file();
         HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);
         if (snap!=INVALID_HANDLE_VALUE) {
             THREADENTRY32 te={.dwSize=sizeof(te)};
@@ -320,10 +326,14 @@ static DWORD WINAPI exec_watch_thread(LPVOID unused) {
                         ctx.Dr7=0;
                         for (int i=0;i<exec_watch_count;++i) {
                             /* Bit 63 marks a data watch (w:<absolute address>): 8-byte writes;
-                             * with bit 62 (r: in GOW3_EXEC_WATCH_FILE) reads too. */
+                             * with bit 62 (r: in GOW3_EXEC_WATCH_FILE) reads too. Bit 62 alone
+                             * (r: in GOW3_EXEC_WATCH): a 4-byte read/write watch. */
                             if (exec_watch[i]>>63) {
                                 *dr[i]=(DWORD64)(exec_watch[i]&~(3ull<<62)&~7ull);
                                 ctx.Dr7|=(1ull<<(2*i))|((exec_watch[i]>>62&1 ? 3ull : 1ull)<<(16+4*i))|(2ull<<(18+4*i));
+                            } else if (exec_watch[i]>>62) {
+                                *dr[i]=(DWORD64)(exec_watch[i]&~(3ull<<62)&~3ull);
+                                ctx.Dr7|=(1ull<<(2*i))|(3ull<<(16+4*i))|(3ull<<(18+4*i));
                             } else {
                                 *dr[i]=(DWORD64)(uintptr_t)(image+exec_watch[i]);
                                 ctx.Dr7|=1ull<<(2*i);
@@ -369,26 +379,135 @@ static DWORD WINAPI exec_watch_thread(LPVOID unused) {
     printf("Exec watch: done (%ld threads armed)\n",(long)exec_watch_armed_count);
     return 0;
 }
-static void start_exec_watch(void) {
-    const char *env=getenv("GOW3_EXEC_WATCH");
-    if (!env || !*env) return;
-    for (const char *p=env; *p && exec_watch_count<4;) {
-        int data=0;
+/* Bit 62 marks a 4-byte read/write data watch (r:<absolute address>). */
+static int parse_exec_watch(const char *text, uint64_t out[4]) {
+    int count=0;
+    for (const char *p=text; *p && count<4;) {
+        while (*p==' ' || *p=='\n' || *p=='\r') ++p;
+        int data=0, read=0;
         if ((p[0]=='w' || p[0]=='W') && p[1]==':') { data=1; p+=2; }
+        else if ((p[0]=='r' || p[0]=='R') && p[1]==':') { read=1; p+=2; }
         char *end=NULL;
         uint64_t v=strtoull(p,&end,16);
         if (end==p) break;
-        exec_watch[exec_watch_count++]=data ? v|(1ull<<63) : v;
+        out[count++]=data ? v|(1ull<<63) : read ? v|(1ull<<62) : v;
         p=*end==',' ? end+1 : end;
     }
+    return count;
+}
+/* GOW3_EXEC_WATCH_FILE=<path>: the watch list (same syntax, plus r:<address>) is read from the
+ * file every second while the game runs; a changed list re-arms every thread (diagnostics: data
+ * watches on heap addresses found at runtime). */
+static const char *exec_watch_file;
+static char exec_watch_file_text[256];
+static void poll_exec_watch_file(void) {
+    if (!exec_watch_file) return;
+    FILE *f=fopen(exec_watch_file,"rb");
+    if (!f) return;
+    char text[256]={0};
+    size_t n=fread(text,1,sizeof(text)-1,f);
+    fclose(f);
+    text[n]=0;
+    if (!strcmp(text,exec_watch_file_text)) return;
+    strcpy(exec_watch_file_text,text);
+    uint64_t list[4]={0};
+    const int count=parse_exec_watch(text,list);
+    for (int i=0;i<4;++i) exec_watch[i]=list[i];
+    exec_watch_count=count;
+    InterlockedExchange(&watch_hits,0);
+    InterlockedExchange(&exec_watch_armed_count,0);
+    printf("Exec watch: %d watches from %s: %s\n",count,exec_watch_file,text);
+    fflush(stdout);
+}
+/* GOW3_POKE=<entry>[,<entry>...]: bytes the runtime keeps set in guest memory, rewritten every
+ * 250 ms (launcher cheats: the games' own debug-menu switches, tools/probe_uncharted.py CHEATS).
+ * An entry is <offset>[=<value>] (hex guest image offset, value 1 by default) or
+ * *<offset>+<add>[=<value>] (the byte <add> past the pointer stored at <offset>). Reads and
+ * writes go through Read/WriteProcessMemory: an address not mapped (yet) is skipped. */
+typedef struct { int deref; uint64_t offset, add; unsigned char value; } Poke;
+static Poke pokes[16];
+static int poke_count;
+static DWORD WINAPI poke_thread(LPVOID unused) {
+    (void)unused;
+    const HANDLE self=GetCurrentProcess();
+    for (;;) {
+        for (int i=0;i<poke_count;++i) {
+            uintptr_t address=(uintptr_t)image+(uintptr_t)pokes[i].offset;
+            SIZE_T got=0;
+            if (pokes[i].deref) {
+                uint64_t pointer=0;
+                if (!ReadProcessMemory(self,(LPCVOID)address,&pointer,sizeof(pointer),&got) || got!=sizeof(pointer) || !pointer) continue;
+                address=(uintptr_t)pointer+(uintptr_t)pokes[i].add;
+            }
+            unsigned char current=0;
+            if (ReadProcessMemory(self,(LPCVOID)address,&current,1,&got) && got==1 && current!=pokes[i].value)
+                WriteProcessMemory(self,(LPVOID)address,&pokes[i].value,1,NULL);
+        }
+        Sleep(250);
+    }
+    return 0;
+}
+static void start_pokes(void) {
+    const char *env=getenv("GOW3_POKE");
+    if (!env || !*env || !image) return;
+    const char *p=env;
+    while (*p && poke_count<16) {
+        Poke k={0};
+        char *end;
+        if (*p=='*') { k.deref=1; ++p; }
+        k.offset=strtoull(p,&end,16);
+        p=end;
+        if (k.deref && *p=='+') { k.add=strtoull(p+1,&end,16); p=end; }
+        k.value=1;
+        if (*p=='=') { k.value=(unsigned char)strtoul(p+1,&end,16); p=end; }
+        pokes[poke_count++]=k;
+        while (*p && *p!=',') ++p;
+        if (*p==',') ++p;
+    }
+    printf("Runtime: %d memory switches kept set (GOW3_POKE: %s)\n",poke_count,env);
+    CloseHandle(CreateThread(NULL,0,poke_thread,NULL,0,NULL));
+}
+static void start_exec_watch(void) {
+    const char *env=getenv("GOW3_EXEC_WATCH");
+    exec_watch_file=getenv("GOW3_EXEC_WATCH_FILE");
+    if ((!env || !*env) && !exec_watch_file) return;
+    if (env) exec_watch_count=parse_exec_watch(env,exec_watch);
     exec_watch_ready=CreateEventA(NULL,TRUE,FALSE,NULL);
     CloseHandle(CreateThread(NULL,0,exec_watch_thread,NULL,0,NULL));
     WaitForSingleObject(exec_watch_ready,5000);
-    printf("Exec watch: %d breakpoints armed from %s\n",exec_watch_count,env);
+    printf("Exec watch: %d breakpoints armed from %s\n",exec_watch_count,env ? env : "(file)");
+}
+/* GitHub #22 (18 Oct 2026, Windows 10 19041, all three games at start): the games run their job
+ * code on PS4 fibers whose stacks lie in guest memory (gow3_fiber.cpp), outside the stack the
+ * thread's TEB names. Resuming from any exception there, ntdll's RtlGuardRestoreContext ended the
+ * process (FAST_FAIL_INVALID_SET_OF_CONTEXT: the context's rsp outside the TEB stack). The TEB now
+ * names the stack the thread is on before an exception is handled: the guest allocation holding
+ * rsp, or the thread's own stack again once it is back there. */
+static void cover_current_stack(const CONTEXT *context) {
+    NT_TIB *tib=(NT_TIB *)NtCurrentTeb();
+    const uintptr_t sp=(uintptr_t)context->Rsp;
+    if (sp>=(uintptr_t)tib->StackLimit && sp<(uintptr_t)tib->StackBase) return;
+    static _Thread_local uintptr_t own_limit, own_base;
+    if (!own_base) { own_limit=(uintptr_t)tib->StackLimit; own_base=(uintptr_t)tib->StackBase; }
+    if (sp>=own_limit && sp<own_base) {
+        tib->StackLimit=(PVOID)own_limit; tib->StackBase=(PVOID)own_base;
+        return;
+    }
+    MEMORY_BASIC_INFORMATION region;
+    if (!VirtualQuery((LPCVOID)sp,&region,sizeof(region)) || region.State!=MEM_COMMIT) return;
+    uintptr_t low=(uintptr_t)region.AllocationBase, high=(uintptr_t)region.BaseAddress+region.RegionSize;
+    /* The rest of the allocation above rsp (protection changes split it into regions). */
+    for (int i=0;i<256;++i) {
+        MEMORY_BASIC_INFORMATION next;
+        if (!VirtualQuery((LPCVOID)high,&next,sizeof(next)) || next.AllocationBase!=region.AllocationBase) break;
+        high=(uintptr_t)next.BaseAddress+next.RegionSize;
+    }
+    tib->StackLimit=(PVOID)low; tib->StackBase=(PVOID)high;
 }
 static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
+    cover_current_stack(info->ContextRecord);
     if (code==EXCEPTION_SINGLE_STEP && (info->ContextRecord->Dr6&0xf)) return watch_hit(info);
     if (code==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2) {
         /* GOW3_FAULT_TRACE=1: the first 64 access violations (diagnostics), written directly so
@@ -415,7 +534,21 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
          * speculative read (draw preparation workers): resolving a GPU-modified page there waits
          * for the GPU thread, which may be waiting for a lock that worker holds (Uncharted 2
          * level load). Such a fault takes the recovery path; the GPU thread does that draw. */
-        if (gpu_enabled && !runtime_fault_recover && gow3gpu_handle_fault(info,(void *)record->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
+        if (gpu_enabled && !runtime_fault_recover) {
+            /* A fault inside the GPU fault handlers is legitimate a level or two deep (a handler
+             * touching another tracked page). A bug there recursed until the thread's stack ran
+             * out and the game froze for good (18 Oct 2026, Uncharted 3: the page table indexed
+             * with a garbage address, thousands of levels). Deeper than 8: a report, and stop. */
+            static _Thread_local int handler_depth;
+            if (handler_depth>=8) {
+                fprintf(stderr,"Fault handler: faulted inside itself %d levels deep\n",handler_depth);
+                return fatal_exception(info);
+            }
+            ++handler_depth;
+            const int handled=gow3gpu_handle_fault(info,(void *)record->ExceptionInformation[1]);
+            --handler_depth;
+            if (handled) return EXCEPTION_CONTINUE_EXECUTION;
+        }
         if (runtime_fault_recover) {
             /* A speculative guest memory read (GPU draw preparation) faulted: the thread resumes
              * in gow3_longjmp, outside the exception dispatcher, back at its recovery point. */
@@ -667,6 +800,13 @@ static void install_movie_pacing(Segment *segments, uint64_t count, uint64_t siz
     gow3_movie_build_call(call, (int32_t)delta);
     memcpy(image + at, call, sizeof(call));
     printf("Movies: frame pacing by game time at %#llx (clock dt +%#x)\n", (unsigned long long)at, (unsigned)dt_offset);
+    /* The GPU library's fallback (60 Hz vblanks while a movie plays, VideoOut) is then not needed:
+     * the game keeps its frame rate in cutscenes. */
+#ifdef _WIN32
+    _putenv_s("GOW3_MOVIE_PACED", "1");
+#else
+    setenv("GOW3_MOVIE_PACED", "1", 1);
+#endif
 }
 /* Damage hook for the enemy health bar (src/actor_hook.h). Always
  * installed when the code matches: it only records values; the overlay decides what to show. */
@@ -737,6 +877,96 @@ static int install_jump(uint64_t at, unsigned length, unsigned char *stub) {
     return 1;
 }
 
+/* A page for hook stubs within relative-jump range of the image (the image sits below 2 GiB with
+ * --low-image; a page anywhere may be out of range). */
+static unsigned char *allocate_near_image(uint64_t size) {
+#ifdef _WIN32
+    /* Free regions within +-1.5 GiB of the image (below it too: the linked modules and runtime
+     * reservations can fill the space right above it). */
+    const uintptr_t lo = (uintptr_t)image > UINT64_C(0x60000000) ? (uintptr_t)image - UINT64_C(0x60000000) : 0x10000;
+    const uintptr_t hi = (uintptr_t)image + (uintptr_t)size + UINT64_C(0x60000000);
+    MEMORY_BASIC_INFORMATION info;
+    for (uintptr_t address = lo; address < hi && VirtualQuery((void *)address, &info, sizeof(info));
+         address = (uintptr_t)info.BaseAddress + info.RegionSize) {
+        if (info.State != MEM_FREE) continue;
+        const uintptr_t start = ((uintptr_t)info.BaseAddress + 0xffff) & ~(uintptr_t)0xffff;
+        if (start + page_size > (uintptr_t)info.BaseAddress + info.RegionSize) continue;
+        void *p = VirtualAlloc((void *)start, page_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (p) return p;
+    }
+    return NULL;
+#else
+    (void)size;
+    return allocate(page_size);
+#endif
+}
+/* Mouse look stub (src/runtime_mouselook.h): saves rax, rcx, rdx, rsi, rdi, r8-r11 and xmm0-7
+ * (the entry's argument and scratch registers; rsp stays 16-byte aligned at the call), calls the
+ * handler with rdi/rsi/rdx unchanged, stores a non-NULL result over the saved rdx, restores them,
+ * replays the replaced bytes and jumps back. */
+static unsigned build_mouse_look_stub(unsigned char *p, const MouseLookSite *site, uintptr_t resume) {
+    static const unsigned char save[] = {
+        0x50, 0x51, 0x52, 0x56, 0x57, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53,
+        0x48, 0x81, 0xec, 0x80, 0x00, 0x00, 0x00,
+        0xf3, 0x0f, 0x7f, 0x04, 0x24,       0xf3, 0x0f, 0x7f, 0x4c, 0x24, 0x10,
+        0xf3, 0x0f, 0x7f, 0x54, 0x24, 0x20, 0xf3, 0x0f, 0x7f, 0x5c, 0x24, 0x30,
+        0xf3, 0x0f, 0x7f, 0x64, 0x24, 0x40, 0xf3, 0x0f, 0x7f, 0x6c, 0x24, 0x50,
+        0xf3, 0x0f, 0x7f, 0x74, 0x24, 0x60, 0xf3, 0x0f, 0x7f, 0x7c, 0x24, 0x70,
+    };
+    static const unsigned char restore[] = {
+        0xf3, 0x0f, 0x6f, 0x04, 0x24,       0xf3, 0x0f, 0x6f, 0x4c, 0x24, 0x10,
+        0xf3, 0x0f, 0x6f, 0x54, 0x24, 0x20, 0xf3, 0x0f, 0x6f, 0x5c, 0x24, 0x30,
+        0xf3, 0x0f, 0x6f, 0x64, 0x24, 0x40, 0xf3, 0x0f, 0x6f, 0x6c, 0x24, 0x50,
+        0xf3, 0x0f, 0x6f, 0x74, 0x24, 0x60, 0xf3, 0x0f, 0x6f, 0x7c, 0x24, 0x70,
+        0x48, 0x81, 0xc4, 0x80, 0x00, 0x00, 0x00,
+        0x41, 0x5b, 0x41, 0x5a, 0x41, 0x59, 0x41, 0x58, 0x5f, 0x5e, 0x5a, 0x59, 0x58,
+    };
+    unsigned n = 0;
+    memcpy(p + n, save, sizeof(save)); n += sizeof(save);
+    p[n++] = 0x48; p[n++] = 0xb8; /* mov rax, handler */
+    const uint64_t handler = (uint64_t)(uintptr_t)site->handler;
+    memcpy(p + n, &handler, 8); n += 8;
+    p[n++] = 0xff; p[n++] = 0xd0; /* call rax */
+    /* test rax, rax; jz +8; mov [rsp + 0xb0], rax (the saved rdx: 0x80 of xmm, then r11 r10 r9
+     * r8 rdi rsi above it) */
+    static const unsigned char replace_rdx[] = {0x48, 0x85, 0xc0, 0x74, 0x08,
+                                                0x48, 0x89, 0x84, 0x24, 0xb0, 0x00, 0x00, 0x00};
+    memcpy(p + n, replace_rdx, sizeof(replace_rdx)); n += sizeof(replace_rdx);
+    memcpy(p + n, restore, sizeof(restore)); n += sizeof(restore);
+    memcpy(p + n, site->expected, site->length); n += site->length;
+    static const unsigned char jump[] = {0xff, 0x25, 0x00, 0x00, 0x00, 0x00}; /* jmp [rip+0] */
+    memcpy(p + n, jump, sizeof(jump)); n += sizeof(jump);
+    const uint64_t target = (uint64_t)resume;
+    memcpy(p + n, &target, 8); n += 8;
+    return n;
+}
+static void install_mouse_look(Segment *segments, uint64_t count, uint64_t size) {
+    if (!runtime_mouselook_enabled()) return;
+    unsigned n = 0, used = 0, installed = 0;
+    const MouseLookSite *sites = runtime_mouselook_sites(&n);
+    unsigned char *stubs = NULL;
+    for (unsigned i = 0; i < n; ++i) {
+        const MouseLookSite *site = &sites[i];
+        if (site->offset + site->expected_length > size || !mapped(segments, count, site->offset, site->expected_length) ||
+            memcmp(image + site->offset, site->expected, site->expected_length)) continue;
+        if (!stubs && !(stubs = allocate_near_image(size))) {
+            puts("Mouse look: unavailable (no stub page in range)");
+            return;
+        }
+        if (used + 256 > page_size) break;
+        build_mouse_look_stub(stubs + used, site, (uintptr_t)(image + site->offset + site->length));
+        if (!install_jump(site->offset, site->length, stubs + used)) {
+            printf("Mouse look: %s unavailable (stub out of range)\n", site->game);
+            continue;
+        }
+        runtime_mouselook_set_image(image);
+        printf("Mouse look: %s camera at image offset %#llx\n", site->game, (unsigned long long)site->offset);
+        used += 256;
+        ++installed;
+    }
+    if (stubs) protect(stubs, page_size, 5);
+    if (!installed) puts("Mouse look: no known camera code in this executable (mouse acts as the right stick)");
+}
 /* Damage dealt/taken and green/blue/gold orb multipliers (src/damage_hook.h, src/orb_hook.h):
  * the stubs read the menu's floats directly, so changes apply on the next hit or pickup. */
 static void install_stat_multipliers(Segment *segments, uint64_t count, uint64_t size) {
@@ -858,6 +1088,7 @@ int main(int argc, char **argv) {
     int guest_argc=1;
     unsigned timeout_seconds = 10;
     const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL;
+    const char *app0_overlays[4]; int app0_overlay_count=0;
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--cpu-only")) cpu_only = 1;
         else if (!strcmp(argv[i], "--strict-imports")) strict_imports = 1;
@@ -866,6 +1097,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--low-image")) low_image = 1;
         else if (!strcmp(argv[i], "--content-profile") && i+1<argc) content_profile=argv[++i];
         else if (!strcmp(argv[i], "--app0") && i+1<argc) app0=argv[++i];
+        else if (!strcmp(argv[i], "--app0-overlay") && i+1<argc) {
+            if (app0_overlay_count==4) { fprintf(stderr, "Too many --app0-overlay options\n"); return 1; }
+            app0_overlays[app0_overlay_count++]=argv[++i];
+        }
         else if (!strcmp(argv[i], "--user") && i+1<argc) user_dir=argv[++i];
         else if (!strcmp(argv[i], "--patches") && i+1<argc) patch_file=argv[++i];
         else if (!strcmp(argv[i], "--timeout") && i+1<argc) timeout_seconds=(unsigned)strtoul(argv[++i],NULL,10);
@@ -877,7 +1112,7 @@ int main(int argc, char **argv) {
         else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
     }
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--check-imports] [--no-game-hooks] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--timeout seconds] [--guest-path /app0/file] [--guest-arg value]... | --vulkan-only\n", argv[0]);
+        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--check-imports] [--no-game-hooks] [--content-profile file] [--app0 dir] [--app0-overlay dir]... [--user dir] [--patches file] [--timeout seconds] [--guest-path /app0/file] [--guest-arg value]... | --vulkan-only\n", argv[0]);
         return 1;
     }
     /* The guest code needs the PS4's instruction sets (#33, #66); GOW3_CPU_CHECK=0 skips this. */
@@ -905,8 +1140,9 @@ int main(int argc, char **argv) {
     }
     if (app0) {
         runtime_file_configure(app0, user_dir ? user_dir : "user");
+        for (int i=0;i<app0_overlay_count;++i) runtime_file_add_overlay(app0_overlays[i]);
         char sfo[4096], id[16]="";
-        snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0);
+        if (runtime_file_translate("/app0/sce_sys/param.sfo",sfo,sizeof(sfo))) snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0);
         if (sfo_value(sfo,"INSTALL_DIR_SAVEDATA",id,sizeof(id),NULL) || sfo_value(sfo,"TITLE_ID",id,sizeof(id),NULL))
             runtime_savedata_configure(id);
     }
@@ -1041,7 +1277,7 @@ int main(int argc, char **argv) {
     if (!cpu_only) {
         char title[128]="Uncharted: The Nathan Drake Collection", serial[16]="UNKNOWN", sfo[4096];
         uint32_t attributes=0;
-        snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
+        if (!app0 || runtime_file_translate("/app0/sce_sys/param.sfo",sfo,sizeof(sfo))) snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
         sfo_value(sfo,"TITLE",title,sizeof(title),NULL);
         sfo_value(sfo,"TITLE_ID",serial,sizeof(serial),NULL);
         sfo_value(sfo,"ATTRIBUTE",NULL,0,&attributes);
@@ -1100,6 +1336,8 @@ int main(int argc, char **argv) {
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
     if (gpu_enabled) install_movie_pacing(segments, ns, size);
+    if (gpu_enabled) install_mouse_look(segments, ns, size);
+    runtime_gamesettings_set_image(image, size);
     if (gpu_enabled && game_hooks) {
         install_orb_multiplier(segments, ns, size);
         install_cheats(segments, ns, size);
@@ -1143,6 +1381,7 @@ int main(int argc, char **argv) {
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
 #ifdef _WIN32
     start_exec_watch();
+    start_pokes();
 #endif
     entered_game=1;
     struct { uint64_t argc; const char *argv[17]; } params = {(uint64_t)guest_argc, {NULL}};

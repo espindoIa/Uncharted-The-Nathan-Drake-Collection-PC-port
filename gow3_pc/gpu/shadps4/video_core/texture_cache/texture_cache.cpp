@@ -21,6 +21,7 @@
 #include "video_core/texture_cache/aliasing.h"
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "gow3_prompts.h"
 #include "video_core/texture_cache/tile_manager.h"
 
 // src/runtime_videodec.c: the last decoded video frame buffer (diagnostics).
@@ -711,14 +712,17 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         new_info.UpdateSize();
         const auto new_image_id = slot_images.insert(instance, runtime, slot_image_views, new_info);
         RegisterImage(new_image_id);
+        // gow3 18 Oct 2026: the insert moves every image when the slot vector grows (Reserve), so
+        // `cache_image` may point into freed memory now: both are fetched again.
+        auto& old_image = slot_images[cache_image_id];
 
         // Inherit image usage
         auto& new_image = slot_images[new_image_id];
-        new_image.usage = cache_image.usage;
+        new_image.usage = old_image.usage;
         new_image.flags &= ~ImageFlagBits::Dirty;
         // When creating a depth buffer through overlap resolution don't clear it on first use.
         new_image.info.meta_info.htile_clear_mask = 0;
-        runtime.CopyColorAndDepth(&cache_image, &new_image);
+        runtime.CopyColorAndDepth(&old_image, &new_image);
 
         // Free the cache image.
         FreeImage(cache_image_id);
@@ -1268,9 +1272,14 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
             stencil_id = slot_images.insert(instance, runtime, slot_image_views, info);
             RegisterImage(stencil_id);
         }
+        // gow3 18 Oct 2026: the insert above moves every image when the slot vector grows
+        // (Reserve), so `image` may point into freed memory: fetched again (the user's U2 crash
+        // after 38 minutes, a read of image_uid here).
+        Image& depth_image = slot_images[image_id];
         Image& stencil_image = slot_images[stencil_id];
         TouchImage(stencil_image);
-        stencil_image.AssociateDepth(image_id, image.image_uid);
+        stencil_image.AssociateDepth(image_id, depth_image.image_uid);
+        return depth_image.FindView(desc.view_info, false);
     }
 
     return image.FindView(desc.view_info, false);
@@ -1354,6 +1363,33 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     scheduler.EndRendering();
+
+    // gow3: keyboard, mouse and controller button prompts (gow3_prompts.cpp): the games' button
+    // icon atlas and button pictures upload redrawn (linear texels) while their icons show.
+    const bool bc1 = image.info.pixel_format == vk::Format::eBc1RgbaUnormBlock ||
+                     image.info.pixel_format == vk::Format::eBc1RgbaSrgbBlock;
+    const u32 w = image.info.size.width, h = image.info.size.height;
+    if (num_layers == 1 && !is_gpu_modified &&
+        ((w == 512 && h == 512 && image.info.num_bits == 32 && num_mips == 1) ||
+         (bc1 && w >= 64 && w <= 512 && h >= 64 && h <= 512))) {
+        if (const auto texels = Gow3Prompts::Replacement(
+                image.info.guest_address, image.info.guest_size, image.info.mips_layout[0].size, w, h,
+                num_mips, bc1, static_cast<u32>(image.info.tile_mode));
+            texels && texels->mips.size() >= num_mips) {
+            const auto staging =
+                runtime.GetStagingPool().Request(texels->data.size(), MemoryType::HostUncached, 16);
+            std::memcpy(staging.mapped, texels->data.data(), texels->data.size());
+            staging.Flush();
+            for (auto& copy : image_copies) {
+                const auto& mip = texels->mips[copy.imageSubresource.mipLevel];
+                copy.bufferOffset = staging.offset + mip.offset;
+                copy.bufferRowLength = mip.row;
+                copy.bufferImageHeight = mip.height;
+            }
+            runtime.UploadImage(&image, staging.buffer, image_copies);
+            return;
+        }
+    }
 
     const auto [in_buffer, in_offset] =
         buffer_cache.ObtainBufferForImage(image.info.guest_address, image.info.guest_size);
@@ -1564,11 +1600,20 @@ void TextureCache::GarbageCollectImages() {
         // collector evicted images used two or three frames ago on every submission and wrote
         // GPU-written ones back. Compare with the driver's current budget instead.
         // GOW3_GC_BUDGET_MB=N: this rule with a fixed budget on any GPU (tests on a desktop).
+        // gow3: discrete GPUs use it too (18 Oct, RTX 5060 Laptop, 8 GB): the startup rule put
+        // the pressure mark at 40% of an 8 GB budget (2495 of ~6240 MiB) and the usage counts
+        // the buffer arenas in device-local memory, so U2 at ~3 GB evicted up to 500 images per
+        // 5 s and re-registered ~200 of them (~225 MB of uploads) in one frame every ~15 s
+        // (75-80 ms frames). GOW3_GC_STARTUP_RULE=1: the startup rule on discrete GPUs again.
         static const u64 forced_budget = [] {
             const char* env = std::getenv("GOW3_GC_BUDGET_MB");
             return env ? std::strtoull(env, nullptr, 10) << 20 : 0;
         }();
-        if (instance.IsIntegrated() || forced_budget) {
+        static const bool startup_rule = [] {
+            const char* env = std::getenv("GOW3_GC_STARTUP_RULE");
+            return env && env[0] == '1';
+        }();
+        if (instance.IsIntegrated() || forced_budget || !startup_rule) {
             const u64 budget = forced_budget ? forced_budget : instance.GetDeviceMemoryBudgetNow();
             if (budget != 0) {
                 trigger_gc_memory = budget / 10 * 7;

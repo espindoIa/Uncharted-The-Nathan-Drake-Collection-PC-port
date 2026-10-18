@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import shutil
 import struct
 import subprocess
@@ -36,16 +37,21 @@ RUN_SCRIPT = ROOT / "tools" / "probe_uncharted.py"
 CONFIG_FILE = Path(os.environ.get("APPDATA", Path.home())) / "Uncharted Launcher" / "launcher.json"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 APP_TITLE = "Uncharted: The Nathan Drake Collection"
+# Credits shown on the Advanced page: the anti-aliasing technologies.
+CREDITS = ("Credits: DLSS and DLAA use NVIDIA DLSS technology. NVIDIA, RTX and DLSS are trademarks of NVIDIA "
+           "Corporation. AMD FidelityFX Super Resolution (FSR 3.1, FSR 4) by AMD. Uncharted camera "
+           "motion for anti-aliasing after SuperMedo's Uncharted port.")
 # The author's links in the launcher header: label, address, color, hover color.
-LINKS = (("YouTube", "https://www.youtube.com/@BilalReloaded/videos", "#d6302a", "#ef4038"),
+LINKS = (("Patreon", "https://www.patreon.com/c/bilalreloaded", "#f96854", "#ff7f6e"),
+         ("YouTube", "https://www.youtube.com/@BilalReloaded/videos", "#d6302a", "#ef4038"),
          ("GitHub", "https://github.com/bc160201983", "#24292f", "#3a4048"))
 
 GAMES = [
-    {"key": "u1", "number": "1", "title": "DRAKE'S FORTUNE", "name": "Uncharted: Drake's Fortune", "subtitle": "Starts Uncharted 1 directly",
+    {"key": "u1", "number": "1", "title": "DRAKE'S FORTUNE", "name": "Uncharted: Drake's Fortune", "subtitle": "Uncharted 1  •  double-click to play",
      "exe": "eboot.bin", "log": "uncharted"},
-    {"key": "u2", "number": "2", "title": "AMONG THIEVES", "name": "Uncharted 2: Among Thieves", "subtitle": "Starts Uncharted 2 directly",
+    {"key": "u2", "number": "2", "title": "AMONG THIEVES", "name": "Uncharted 2: Among Thieves", "subtitle": "Uncharted 2  •  double-click to play",
      "exe": "big2-ps4_Shipping.elf", "log": "big2-ps4_Shipping"},
-    {"key": "u3", "number": "3", "title": "DRAKE'S DECEPTION", "name": "Uncharted 3: Drake's Deception", "subtitle": "Starts Uncharted 3 directly",
+    {"key": "u3", "number": "3", "title": "DRAKE'S DECEPTION", "name": "Uncharted 3: Drake's Deception", "subtitle": "Uncharted 3  •  double-click to play",
      "exe": "big3-ps4_Shipping.elf", "log": "big3-ps4_Shipping"},
 ]
 
@@ -65,23 +71,23 @@ STOP_RED = "#b5533c"
 # At most 120: faster, the game's movement timing breaks (Drake's Fortune at 140-160 FPS: running
 # slows, Nate fell through the world). The runtime caps older, faster settings at 120 too.
 MAX_FPS = 120
-FPS_LIMITS = [(30, "30"), (40, "40"), (45, "45"), (50, "50"), (55, "55"), (60, "60"),
-              (MAX_FPS, str(MAX_FPS))]
+FPS_LIMITS = [(30, "30"), (40, "40"), (45, "45"), (50, "50"), (55, "55"), (60, "60"), (75, "75"),
+              (90, "90"), (100, "100"), (MAX_FPS, str(MAX_FPS))]
 
 # Runtime options in probe.ini (key -> default) and launcher-only ones.
 INI_DEFAULTS = {
     "display_mode": "windowed", "vsync": "1", "fps_limit": "60", "frames_queued": "1",
     "async_shaders": "1", "fsr1": "0", "rcas": "1", "rcas_strength": "75", "show_fps": "1",
+    "upscaler": "off", "preset": "0", "dlss_model": "k",
 }
-# NVIDIA DLSS (gow3_dlss.dll + nvngx_dlss.dll next to the runtime): the runtime's upscaler and
-# preset keys (gow3_settings: preset 0 DLAA, 1 Quality, 2 Balanced, 3 Performance, 4 Ultra
-# Performance). With a mode below DLAA the render resolution above is DLSS's output.
-DLSS_MODES = [("off", "Off"), ("0", "DLAA"), ("1", "Quality"), ("2", "Balanced"), ("3", "Performance"),
-              ("4", "Ultra Perf.")]
+# FSR/DLSS quality modes (the runtime's preset key, also in the in-game menu): 0 draws the scene at
+# the render resolution (Native AA / DLAA); the others draw it smaller and rebuild it at the render
+# resolution, which is then their output.
+UPSCALE_MODES = [("0", "Native / DLAA"), ("1", "Quality"), ("2", "Balanced"), ("3", "Performance"),
+                 ("4", "Ultra Perf.")]
 # DLSS transformer models (the runtime's dlss_model key, also in the in-game menu): K is the
 # fastest; M is sharper in Performance mode but costs ~0.8 ms more per 4K frame (RTX 5070).
 DLSS_MODELS = [("j", "Model J"), ("k", "Model K"), ("l", "Model L"), ("m", "Model M")]
-DLSS_GAMES = ("u1", "u2", "u3")  # games whose camera the runtime finds (tools/probe_uncharted.py)
 
 
 # NVIDIA's nvngx_dlss.dll is not shipped (its license does not fit the port's GPL): the player
@@ -113,11 +119,45 @@ def ngx_signature_ok(path):
     return result.returncode == 0
 
 
-LAUNCHER_DEFAULTS = {"game": "u1", "diagnostics": True, "game_dir": "", "check_updates": True}
+# Cheats (Advanced page): name, title, hint. tools/probe_uncharted.py turns on the games' own
+# switches for them (CHEATS there).
+CHEATS = (("invincible", "Invincible", "Nate takes no damage. All three games."),
+          ("ammo", "Infinite ammo", "Ammo never runs out. All three games."),
+          ("noreload", "No reload", "The magazine never empties. Uncharted 2 and 3."),
+          ("grenades", "Infinite grenades", "Grenades never run out. Uncharted 3."),
+          ("onehit", "One-hit kills", "Enemies go down with one hit. Uncharted 3."))
+LAUNCHER_DEFAULTS = {"game": "u1", "diagnostics": True, "game_dir": "", "check_updates": True, "language": "1",
+                     "unlock": False}
+
+# The PS4's system language (its id, as sceSystemServiceParamGetInt reports it) for the 22 languages
+# the Collection has text for (all three games; text1/ps4/<n>.common in core.psarc). Each game's main
+# menu then offers it next to English (Square). Spoken languages depend on the copy of the game:
+# its sound1 speech packs (SPEECH_PACKS).
+LANGUAGES = [("1", "English (US)"), ("18", "English (UK)"), ("2", "Français"), ("4", "Deutsch"),
+             ("5", "Italiano"), ("3", "Español (España)"), ("20", "Español (Latinoamérica)"),
+             ("7", "Português (Portugal)"), ("17", "Português (Brasil)"), ("6", "Nederlands"),
+             ("14", "Dansk"), ("15", "Norsk"), ("13", "Svenska"), ("12", "Suomi"), ("16", "Polski"),
+             ("23", "Čeština"), ("25", "Ελληνικά"), ("8", "Русский"), ("19", "Türkçe"),
+             ("0", "日本語"), ("9", "한국어"), ("10", "中文 (繁體)")]
+SPEECH_PACKS = {"english": ("1", "18"), "french": ("2",), "german": ("4",), "italian": ("5",),
+                "spanish": ("3", "20"), "portuguese": ("7", "17"), "dutch": ("6",), "danish": ("14",),
+                "norwegian": ("15",), "swedish": ("13",), "finnish": ("12",), "polish": ("16",),
+                "czech": ("23",), "greek": ("25",), "russian": ("8",), "turkish": ("19",),
+                "japanese": ("0",), "korean": ("9",), "chinese": ("10",)}
+
+
+def voice_languages(game_dir):
+    """Language ids with speech in this copy of the game (its *_ps4.psarc speech packs)."""
+    ids = set()
+    for pattern in ("u*data/build/main/sound1/speech/*_ps4.psarc",
+                    "u*data/build/main/sound1/streams/speech/*_ps4.psarc"):
+        for pack in Path(game_dir).glob(pattern) if game_dir else ():
+            ids.update(SPEECH_PACKS.get(pack.name.removesuffix("_ps4.psarc").lower(), ()))
+    return ids
 GAME_KEYS = ("u1", "u2", "u3")
-GAME_SETTING_DEFAULTS = {"preset": "medium", "resolution": "1920x1080", "multithreaded": True,
+GAME_SETTING_DEFAULTS = {"preset": "medium", "resolution": "1920x1080", "aspect": "16:9", "multithreaded": True,
                          "async_readback": False, "controls": None, "mouse": True, "mouse_sens": "1.0",
-                         "mouse_invert": False}
+                         "mouse_invert": False, "prompts": "auto"}
 
 # Keyboard and mouse controls (runtime_pad.c): action -> up to two bindings, "key:<SDL key name>"
 # or "mouse:<left|middle|right|x1|x2|wheel_up|wheel_down>". Stick directions take keys only.
@@ -125,15 +165,260 @@ CONTROL_GROUPS = (
     ("MOVEMENT", (("ls_up", "Move forward"), ("ls_down", "Move back"), ("ls_left", "Move left"),
                   ("ls_right", "Move right"), ("rs_up", "Look up"), ("rs_down", "Look down"),
                   ("rs_left", "Look left"), ("rs_right", "Look right"))),
-    ("WEAPONS (D-PAD)", (("left", "D-pad left"), ("right", "D-pad right"), ("up", "D-pad up"),
-                         ("down", "D-pad down"))),
-    ("ACTIONS", (("cross", "Jump, climb  (Cross)"), ("circle", "Cover, roll, drop  (Circle)"),
-                 ("square", "Melee  (Square)"), ("triangle", "Reload, pick up  (Triangle)"),
-                 ("l2", "Aim  (L2)"), ("r2", "Fire  (R2)"), ("l1", "Grenade aim  (L1)"),
-                 ("r1", "Grenade throw  (R1)"), ("l3", "L3"), ("r3", "R3"),
-                 ("options", "Pause menu  (Options)"), ("touchpad_left", "Touchpad left"),
-                 ("touchpad_right", "Touchpad right"))),
+    ("WEAPONS (D-PAD)", (("left", "Left"), ("right", "Right"), ("up", "Up"), ("down", "Down"))),
+    ("ACTIONS", (("cross", "Jump, climb"), ("circle", "Cover, roll, drop"),
+                 ("square", "Melee"), ("triangle", "Reload, pick up"),
+                 ("l2", "Aim"), ("r2", "Fire"), ("l1", "Grenade aim"),
+                 ("r1", "Grenade throw"), ("l3", "Left stick press"), ("r3", "Right stick press"),
+                 ("options", "Pause menu"), ("touchpad_left", "Touch left"),
+                 ("touchpad_right", "Touch right"))),
 )
+# Controllers. The controller button of each action, as SDL names it (runtime_pad.c's default
+# controller map; GOW3_PAD_MAP takes these names). Buttons can be rebound; the sticks, triggers
+# and the touchpad's left click (Back/View with LB held) cannot.
+PAD_DEFAULTS = {"cross": "a", "circle": "b", "square": "x", "triangle": "y", "l1": "leftshoulder",
+                "r1": "rightshoulder", "l3": "leftstick", "r3": "rightstick", "options": "start",
+                "touchpad_right": "back", "up": "dpup", "down": "dpdown", "left": "dpleft", "right": "dpright"}
+PAD_FIXED = {"l2": "lefttrigger", "r2": "righttrigger", "touchpad_left": "leftshoulder+back",
+             "ls_up": "lstick", "ls_down": "lstick", "ls_left": "lstick", "ls_right": "lstick",
+             "rs_up": "rstick", "rs_down": "rstick", "rs_left": "rstick", "rs_right": "rstick"}
+# SDL_GamepadButton order (SDL3).
+SDL_BUTTONS = ("a", "b", "x", "y", "back", "guide", "start", "leftstick", "rightstick", "leftshoulder",
+               "rightshoulder", "dpup", "dpdown", "dpleft", "dpright", "misc1", "paddle1", "paddle2",
+               "paddle3", "paddle4", "touchpad")
+PAD_NAMES = {  # (Xbox, PlayStation): the slot's text where there is no icon, and hints
+    "a": ("A", "Cross"), "b": ("B", "Circle"), "x": ("X", "Square"), "y": ("Y", "Triangle"),
+    "back": ("View", "Share"), "guide": ("Guide", "PS"), "start": ("Menu", "Options"),
+    "leftstick": ("LS", "L3"), "rightstick": ("RS", "R3"), "leftshoulder": ("LB", "L1"),
+    "rightshoulder": ("RB", "R1"), "lefttrigger": ("LT", "L2"), "righttrigger": ("RT", "R2"),
+    "dpup": ("D-pad up", "D-pad up"), "dpdown": ("D-pad down", "D-pad down"),
+    "dpleft": ("D-pad left", "D-pad left"), "dpright": ("D-pad right", "D-pad right"),
+    "misc1": ("Share", "Mute"), "paddle1": ("P1", "P1"), "paddle2": ("P2", "P2"), "paddle3": ("P3", "P3"),
+    "paddle4": ("P4", "P4"), "touchpad": ("Touchpad", "Touchpad"), "lstick": ("L stick", "L stick"),
+    "rstick": ("R stick", "R stick"),
+}
+
+
+def merged_pad_controls(pad_controls):
+    merged = dict(PAD_DEFAULTS)
+    for action, button in (pad_controls or {}).items():
+        if action in merged:
+            merged[action] = button or None
+    return merged
+
+
+def pad_map(pad_controls):
+    """GOW3_PAD_MAP for a game's controller bindings ("" when they are the defaults)."""
+    merged = merged_pad_controls(pad_controls)
+    if merged == PAD_DEFAULTS:
+        return ""
+    return ",".join(f"{action}={button or ''}" for action, button in merged.items())
+
+
+def _pad_font(size):
+    from PIL import ImageFont
+    for name in ("segoeuib.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def pad_icon(button, style, height):
+    """A controller button's icon (PIL RGBA image, `height` pixels tall): Xbox or PlayStation."""
+    s = 4  # drawn 4x, then scaled down (smooth edges)
+    H = height * s
+    ps = style == "playstation"
+    body, rim, ink = (32, 32, 34, 255), (150, 150, 150, 255), (240, 240, 240, 255)
+    if "+" in button:  # a combination: the icons side by side with a plus
+        parts = [pad_icon(b, style, height) for b in button.split("+")]
+        plus_w = height // 2
+        img = Image.new("RGBA", (sum(i.width for i in parts) + plus_w * (len(parts) - 1), height))
+        x = 0
+        for i, part in enumerate(parts):
+            img.alpha_composite(part, (x, 0))
+            x += part.width
+            if i + 1 < len(parts):
+                d = ImageDraw.Draw(img)
+                cx, cy, r = x + plus_w // 2, height // 2, max(2, height // 6)
+                d.line((cx - r, cy, cx + r, cy), fill=ink, width=max(1, height // 12))
+                d.line((cx, cy - r, cx, cy + r), fill=ink, width=max(1, height // 12))
+                x += plus_w
+        return img
+
+    def canvas(width_factor):
+        W = int(H * width_factor)
+        return Image.new("RGBA", (W, H)), W
+
+    def finish(img):
+        return img.resize((max(1, img.width // s), height), Image.LANCZOS)
+
+    def text(d, W, label, color, size_factor=0.55, dy=0):
+        font = _pad_font(max(8, int(H * size_factor)))
+        box = d.textbbox((0, 0), label, font=font)
+        d.text(((W - (box[2] - box[0])) / 2 - box[0], (H - (box[3] - box[1])) / 2 - box[1] + dy), label,
+               font=font, fill=color)
+
+    line = max(2, H // 12)
+    if button in ("a", "b", "x", "y"):
+        img, W = canvas(1.0)
+        d = ImageDraw.Draw(img)
+        d.ellipse((line, line, W - line, H - line), fill=body, outline=rim, width=line)
+        if ps:
+            color = {"a": (124, 156, 255, 255), "b": (255, 102, 102, 255), "x": (240, 140, 210, 255),
+                     "y": (64, 214, 160, 255)}[button]
+            c, r, w = W / 2, H * 0.22, int(H * 0.08)
+            if button == "a":
+                d.line((c - r, c - r, c + r, c + r), fill=color, width=w)
+                d.line((c - r, c + r, c + r, c - r), fill=color, width=w)
+            elif button == "b":
+                d.ellipse((c - r, c - r, c + r, c + r), outline=color, width=w)
+            elif button == "x":
+                d.rectangle((c - r * 0.85, c - r * 0.85, c + r * 0.85, c + r * 0.85), outline=color, width=w)
+            else:
+                d.polygon([(c, c - r * 1.05), (c - r * 1.1, c + r * 0.75), (c + r * 1.1, c + r * 0.75)],
+                          outline=color, width=w)
+        else:
+            color = {"a": (108, 194, 74, 255), "b": (229, 71, 59, 255), "x": (63, 142, 230, 255),
+                     "y": (244, 196, 48, 255)}[button]
+            text(d, W, button.upper(), color, 0.6)
+        return finish(img)
+    if button in ("leftshoulder", "rightshoulder"):
+        img, W = canvas(1.55)
+        d = ImageDraw.Draw(img)
+        d.rounded_rectangle((line, H * 0.14, W - line, H * 0.86), radius=H * 0.3, fill=body, outline=rim, width=line)
+        text(d, W, PAD_NAMES[button][1 if ps else 0], ink, 0.46)
+        return finish(img)
+    if button in ("lefttrigger", "righttrigger"):
+        img, W = canvas(1.25)
+        d = ImageDraw.Draw(img)
+        d.rounded_rectangle((line, line, W - line, H - line), radius=H * 0.32, fill=body, outline=rim, width=line)
+        d.rectangle((line * 2, H * 0.55, W - line * 2, H - line * 2), fill=body)
+        text(d, W, PAD_NAMES[button][1 if ps else 0], ink, 0.44)
+        return finish(img)
+    if button in ("leftstick", "rightstick", "lstick", "rstick"):
+        img, W = canvas(1.0)
+        d = ImageDraw.Draw(img)
+        d.ellipse((line, line, W - line, H - line), fill=body, outline=rim, width=line)
+        if button in ("lstick", "rstick"):
+            d.ellipse((H * 0.24, H * 0.24, H * 0.76, H * 0.76), outline=rim, width=line)
+            text(d, W, "L" if button == "lstick" else "R", ink, 0.38)
+        else:
+            text(d, W, PAD_NAMES[button][1 if ps else 0], ink, 0.4)
+        return finish(img)
+    if button.startswith("dp"):
+        img, W = canvas(1.0)
+        d = ImageDraw.Draw(img)
+        a, b = H * 0.31, H * 0.69
+        arms = {"dpup": (a, line, b, a + line), "dpdown": (a, b - line, b, H - line), "dpleft": (line, a, a + line, b),
+                "dpright": (b - line, a, H - line, b)}
+        d.rectangle((a, line, b, H - line), fill=body, outline=rim, width=line)
+        d.rectangle((line, a, H - line, b), fill=body, outline=rim, width=line)
+        d.rectangle((a + line, a, b - line, b), fill=body)
+        d.rectangle((a, a + line, b, b - line), fill=body)
+        x0, y0, x1, y1 = arms[button]
+        d.rectangle((x0 + line, y0 + line, x1 - line, y1 - line), fill=(250, 200, 90, 255))
+        return finish(img)
+    if button in ("start", "back"):
+        img, W = canvas(1.0)
+        d = ImageDraw.Draw(img)
+        d.ellipse((H * 0.1, H * 0.1, H * 0.9, H * 0.9), fill=body, outline=rim, width=line)
+        c = H / 2
+        if button == "start":  # three lines: Xbox Menu, PlayStation Options
+            for k in (-1, 0, 1):
+                y = c + k * H * 0.13
+                d.line((c - H * 0.17, y, c + H * 0.17, y), fill=ink, width=line)
+        elif ps:  # Share/Create: a small arrow up
+            d.line((c, c - H * 0.18, c, c + H * 0.16), fill=ink, width=line)
+            d.line((c - H * 0.12, c - H * 0.06, c, c - H * 0.18, c + H * 0.12, c - H * 0.06), fill=ink, width=line)
+        else:  # View: two windows
+            d.rectangle((c - H * 0.17, c - H * 0.15, c + H * 0.05, c + H * 0.05), outline=ink, width=line)
+            d.rectangle((c - H * 0.05, c - H * 0.03, c + H * 0.17, c + H * 0.17), fill=ink)
+        return finish(img)
+    # Anything else (touchpad, paddles, misc): its name on a rounded key.
+    label = PAD_NAMES.get(button, (button, button))[1 if ps else 0]
+    img, W = canvas(max(1.0, 0.36 * len(label)))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((line, H * 0.14, W - line, H * 0.86), radius=H * 0.25, fill=body, outline=rim, width=line)
+    text(d, W, label, ink, 0.4)
+    return finish(img)
+
+
+class Gamepads:
+    """Controllers through SDL3, the game's own library (gow3_pc/out in a release, MSYS2 here):
+    which buttons are held, and whether the first one is a PlayStation controller."""
+    PLAYSTATION_TYPES = (4, 5, 6)  # SDL_GAMEPAD_TYPE_PS3, PS4, PS5
+
+    def __init__(self):
+        self.sdl = None
+        self.pads = {}
+        msys = Path(os.environ.get("MSYS2_ROOT", "C:/msys64"))
+        for path in (ROOT / "gow3_pc/out/SDL3.dll", msys / "clang64/bin/SDL3.dll", ROOT.parent / "msys64/clang64/bin/SDL3.dll"):
+            if not path.is_file():
+                continue
+            try:
+                sdl = ctypes.CDLL(str(path))
+            except OSError:
+                continue
+            sdl.SDL_SetHint.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+            sdl.SDL_SetHint.restype = ctypes.c_bool
+            sdl.SDL_Init.argtypes = [ctypes.c_uint32]
+            sdl.SDL_Init.restype = ctypes.c_bool
+            sdl.SDL_GetGamepads.argtypes = [ctypes.POINTER(ctypes.c_int)]
+            sdl.SDL_GetGamepads.restype = ctypes.POINTER(ctypes.c_uint32)
+            sdl.SDL_OpenGamepad.argtypes = [ctypes.c_uint32]
+            sdl.SDL_OpenGamepad.restype = ctypes.c_void_p
+            sdl.SDL_CloseGamepad.argtypes = [ctypes.c_void_p]
+            sdl.SDL_GetGamepadButton.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            sdl.SDL_GetGamepadButton.restype = ctypes.c_bool
+            sdl.SDL_GetGamepadAxis.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            sdl.SDL_GetGamepadAxis.restype = ctypes.c_int16
+            sdl.SDL_GetGamepadType.argtypes = [ctypes.c_void_p]
+            sdl.SDL_GetGamepadType.restype = ctypes.c_int
+            sdl.SDL_free.argtypes = [ctypes.c_void_p]
+            # The launcher has no SDL window: controller input arrives anyway.
+            sdl.SDL_SetHint(b"SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", b"1")
+            if sdl.SDL_Init(0x2000):  # SDL_INIT_GAMEPAD
+                self.sdl = sdl
+            break
+
+    def refresh(self):
+        if not self.sdl:
+            return []
+        self.sdl.SDL_PumpEvents()
+        count = ctypes.c_int(0)
+        ids = self.sdl.SDL_GetGamepads(ctypes.byref(count))
+        current = [ids[i] for i in range(count.value)] if ids else []
+        if ids:
+            self.sdl.SDL_free(ctypes.cast(ids, ctypes.c_void_p))
+        for jid in current:
+            if jid not in self.pads:
+                pad = self.sdl.SDL_OpenGamepad(jid)
+                if pad:
+                    self.pads[jid] = pad
+        for jid in [j for j in self.pads if j not in current]:
+            self.sdl.SDL_CloseGamepad(self.pads.pop(jid))
+        self.sdl.SDL_UpdateGamepads()
+        return list(self.pads.values())
+
+    def held(self):
+        down = set()
+        for pad in self.refresh():
+            for index, name in enumerate(SDL_BUTTONS):
+                if self.sdl.SDL_GetGamepadButton(pad, index):
+                    down.add(name)
+            for axis, name in ((4, "lefttrigger"), (5, "righttrigger")):
+                if self.sdl.SDL_GetGamepadAxis(pad, axis) > 16000:
+                    down.add(name)
+        return down
+
+    def style(self):
+        for pad in self.refresh():
+            return "playstation" if self.sdl.SDL_GetGamepadType(pad) in self.PLAYSTATION_TYPES else "xbox"
+        return None
+
+
 STICK_ACTIONS = {"ls_up", "ls_down", "ls_left", "ls_right", "rs_up", "rs_down", "rs_left", "rs_right"}
 DEFAULT_CONTROLS = {
     "ls_up": ["key:W"], "ls_down": ["key:S"], "ls_left": ["key:A"], "ls_right": ["key:D"],
@@ -145,6 +430,9 @@ DEFAULT_CONTROLS = {
     "l3": ["key:Left Shift"], "r3": ["key:V", "mouse:middle"], "options": ["key:Escape", "key:Return"],
     "touchpad_left": ["key:Tab"], "touchpad_right": ["key:Backspace"],
 }
+# Button icons in the games' text and menus (runtime GOW3_PROMPTS): the device used last, or fixed.
+PROMPT_MODES = [("auto", "Auto"), ("keyboard", "Keyboard and mouse"), ("playstation", "PlayStation"),
+                ("xbox", "Xbox")]
 MOUSE_SENSITIVITIES = [("0.5", "0.5x"), ("0.75", "0.75x"), ("1.0", "1x"), ("1.5", "1.5x"), ("2.0", "2x"),
                        ("3.0", "3x")]
 MOUSE_LABELS = {"left": "Left mouse", "middle": "Middle mouse", "right": "Right mouse", "x1": "Mouse back",
@@ -185,6 +473,80 @@ def control_maps(controls):
             buttons = [b[6:] for b in bindings if b.startswith("mouse:")]
             mouse += [f"{action}={name}" for name in buttons] or [f"{action}="]
     return ",".join(keys), ",".join(mouse)
+
+
+def parse_map(spec):
+    """runtime_pad.c's map syntax: (action, source name) per entry ("" = none)."""
+    entries = []
+    for entry in (spec or "").split(","):
+        action, eq, name = entry.partition("=")
+        if eq:
+            entries.append((action.strip(), name.strip()))
+    return entries
+
+
+def apply_map(bindings, spec, prefix):
+    """A map on top of an action -> ["key:..", "mouse:.."] dict, as the runtime applies it: an
+    action's first entry replaces its sources of this kind, further ones add, "action=" none."""
+    replaced = set()
+    for action, name in parse_map(spec):
+        if action not in bindings:
+            continue
+        if action not in replaced:
+            replaced.add(action)
+            bindings[action] = [b for b in bindings[action] if not b.startswith(prefix)]
+        if name:
+            bindings[action].append(prefix + name)
+
+
+def sensitivity_value(text):
+    """A mouse sensitivity as the Sensitivity choice names it (the in-game menu sets any)."""
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        return "1.0"
+    for option, _ in MOUSE_SENSITIVITIES:
+        if abs(float(option) - value) < 0.005:
+            return option
+    return f"{value:g}"
+
+
+# The controls in each game's settings file: the game reads them there, and its in-game menu
+# (Insert / R3+L2, Controls tab) changes them too.
+def controls_to_ini(settings):
+    keys, mouse = control_maps(settings.get("controls"))
+    return {"key_map": keys, "mouse_map": mouse, "pad_map": pad_map(settings.get("pad_controls")),
+            "mouse": "1" if settings.get("mouse", True) else "0",
+            "mouse_sens": settings.get("mouse_sens", "1.0"),
+            "mouse_invert": "1" if settings.get("mouse_invert") else "0",
+            "prompts": settings.get("prompts", "auto")}
+
+
+def controls_from_ini(values, settings):
+    """A game's controls from its settings file into the launcher's settings; False when the file
+    has none yet."""
+    if not any(key in values for key in ("key_map", "mouse_map", "pad_map")):
+        return False
+    controls = {action: list(bindings) for action, bindings in DEFAULT_CONTROLS.items()}
+    apply_map(controls, values.get("key_map"), "key:")
+    apply_map(controls, values.get("mouse_map"), "mouse:")
+    settings["controls"] = {action: bindings[:2] for action, bindings in controls.items()}
+    pad = dict(PAD_DEFAULTS)
+    replaced = set()
+    for action, name in parse_map(values.get("pad_map")):
+        if action in pad and action not in replaced:
+            replaced.add(action)
+            pad[action] = name or None
+    settings["pad_controls"] = {action: button for action, button in pad.items() if button != PAD_DEFAULTS.get(action)}
+    if "mouse" in values:
+        settings["mouse"] = values["mouse"] != "0"
+    if "mouse_sens" in values:
+        settings["mouse_sens"] = sensitivity_value(values["mouse_sens"])
+    if "mouse_invert" in values:
+        settings["mouse_invert"] = values["mouse_invert"] == "1"
+    if "prompts" in values:
+        settings["prompts"] = values["prompts"] if values["prompts"] in dict(PROMPT_MODES) else "auto"
+    return True
 
 
 def binding_label(binding):
@@ -258,8 +620,24 @@ def fps_limit_value(value):
     return str(MAX_FPS) if number == 0 or number > MAX_FPS else "60"
 
 
-RESOLUTIONS = [("1280x720", "720p"), ("1600x900", "900p"), ("1920x1080", "1080p"), ("2560x1440", "1440p"),
+RESOLUTIONS = [("960x540", "540p"), ("1280x720", "720p"), ("1600x900", "900p"), ("1920x1080", "1080p"), ("2560x1440", "1440p"),
                ("2880x1620", "1620p"), ("3840x2160", "4K")]
+# Ultrawide: the render resolution's height at a wider aspect ratio. The games widen their view
+# (more to the sides, nothing stretched); menus and the HUD keep their layout.
+ASPECTS = [("16:9", "16:9"), ("21:9", "21:9"), ("32:9", "32:9")]
+ASPECT_WIDTHS = {"16:9": 16 / 9, "21:9": 64 / 27, "32:9": 32 / 9}
+
+
+def aspect_resolution(resolution, aspect):
+    """The render resolution at the aspect ratio: 1440p at 21:9 is 3440x1440 (widths in steps of 8)."""
+    width, height = (int(v) for v in resolution.split("x"))
+    if aspect not in ASPECT_WIDTHS or aspect == "16:9":
+        return resolution
+    if aspect == "21:9" and height in (1080, 1440, 1600):
+        width = {1080: 2560, 1440: 3440, 1600: 3840}[height]  # the common monitor sizes
+    else:
+        width = int(round(height * ASPECT_WIDTHS[aspect] / 8)) * 8
+    return f"{width}x{height}"
 
 # Quality presets: the game has one detail level (the PS4's); quality here is the resolution the
 # game draws at, how it reaches the screen (FSR 1, sharpening) and the frame rate. Above 1080p the
@@ -268,36 +646,48 @@ RESOLUTIONS = [("1280x720", "720p"), ("1600x900", "900p"), ("1920x1080", "1080p"
 PRESETS = {
     "low": {
         "title": "LOW", "summary": "60 FPS  •  720p + FSR 1",
-        "detail": "For weak GPUs: the game draws at 720p (about twice as fast as 1080p) and FSR 1 "
-                  "scales it up to the screen.",
+        "detail": "For integrated and older graphics cards: the game draws at 720p and FSR 1 scales "
+                  "it up to your screen.",
         "resolution": "1280x720",
         "values": {"fps_limit": "60", "frames_queued": "1", "vsync": "1", "async_shaders": "1",
                    "fsr1": "1", "rcas": "1", "rcas_strength": "75"},
     },
     "medium": {
         "title": "MEDIUM", "summary": "60 FPS  •  as on PS4",
-        "detail": "The PS4 original: 1080p at 60 FPS. Right for most PCs.",
+        "detail": "Like the PS4: 1080p at 60 FPS. Right for most PCs.",
         "resolution": "1920x1080",
         "values": {"fps_limit": "60", "frames_queued": "1", "vsync": "1", "async_shaders": "1",
                    "fsr1": "0", "rcas": "1", "rcas_strength": "75"},
     },
     "high": {
         "title": "HIGH", "summary": "60 FPS  •  1440p",
-        "detail": "Sharper: the game draws at 1440p. On 4K monitors FSR 1 scales it up to the screen.",
+        "detail": "Sharper: the game draws at 1440p. On a 4K screen FSR 1 scales it up.",
         "resolution": "2560x1440",
         "values": {"fps_limit": "60", "frames_queued": "1", "vsync": "1", "async_shaders": "1",
                    "fsr1": None, "rcas": "1", "rcas_strength": "50"},
     },
     "ultra": {
         "title": "ULTRA", "summary": "4K  •  up to 120 FPS",
-        "detail": "Native 4K (Drake's Fortune: 1620p + FSR 1) with the frame rate unlocked up to 120 "
-                  "(experimental). New, confirm in play; needs a fast GPU.",
+        "detail": "For fast graphics cards: native 4K and up to 120 FPS (experimental). Drake's "
+                  "Fortune draws at 1620p and scales up.",
         "resolution": "3840x2160",
         "values": {"fps_limit": str(MAX_FPS), "frames_queued": "1", "vsync": "1", "async_shaders": "1",
                    "fsr1": None, "rcas": "1", "rcas_strength": "50"},
     },
 }
 PRESET_ORDER = ("low", "medium", "high", "ultra")
+
+
+def anti_aliasing_options():
+    """Temporal anti-aliasing and upscaling (the runtime's "upscaler" setting): FSR 4 when its model
+    files are installed, DLSS when the DLSS files are beside Uncharted.exe."""
+    options = [("off", "Off"), ("taa", "TAA"), ("fsr3", "FSR 3.1")]
+    if (ROOT / "gow3_pc/fsr4_shaders/fsr4_model_v07_i8_native_1080_pre.spv").is_file():
+        options.append(("fsr4", "FSR 4"))
+    out = ROOT / "gow3_pc/out"
+    if (out / "gow3_dlss.dll").is_file() and (out / "nvngx_dlss.dll").is_file():
+        options.append(("dlss", "DLSS"))
+    return options
 
 
 def screen_size():
@@ -320,6 +710,91 @@ def preset_values(name):
     if values["fsr1"] is None:
         values["fsr1"] = fsr1_for(PRESETS[name]["resolution"])
     return values
+
+
+def gpu_names():
+    """The graphics cards: the one the game used last (its log names it), else Windows' list."""
+    logs = [ROOT / "analysis" / g["log"] / "boot.log" for g in GAMES]
+    for log in sorted((log for log in logs if log.exists()), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            with open(log, encoding="utf-8", errors="replace") as lines:
+                for number, line in enumerate(lines):
+                    if line.startswith("GPU: using "):
+                        return [line[len("GPU: using "):].strip()]
+                    if number > 400:
+                        break
+        except OSError:
+            pass
+    try:
+        result = subprocess.run(["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_VideoController).Name"],
+                                capture_output=True, text=True, timeout=20, creationflags=NO_WINDOW)
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
+def gpu_tier(name):
+    """The Quick Setup preset for a graphics card, from its model name; None when not known.
+    Rough classes: Low = integrated and older entry cards, Medium = 1080p cards (GTX 1060-1660,
+    RTX 2060/3060/4060, RX 580-7600), High = 1440p cards, Ultra = 4K cards (RTX x080/x090,
+    RTX 4070 Ti and up, RX 6800 XT/7900/9070). High and Ultra laptop chips count one class lower."""
+    n = (name or "").lower().replace("(tm)", "").replace("(r)", "")
+    nvidia = re.search(r"\b(rtx|gtx|gt|mx)\s*(\d{3,4})\s*(ti)?\s*(super)?", n)
+    amd = re.search(r"\brx\s*(\d{3,4})\s*(xtx|xt|gre)?", n)
+    arc = re.search(r"\barc\s*([ab])(\d{3})", n)
+    if nvidia:
+        kind, number = nvidia.group(1), int(nvidia.group(2))
+        ti, super_ = bool(nvidia.group(3)), bool(nvidia.group(4))
+        if kind in ("gt", "mx"):
+            tier = "low"
+        elif kind == "gtx":
+            if number == 1080 and ti:
+                tier = "high"
+            elif 1060 <= number < 1100 or 1660 <= number < 1700 or (number == 1650 and super_):
+                tier = "medium"
+            else:
+                tier = "low"
+        else:
+            series, model = number // 100, number % 100
+            if model >= 80:
+                tier = "ultra" if series >= 30 else "high"
+            elif model == 70:
+                tier = "ultra" if series >= 40 and (ti or super_) else "high"
+            elif model == 60:
+                tier = "high" if ti or series >= 50 else "medium"
+            else:
+                tier = "medium"
+    elif amd:
+        number, suffix = int(amd.group(1)), amd.group(2) or ""
+        if number >= 9000:
+            tier = {7: "ultra", 6: "high"}.get((number % 100) // 10, "medium")
+        elif number >= 1000:
+            series, model = number // 1000, (number % 1000) // 100
+            if model >= 9:
+                tier = "ultra"
+            elif model == 8:
+                tier = "ultra" if suffix.startswith("xt") else "high"
+            elif model == 7:
+                tier = "medium" if series == 5 else "high"
+            elif model == 6 or number == 5500:
+                tier = "medium"
+            else:
+                tier = "low"
+        else:
+            tier = "medium" if number in (470, 480, 570, 580, 590) else "low"
+    elif "vega 56" in n or "vega 64" in n:
+        tier = "medium"
+    elif "radeon vii" in n:
+        tier = "high"
+    elif arc:
+        tier = "medium" if int(arc.group(2)) >= 500 else "low"
+    elif "intel" in n or ("radeon" in n and "graphics" in n):
+        tier = "low"  # integrated graphics
+    else:
+        return None
+    if "laptop" in n or "max-q" in n or "mobile" in n or re.search(r"\d{3,4}m\b", n):
+        tier = {"ultra": "high", "high": "medium"}.get(tier, tier)
+    return tier
 
 
 # ---------------------------------------------------------------------------------------------
@@ -464,11 +939,13 @@ class Toggle(tk.Canvas):
 class Segmented(tk.Frame):
     """A row of choices; the selected one is gold."""
 
-    def __init__(self, parent, options, value, command, font):
+    def __init__(self, parent, options, value, command, font, recommended=None):
         super().__init__(parent, bg=LINE, padx=1, pady=1)
         self.command, self.labels, self.value = command, {}, value
         for i, (option, label) in enumerate(options):
-            item = tk.Label(self, text=label, font=font, padx=12, pady=5, cursor="hand2", bd=0)
+            # The recommended choice carries a star.
+            text = f"{label}  ★" if option == recommended else label
+            item = tk.Label(self, text=text, font=font, padx=12, pady=5, cursor="hand2", bd=0)
             item.grid(row=0, column=i, padx=(0 if i == 0 else 1, 0))
             item.bind("<Button-1>", lambda e, v=option: self.set(v, notify=True))
             item.bind("<Enter>", lambda e, w=item, v=option: v != self.value and w.config(bg=PANEL_HI))
@@ -488,13 +965,97 @@ class Segmented(tk.Frame):
             item.config(bg=GOLD if selected else PANEL, fg=INK if selected else TEXT)
 
 
+class Dropdown(tk.Label):
+    """A choice from a longer list: the current one, and a menu of all on click."""
+
+    def __init__(self, parent, options, value, command, font):
+        super().__init__(parent, font=font, bg=PANEL, fg=TEXT, padx=12, pady=5, cursor="hand2", anchor="w",
+                         highlightthickness=1, highlightbackground=LINE)
+        self.options, self.command, self.font = options, command, font
+        self.set(value)
+        self.bind("<Button-1>", lambda e: self.open())
+        self.bind("<Enter>", lambda e: self.config(bg=PANEL_HI))
+        self.bind("<Leave>", lambda e: self.config(bg=PANEL))
+
+    def set(self, value, notify=False):
+        self.value = value
+        label = next((label for option, label in self.options if option == value), value)
+        self.config(text=f"{label}   \u25be")
+        if notify:
+            self.command(value)
+
+    def open(self):
+        menu = tk.Menu(self, tearoff=0, bg=PANEL, fg=TEXT, activebackground=GOLD, activeforeground=INK,
+                       font=self.font, bd=0)
+        for option, label in self.options:
+            menu.add_command(label=("\u2713  " if option == self.value else "     ") + label,
+                             command=lambda v=option: self.set(v, notify=True))
+        menu.tk_popup(self.winfo_rootx(), self.winfo_rooty() + self.winfo_height())
+
+
+class ScrollBar(tk.Canvas):
+    """A thin scrollbar in the launcher's colors for a scrolling canvas (its yscrollcommand)."""
+
+    def __init__(self, parent, scale, target):
+        super().__init__(parent, width=max(6, int(10 * scale)), bg=parent["bg"], highlightthickness=0)
+        self.target, self.first, self.last, self.hover, self.grab = target, 0.0, 1.0, False, None
+        self.bind("<Configure>", lambda e: self.draw())
+        self.bind("<Enter>", lambda e: self.highlight(True))
+        self.bind("<Leave>", lambda e: self.highlight(False))
+        self.bind("<Button-1>", self.press)
+        self.bind("<B1-Motion>", self.drag)
+        self.bind("<ButtonRelease-1>", self.release)
+
+    def set(self, first, last):
+        self.first, self.last = float(first), float(last)
+        self.draw()
+
+    def highlight(self, hover):
+        self.hover = hover
+        self.draw()
+
+    def draw(self):
+        self.delete("all")
+        w, h = self.winfo_width(), self.winfo_height()
+        if h <= 1 or self.last - self.first >= 1:
+            return
+        x1, x2, r = 2, w - 2, max(1, (w - 4) // 2)
+        round_rect(self, x1, 1, x2, h - 1, r, fill=PANEL, outline=PANEL)
+        top = min(int(self.first * h), h - 24)
+        bottom = min(h, max(int(self.last * h), top + 24))
+        color = MUTED if self.hover or self.grab is not None else DIM
+        round_rect(self, x1, top + 1, x2, bottom - 1, r, fill=color, outline=color)
+
+    def press(self, event):
+        position = event.y / max(1, self.winfo_height())
+        if self.first <= position <= self.last:
+            self.grab = position - self.first
+        else:  # on the track: jump there, then drag from the thumb's middle
+            self.grab = (self.last - self.first) / 2
+            self.target.yview_moveto(position - self.grab)
+
+    def drag(self, event):
+        if self.grab is not None:
+            self.target.yview_moveto(event.y / max(1, self.winfo_height()) - self.grab)
+
+    def release(self, event):
+        self.grab = None
+        self.draw()
+
+
 class Launcher:
-    def __init__(self, root):
+    def __init__(self, root, direct=None):
         self.root = root
+        # Direct start (--play u1|u2|u3, GitHub #25): the game starts at once with the saved
+        # settings, without the launcher window, which closes with the game.
+        self.direct = direct
         self.s = max(1.0, root.winfo_fpixels("1i") / 96.0)
         self.config = read_config()
         if self.config.get("game") not in GAME_KEYS:
             self.config["game"] = "u1"
+        for key in GAME_KEYS:
+            if not controls_from_ini(read_ini(key), self.config["games"][key]):
+                write_ini(key, controls_to_ini(self.config["games"][key]))
         self.reload_ini()
         self.process = None
         self.output = queue.Queue()
@@ -502,16 +1063,22 @@ class Launcher:
         self.game_started = False
         self.widgets = {}
         self.images = []
+        # The graphics card (as last detected; detect_gpu checks again) for the Quick Setup advice.
+        self.gpu_name = self.config.get("gpu")
+        self.recommended = gpu_tier(self.gpu_name)
         self.fonts()
         root.title(f"{APP_TITLE} - Launcher by BilalReloaded")
         root.configure(bg=BG)
-        root.resizable(False, False)
+        root.resizable(True, True)
         self.width = self.px(1180)
         try:
             root.iconbitmap(default=str(ASSETS / "uncharted.ico"))
         except tk.TclError:
             pass
         self.build()
+        root.update_idletasks()
+        root.minsize(root.winfo_reqwidth(), root.winfo_reqheight())
+        self.fit_to_screen()
         self.restore_window_position()
         write_config(self.config)  # keeps one-time updates (read_config) even without a change
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -522,8 +1089,13 @@ class Launcher:
         self.update_busy = False
         self.update_result = None
         root.after(3000, lambda: updater.cleanup(ROOT))
-        if self.config.get("check_updates", True):
+        if self.config.get("check_updates", True) and not direct:
             root.after(1500, self.check_updates)
+        if not direct:
+            self.detect_gpu()
+        if direct:
+            self.select_game(direct, save=False)
+            root.after(100, self.play_direct)
 
     def restore_window_position(self):
         """The window opens where it was last closed, if that spot is still on a screen."""
@@ -534,7 +1106,39 @@ class Launcher:
         self.root.update_idletasks()
         screen_w, screen_h = self.root.winfo_vrootwidth(), self.root.winfo_vrootheight()
         if -50 <= x <= max(0, screen_w - 200) and 0 <= y <= max(0, screen_h - 200):
+            # All of the window on the screen (fit_to_screen may have made it taller than it was).
+            y = min(y, max(0, self.root.winfo_screenheight() - self.root.winfo_reqheight() - self.px(70)))
             self.root.geometry(f"+{x}+{y}")
+
+    def fit_to_screen(self):
+        """More room for the settings when the screen is tall enough (fewer pages need to scroll)."""
+        spare = self.root.winfo_screenheight() - self.px(110) - self.root.winfo_reqheight()
+        if spare > 0:
+            self.body.config(height=self.body.winfo_reqheight() + min(spare, self.px(240)))
+            self.root.update_idletasks()
+
+    def detect_gpu(self):
+        """Finds the graphics card in the background (Windows' list takes a moment) and marks the
+        Quick Setup preset that suits it."""
+        found = []
+        threading.Thread(target=lambda: found.append(gpu_names()), daemon=True).start()
+
+        def done():
+            if not found:
+                self.root.after(200, done)
+                return
+            names = found[0]
+            if not names:
+                return
+            known = [name for name in names if gpu_tier(name)]
+            name = max(known, key=lambda n: PRESET_ORDER.index(gpu_tier(n))) if known else names[0]
+            self.gpu_name, self.recommended = name, gpu_tier(name)
+            if self.config.get("gpu") != name:
+                self.config["gpu"] = name
+                write_config(self.config)
+            if hasattr(self, "preset_cards"):
+                self.redraw_presets()
+        self.root.after(200, done)
 
     def px(self, value):
         return int(value * self.s)
@@ -542,7 +1146,7 @@ class Launcher:
     def fonts(self):
         self.f_title = ("Georgia", 40, "bold")
         self.f_subtitle = ("Segoe UI Semibold", 11)
-        self.f_card_number = ("Georgia", 34, "bold")
+        self.f_card_number = ("Georgia", 30, "bold")
         self.f_card_title = ("Georgia", 14, "bold")
         self.f_body = ("Segoe UI", 10)
         self.f_body_bold = ("Segoe UI Semibold", 10)
@@ -562,7 +1166,7 @@ class Launcher:
                       save=False)
 
     def build_hero(self):
-        w, h = self.width, self.px(250)
+        w, h = self.width, self.px(170)
         art = None
         for name in ("pic1.png", "pic0.png"):
             if (self.game_dir() / "sce_sys" / name).exists():
@@ -573,12 +1177,12 @@ class Launcher:
         # Fill the width; keep Drake (right) and the top of the parchment in view.
         scale = w / art.width
         art = art.resize((w, int(art.height * scale)), Image.LANCZOS)
-        top = int(art.height * 0.08)
+        top = int(art.height * 0.02)
         art = art.crop((0, top, w, top + h))
         # Fade into the dark panel below.
         fade = Image.new("L", (w, h), 0)
         draw = ImageDraw.Draw(fade)
-        start = int(h * 0.55)
+        start = int(h * 0.62)
         for y in range(start, h):
             draw.line([(0, y), (w, y)], fill=int(255 * ((y - start) / (h - start)) ** 1.6))
         dark = Image.new("RGB", (w, h), BG)
@@ -588,18 +1192,15 @@ class Launcher:
         canvas = tk.Canvas(self.root, width=w, height=h, bg=BG, highlightthickness=0)
         canvas.pack(side="top")
         canvas.create_image(0, 0, image=photo, anchor="nw")
-        x, y = self.px(48), self.px(58)
+        x, y = self.px(48), self.px(52)
         canvas.create_text(x, y, text="UNCHARTED", font=self.f_title, fill="#3b2914", anchor="w")
         canvas.create_text(x + self.px(3), y + self.px(44), text="T H E   N A T H A N   D R A K E   C O L L E C T I O N",
                            font=self.f_subtitle, fill="#8a6326", anchor="w")
         canvas.create_line(x + self.px(3), y + self.px(66), x + self.px(330), y + self.px(66), fill="#b98d45", width=2)
-        canvas.create_text(x + self.px(3), y + self.px(86),
-                           text="DRAKE'S FORTUNE  •  AMONG THIEVES  •  DRAKE'S DECEPTION",
-                           font=self.f_small, fill="#6b4c22", anchor="w")
         self.draw_links(canvas, w)
 
     def draw_links(self, canvas, width):
-        """The author's YouTube channel and GitHub as badges in the top right of the hero."""
+        """The author's Patreon, YouTube channel and GitHub as badges in the top right of the hero."""
         right, top, height = width - self.px(22), self.px(18), self.px(30)
         for label, url, color, hover in reversed(LINKS):
             tag = f"link-{label}"
@@ -611,9 +1212,12 @@ class Launcher:
             canvas.coords(text, left + self.px(34), mid)
             badge = round_rect(canvas, left, top, right, top + height, height // 2, fill=color, outline=color, tags=tag)
             canvas.tag_lower(badge, text)
-            # Icon: YouTube's play triangle on white, GitHub's code brackets.
+            # Icon: YouTube's play triangle on white, a heart for Patreon, GitHub's code brackets.
             icon_x = left + self.px(12)
-            if label == "YouTube":
+            if label == "Patreon":
+                canvas.create_text(icon_x + self.px(8), mid, text="♥", font=self.f_body_bold, fill="white",
+                                   tags=tag)
+            elif label == "YouTube":
                 round_rect(canvas, icon_x, mid - self.px(7), icon_x + self.px(16), mid + self.px(7), self.px(4),
                            fill="white", outline="white", tags=tag)
                 canvas.create_polygon(icon_x + self.px(6), mid - self.px(4), icon_x + self.px(6), mid + self.px(4),
@@ -629,15 +1233,16 @@ class Launcher:
 
     def build_cards(self):
         frame = tk.Frame(self.root, bg=BG)
-        frame.pack(side="top", fill="x", padx=self.px(40), pady=(0, self.px(14)))
+        frame.pack(side="top", fill="x", padx=self.px(40), pady=(0, self.px(12)))
         self.cards = {}
         gap = self.px(16)
         card_w = (self.width - 2 * self.px(40) - 2 * gap) // 3
-        card_h = self.px(92)
+        card_h = self.px(72)
         for i, game in enumerate(GAMES):
             canvas = tk.Canvas(frame, width=card_w, height=card_h, bg=BG, highlightthickness=0, cursor="hand2")
             canvas.grid(row=0, column=i, padx=(0 if i == 0 else gap, 0))
             canvas.bind("<Button-1>", lambda e, k=game["key"]: self.select_game(k))
+            canvas.bind("<Double-Button-1>", lambda e, k=game["key"]: self.play_game(k))
             canvas.bind("<Enter>", lambda e, k=game["key"]: self.draw_card(k, hover=True))
             canvas.bind("<Leave>", lambda e, k=game["key"]: self.draw_card(k))
             self.cards[game["key"]] = (canvas, game, card_w, card_h)
@@ -651,9 +1256,9 @@ class Launcher:
         round_rect(canvas, 2, 2, w - 2, h - 2, self.px(10), fill=fill, outline=outline, width=2 if selected else 1)
         canvas.create_text(self.px(22), h // 2, text=game["number"], font=self.f_card_number,
                            fill=GOLD if selected else DIM, anchor="w")
-        canvas.create_text(self.px(70), h // 2 - self.px(12), text=game["title"], font=self.f_card_title,
+        canvas.create_text(self.px(66), h // 2 - self.px(10), text=game["title"], font=self.f_card_title,
                            fill=TEXT, anchor="w")
-        canvas.create_text(self.px(71), h // 2 + self.px(14), text=game["subtitle"], font=self.f_small,
+        canvas.create_text(self.px(67), h // 2 + self.px(13), text=game["subtitle"], font=self.f_small,
                            fill=MUTED, anchor="w")
         if selected:
             canvas.create_text(w - self.px(18), self.px(16), text="SELECTED", font=("Segoe UI Semibold", 7),
@@ -687,6 +1292,13 @@ class Launcher:
         """The selected game's settings from its file (the in-game menu writes it too)."""
         self.ini = read_ini(self.config["game"])
         self.ini_seen = ini_mtime(self.config["game"])
+        if controls_from_ini(self.ini, self.game_settings()):
+            write_config(self.config)
+
+    def save_controls(self):
+        """The selected game's controls, also into its settings file (the game reads them there)."""
+        write_config(self.config)
+        self.save_ini(controls_to_ini(self.game_settings()))
 
     def follow_ini(self):
         """Shows changes the in-game menu saved (Insert, then closing the menu)."""
@@ -702,19 +1314,19 @@ class Launcher:
                 widget.set(self.ini.get(key, INI_DEFAULTS[key]) == "1")
             elif isinstance(widget, Segmented):
                 widget.set(self.ini.get(key, INI_DEFAULTS[key]))
-        if isinstance(self.widgets.get("dlss"), Segmented):
-            self.widgets["dlss"].set(self.dlss_value())
-        if isinstance(self.widgets.get("dlss_model"), Segmented):
-            self.widgets["dlss_model"].set(self.ini.get("dlss_model", "k"))
         settings = self.game_settings()
         if isinstance(self.widgets.get("resolution"), Segmented):
             self.widgets["resolution"].set(settings["resolution"])
+        if isinstance(self.widgets.get("aspect"), Segmented):
+            self.widgets["aspect"].set(settings.get("aspect", "16:9"))
         if isinstance(self.widgets.get("multithreaded"), Toggle):
             self.widgets["multithreaded"].set(settings["multithreaded"])
         if isinstance(self.widgets.get("mouse"), Toggle):
             self.widgets["mouse"].set(settings.get("mouse", True))
             self.widgets["mouse_sens"].set(settings.get("mouse_sens", "1.0"))
             self.widgets["mouse_invert"].set(settings.get("mouse_invert", False))
+            self.widgets["prompts"].set(settings.get("prompts", "auto"))
+            self.refresh_pad_slots()
         if hasattr(self, "binding_slots"):
             self.refresh_bindings()
         self.sync_sharpening()
@@ -765,7 +1377,7 @@ class Launcher:
         strip.pack(side="top", fill="x")
         self.tab_buttons = {}
         for name, label in (("setup", "QUICK SETUP"), ("display", "DISPLAY"), ("performance", "PERFORMANCE"),
-                            ("controls", "CONTROLS"), ("advanced", "ADVANCED")):
+                            ("controls", "CONTROLS"), ("cheats", "CHEATS"), ("advanced", "ADVANCED")):
             cell = tk.Frame(strip, bg=BG)
             cell.pack(side="left", padx=(0, self.px(26)))
             text = tk.Label(cell, text=label, font=self.f_tab, bg=BG, fg=MUTED, cursor="hand2")
@@ -779,11 +1391,15 @@ class Launcher:
         self.body = tk.Frame(outer, bg=BG, height=self.px(330))
         self.body.pack(side="top", fill="both", expand=True, pady=(self.px(14), 0))
         self.body.pack_propagate(False)
+        # Pages taller than the space under the tabs scroll (Display, Performance, Advanced, Controls).
+        self.scroll_canvases = set()
+        self.root.bind_all("<MouseWheel>", self.wheel)
         self.pages = {
             "setup": self.page_setup(),
             "display": self.page_display(),
             "performance": self.page_performance(),
             "controls": self.page_controls(),
+            "cheats": self.page_cheats(),
             "advanced": self.page_advanced(),
         }
 
@@ -795,15 +1411,59 @@ class Launcher:
             text.config(fg=TEXT if tab == name else MUTED)
             bar.config(bg=GOLD if tab == name else BG)
         for tab, page in self.pages.items():
+            holder = getattr(page, "holder", page)
             if tab == name:
-                page.pack(fill="both", expand=True)
+                holder.pack(fill="both", expand=True)
             else:
-                page.pack_forget()
+                holder.pack_forget()
+
+    def wheel(self, event):
+        """The mouse wheel scrolls the page under the pointer, when it is taller than the window."""
+        if getattr(self, "capturing", None) is not None:  # a Controls slot is waiting for an input
+            return
+        try:
+            widget = self.root.winfo_containing(event.x_root, event.y_root)
+        except (KeyError, tk.TclError):  # over a menu
+            return
+        while widget is not None:
+            if str(widget) in self.scroll_canvases:
+                if tuple(widget.yview()) != (0.0, 1.0):
+                    step = int(-event.delta / 120) or (-1 if event.delta > 0 else 1)
+                    widget.yview_scroll(step, "units")
+                return
+            widget = widget.master
 
     # -- pages ------------------------------------------------------------------------------
 
-    def page(self):
-        return tk.Frame(self.body, bg=BG)
+    def page(self, scroll=True):
+        """A tab's page: the frame its rows go in. With `scroll`, it scrolls (with a scrollbar)
+        when the rows are taller than the space under the tabs; show_tab packs its holder."""
+        if not scroll:
+            return tk.Frame(self.body, bg=BG)
+        holder = tk.Frame(self.body, bg=BG)
+        canvas = tk.Canvas(holder, bg=BG, highlightthickness=0)
+        bar = ScrollBar(holder, self.s, canvas)
+        inner = tk.Frame(canvas, bg=BG)
+        window = canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=bar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+
+        def layout(event=None):
+            width, height, need = canvas.winfo_width(), canvas.winfo_height(), inner.winfo_reqheight()
+            if height <= 1:  # not shown yet
+                return
+            canvas.itemconfigure(window, width=width)
+            canvas.configure(scrollregion=(0, 0, width, max(need, height)))
+            if need > height and not bar.winfo_manager():
+                bar.pack(side="right", fill="y", padx=(self.px(8), 0), before=canvas)
+            elif need <= height and bar.winfo_manager():
+                bar.pack_forget()
+                canvas.yview_moveto(0)
+        inner.bind("<Configure>", layout)
+        canvas.bind("<Configure>", layout)
+        self.scroll_canvases.add(str(canvas))
+        inner.holder = holder
+        return inner
 
     def row(self, page, title, hint, control_factory):
         row = tk.Frame(page, bg=BG)
@@ -824,16 +1484,16 @@ class Launcher:
                           lambda v, k=key: self.change(k, "1" if v else "0"))
         self.widgets[key] = self.row(page, title, hint, factory)
 
-    def ini_choice(self, page, key, title, hint, options):
+    def ini_choice(self, page, key, title, hint, options, recommended=None):
         def factory(parent):
             return Segmented(parent, options, self.ini.get(key, INI_DEFAULTS.get(key)), lambda v, k=key: self.change(k, v),
-                             self.f_small)
+                             self.f_small, recommended)
         self.widgets[key] = self.row(page, title, hint, factory)
 
     def page_setup(self):
         page = self.page()
-        tk.Label(page, text="Pick a quality level. Every setting can still be changed in the Display and Performance tabs.",
-                 font=self.f_body, bg=BG, fg=MUTED, anchor="w").pack(side="top", fill="x", pady=(0, self.px(12)))
+        self.setup_intro = tk.Label(page, text="", font=self.f_body, bg=BG, fg=MUTED, anchor="w")
+        self.setup_intro.pack(side="top", fill="x", pady=(0, self.px(12)))
         grid = tk.Frame(page, bg=BG)
         grid.pack(side="top", fill="x")
         self.preset_cards = {}
@@ -865,10 +1525,24 @@ class Launcher:
                            fill=TEXT, anchor="w")
         canvas.create_text(self.px(20), self.px(70), text=preset["detail"], font=self.f_small, fill=MUTED,
                            anchor="nw", width=w - self.px(40))
+        if name == self.recommended:
+            badge = canvas.create_text(w - self.px(20), self.px(26), text="RECOMMENDED", font=("Segoe UI Semibold", 7),
+                                       fill=INK, anchor="e")
+            x1, y1, x2, y2 = canvas.bbox(badge)
+            pill = round_rect(canvas, x1 - self.px(8), y1 - self.px(3), x2 + self.px(8), y2 + self.px(3), self.px(8),
+                              fill=GOLD, outline=GOLD)
+            canvas.tag_lower(pill, badge)
 
     def redraw_presets(self):
         for name in self.preset_cards:
             self.draw_preset(name)
+        if self.recommended:
+            self.setup_intro.config(text=f"Recommended for your graphics card ({self.gpu_name}): "
+                                         f"{PRESETS[self.recommended]['title'].title()}. Every setting can still be "
+                                         "changed in Display and Performance.")
+        else:
+            self.setup_intro.config(text="Pick a quality level. Every setting can still be changed in Display "
+                                         "and Performance.")
         custom = self.game_settings().get("preset") not in PRESETS
         name = self.current_game()["name"]
         self.custom_note.config(text=f"{name}: custom settings (changed by hand)." if custom
@@ -901,53 +1575,56 @@ class Launcher:
                              self.change_resolution, self.f_small)
         self.widgets["resolution"] = self.row(
             page, "Render resolution",
-            "The resolution the game draws at (the PS4's is 1080p). Above 1080p is new: if a game crashes "
-            "there, use 1080p with FSR 1 below. Drake's Fortune draws at most 1620p and upscales.", resolution)
-        self.ini_choice(page, "display_mode", "Display mode", "Windowed, borderless window or exclusive fullscreen.",
+            "How sharp the picture is; higher needs a faster graphics card (the PS4 drew 1080p). If a "
+            "game crashes above 1080p, go back to 1080p. Drake's Fortune draws at most 1620p and "
+            "scales up.", resolution)
+
+        def aspect(parent):
+            return Segmented(parent, ASPECTS, self.game_settings().get("aspect", "16:9"),
+                             lambda v: self.change_game_setting("aspect", v), self.f_small)
+        self.widgets["aspect"] = self.row(
+            page, "Aspect ratio",
+            "For ultrawide monitors (21:9, 32:9), with Borderless or Fullscreen: the games show more at "
+            "the sides and the same view top to bottom as on a 16:9 screen.", aspect)
+        self.ini_choice(page, "upscaler", "Anti-aliasing",
+                        "Smooths jagged, shimmering edges. TAA is the lightest; FSR and DLSS (NVIDIA RTX "
+                        "cards) keep the most detail. Also in the in-game menu, where it changes at once.",
+                        anti_aliasing_options())
+        self.ini_choice(page, "preset", "Upscaling mode",
+                        "FSR and DLSS only. Native / DLAA smooths edges at the render resolution; the other "
+                        "modes draw the scene smaller and rebuild it at the render resolution (set it to your "
+                        "screen's): more FPS, a little softer.", UPSCALE_MODES)
+        self.ini_choice(page, "dlss_model", "DLSS model",
+                        "NVIDIA's transformer models. K is the fastest; M is sharper in Performance mode but "
+                        "costs a little more.", DLSS_MODELS, recommended="k")
+        self.ini_choice(page, "display_mode", "Display mode",
+                        "A normal window, a borderless window (quick Alt+Tab) or fullscreen.",
                         [("windowed", "Windowed"), ("borderless", "Borderless"), ("fullscreen", "Fullscreen")])
-        self.ini_toggle(page, "vsync", "VSync", "No tearing. With frame rates above the refresh rate the newest "
-                                               "frame is shown (no extra delay).")
+        self.ini_toggle(page, "vsync", "VSync", "Stops tearing (a line across the picture when the camera turns). "
+                                               "Recommended on.")
         self.ini_toggle(page, "fsr1", "Upscale with FSR 1",
-                        "When the game draws below your screen's resolution, FSR 1 upscales it sharper than plain scaling.")
-        if dlss_bridge_present():
+                        "When the game draws below your screen's resolution, makes the scaled-up picture sharper.")
+        if dlss_bridge_present() and not dlss_available():
             def dlss(parent):
                 holder = tk.Frame(parent, bg=BG)
-                self.dlss_holder = holder
-                self.fill_dlss(holder)
+                self.flat_button(holder, "Get from NVIDIA", lambda: webbrowser.open(NGX_DOWNLOAD_URL)).pack(
+                    side="left", padx=(0, self.px(8)))
+                self.flat_button(holder, f"Add {NGX_DLL}...", self.add_ngx).pack(side="left")
                 return holder
             self.row(
                 page, "NVIDIA DLSS",
-                "NVIDIA RTX GPUs. DLAA smooths edges at the render resolution; the other modes draw the scene "
-                "smaller and rebuild it at the render resolution above (set it to your screen's). "
-                "Model K is the fastest; M is sharper in Performance mode but costs a little more. "
-                "On other GPUs the game runs without it. Needs NVIDIA's nvngx_dlss.dll, which is not "
-                "included: get it from NVIDIA's DLSS page (nvngx_dlss.dll in lib/Windows_x86_64/rel), "
-                "then add it here.", dlss)
+                "NVIDIA RTX GPUs. Needs NVIDIA's nvngx_dlss.dll, which is not included: get it from NVIDIA's "
+                "DLSS page (nvngx_dlss.dll in lib/Windows_x86_64/rel), then add it here. DLSS is then listed "
+                "under Anti-aliasing.", dlss)
 
         def sharpening(parent):
             value = self.ini.get("rcas_strength", "75") if self.ini.get("rcas", "1") == "1" else "off"
             return Segmented(parent, [("off", "Off"), ("25", "25%"), ("50", "50%"), ("75", "75%"), ("100", "100%")],
                              value, self.change_sharpening, self.f_small)
-        self.widgets["sharpening"] = self.row(page, "Sharpening (FSR RCAS)", "Sharpens the final image.", sharpening)
-        self.ini_toggle(page, "show_fps", "Show FPS counter", "A small performance overlay in a corner of the screen.")
+        self.widgets["sharpening"] = self.row(page, "Sharpening", "Makes the final picture crisper (AMD FidelityFX RCAS).",
+                                              sharpening)
+        self.ini_toggle(page, "show_fps", "Show FPS counter", "Shows the frame rate in a corner of the screen.")
         return page
-
-    def fill_dlss(self, holder):
-        for child in holder.winfo_children():
-            child.destroy()
-        if dlss_available():
-            self.widgets["dlss"] = Segmented(holder, DLSS_MODES, self.dlss_value(), self.change_dlss,
-                                             self.f_small)
-            self.widgets["dlss"].pack(anchor="w")
-            self.widgets["dlss_model"] = Segmented(holder, DLSS_MODELS, self.ini.get("dlss_model", "k"),
-                                                   self.change_dlss_model, self.f_small)
-            self.widgets["dlss_model"].pack(anchor="w", pady=(self.px(6), 0))
-            return
-        self.widgets.pop("dlss", None)
-        self.widgets.pop("dlss_model", None)
-        self.flat_button(holder, "Get from NVIDIA", lambda: webbrowser.open(NGX_DOWNLOAD_URL)).pack(
-            side="left", padx=(0, self.px(8)))
-        self.flat_button(holder, f"Add {NGX_DLL}...", self.add_ngx).pack(side="left")
 
     def add_ngx(self):
         from tkinter import filedialog
@@ -970,20 +1647,8 @@ class Launcher:
         except OSError as error:
             messagebox.showerror(APP_TITLE, f"Could not copy {NGX_DLL}: {error}")
             return
-        self.fill_dlss(self.dlss_holder)
-        messagebox.showinfo(APP_TITLE, "NVIDIA DLSS is ready. Choose a DLSS mode.")
-
-    def dlss_value(self):
-        return self.ini.get("preset", "0") if self.ini.get("upscaler", "off") == "dlss" else "off"
-
-    def change_dlss(self, value):
-        updates = {"upscaler": "off"} if value == "off" else {"upscaler": "dlss", "preset": value}
-        self.ini.update(updates)
-        self.save_ini(updates)
-
-    def change_dlss_model(self, value):
-        self.ini["dlss_model"] = value
-        self.save_ini({"dlss_model": value})
+        messagebox.showinfo(APP_TITLE, "NVIDIA DLSS is ready. Reopen the launcher, then choose DLSS under "
+                                       "Anti-aliasing.")
 
     def change_sharpening(self, value):
         if value == "off":
@@ -1000,25 +1665,36 @@ class Launcher:
 
     def page_performance(self):
         page = self.page()
+        tk.Label(page, text="★ marks the recommended choice.", font=self.f_small, bg=BG, fg=DIM,
+                 anchor="w").pack(side="top", fill="x", pady=(0, self.px(6)))
         self.ini_choice(page, "fps_limit", "Frame rate limit",
-                        "60 is the PS4's. 120 unlocks the frame rate (experimental): if the game runs too fast "
-                        "or Nate falls through the world, choose 60. Faster breaks the game's movement.",
-                        [(str(v), label) for v, label in FPS_LIMITS])
-        self.ini_choice(page, "frames_queued", "Frames queued", "1 (recommended). 2 is faster in heavy scenes, but "
-                                                               "GPU results reach the game a frame later: in "
-                                                               "Uncharted 2 Nate and NPCs then float above the floor.",
-                        [("1", "1"), ("2", "2"), ("0", "Unlimited")])
+                        "60 is how the games were made. Higher is smoother but experimental: if the game runs too "
+                        "fast or Nate falls through the floor, go back to 60. With VSync, your monitor's refresh "
+                        f"rate ({monitor_refresh_hz()} Hz) is the smoothest.",
+                        [(str(v), label) for v, label in FPS_LIMITS], recommended="60")
+        self.ini_choice(page, "frames_queued", "Frames queued",
+                        "Keep 1. 2 can add a few FPS in heavy scenes, but in Uncharted 2 Nate and other "
+                        "characters then float a little above the floor.",
+                        [("1", "1"), ("2", "2"), ("0", "Unlimited")], recommended="1")
         self.ini_toggle(page, "async_shaders", "Compile shaders in the background",
-                        "Fewer stutters in new areas. Drake's Fortune always compiles them first (its lighting needs it).")
+                        "Fewer stutters when you reach new areas. Recommended on.")
 
         def multithreaded(parent):
             return Toggle(parent, self.s, self.game_settings()["multithreaded"],
                           lambda v: self.change_game_setting("multithreaded", v))
         self.widgets["multithreaded"] = self.row(
-            page, "Multithreaded rendering",
-            "Prepares draws on a second CPU thread: more FPS on CPUs with several cores (on by "
-            "default). Turn it off if the game hangs while loading. Keep 1 frame queued with it.",
-            multithreaded)
+            page, "Multithreaded rendering (experimental)",
+            "Prepares the picture on a second CPU core: more FPS on some PCs, mostly in Uncharted 2 and 3 "
+            "(on by default; keep Frames queued at 1 with it). Turn it off if a game hangs while loading. Drake's "
+            "Fortune always runs without it.", multithreaded)
+
+        def job_threads(parent):
+            value = "off" if self.config.get("job_sleep", "auto") == "off" else "on"
+            return Segmented(parent, (("on", "Sleep"), ("off", "Spin")), value,
+                             lambda v: self.change_config("job_sleep", v), self.f_small, recommended="on")
+        self.row(page, "Idle game threads",
+                 "Sleep: the game's helper threads rest while they wait, which keeps 4-6 core CPUs fast "
+                 "and saves power. Spin keeps their cores busy, as on the PS4.", job_threads)
 
         self.fps_note = tk.Label(page, text="", font=self.f_small, bg=BG, fg=GOLD, anchor="w")
         self.fps_note.pack(side="top", fill="x")
@@ -1037,7 +1713,7 @@ class Launcher:
             self.fps_note.config(text="")
 
     def page_controls(self):
-        page = self.page()
+        page = self.page(scroll=False)
         settings = self.game_settings()
         top = tk.Frame(page, bg=BG)
         top.pack(side="top", fill="x")
@@ -1054,6 +1730,15 @@ class Launcher:
                                               lambda v: self.change_game_setting("mouse_invert", v))
         self.widgets["mouse_invert"].pack(side="left", padx=(self.px(8), 0))
         self.flat_button(top, "Reset controls", self.reset_controls).pack(side="right")
+        icons = tk.Frame(page, bg=BG)
+        icons.pack(side="top", fill="x", pady=(self.px(10), 0))
+        tk.Label(icons, text="Button icons", font=self.f_body_bold, bg=BG, fg=TEXT).pack(side="left")
+        self.widgets["prompts"] = Segmented(icons, PROMPT_MODES, settings.get("prompts", "auto"),
+                                            self.change_prompts, self.f_small)
+        self.widgets["prompts"].pack(side="left", padx=(self.px(8), self.px(12)))
+        tk.Label(icons, text="Auto follows the device you play with (a controller's own buttons).",
+                 font=self.f_small, bg=BG,
+                 fg=MUTED).pack(side="left")
         self.controls_hint = tk.Label(
             page, text="Click a slot, then press a key or a mouse button (right-click a slot to clear it). "
                        "In game the mouse is captured; Alt+Tab or Insert (menu) frees it. A controller "
@@ -1063,7 +1748,7 @@ class Launcher:
         holder = tk.Frame(page, bg=BG)
         holder.pack(side="top", fill="both", expand=True)
         canvas = tk.Canvas(holder, bg=BG, highlightthickness=0)
-        bar = tk.Scrollbar(holder, orient="vertical", command=canvas.yview)
+        bar = ScrollBar(holder, self.s, canvas)
         inner = tk.Frame(canvas, bg=BG)
         inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=inner, anchor="nw")
@@ -1071,13 +1756,13 @@ class Launcher:
         bar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
 
-        def scroll(event):
-            if self.capturing is None:
-                canvas.yview_scroll(int(-event.delta / 120), "units")
-        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", scroll))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        self.scroll_canvases.add(str(canvas))
         self.capturing = None
         self.binding_slots = {}
+        self.pad_slots = {}
+        self.pad_capture = None
+        if not hasattr(self, "gamepads"):
+            self.gamepads = Gamepads()
         columns = [tk.Frame(inner, bg=BG), tk.Frame(inner, bg=BG)]
         columns[0].grid(row=0, column=0, sticky="n", padx=(0, self.px(36)))
         columns[1].grid(row=0, column=1, sticky="n")
@@ -1089,7 +1774,7 @@ class Launcher:
                 row = tk.Frame(column, bg=BG)
                 row.pack(side="top", fill="x", pady=self.px(1))
                 tk.Label(row, text=label, font=self.f_small, bg=BG, fg=TEXT, anchor="w",
-                         width=26).pack(side="left")
+                         width=17).pack(side="left")
                 for slot in (0, 1):
                     cell = tk.Label(row, text="", font=self.f_small, bg=PANEL, fg=TEXT, width=14,
                                     pady=self.px(3), cursor="hand2", highlightthickness=1,
@@ -1098,11 +1783,107 @@ class Launcher:
                     cell.bind("<Button-1>", lambda e, a=action, i=slot: self.start_capture(a, i))
                     cell.bind("<Button-3>", lambda e, a=action, i=slot: self.set_binding(a, i, None))
                     self.binding_slots[(action, slot)] = cell
+                # The controller button: its icon; a click, then a controller button rebinds it.
+                pad_cell = tk.Label(row, text="", font=self.f_small, bg=PANEL, fg=TEXT, width=14, height=1,
+                                    highlightthickness=1, highlightbackground=LINE, compound="center")
+                pad_cell.pack(side="left", padx=(self.px(6), 0))
+                if action in PAD_DEFAULTS:
+                    pad_cell.config(cursor="hand2")
+                    pad_cell.bind("<Button-1>", lambda e, a=action: self.start_pad_capture(a))
+                    pad_cell.bind("<Button-3>", lambda e, a=action: self.set_pad_binding(a, None))
+                self.pad_slots[action] = pad_cell
         self.refresh_bindings()
+        self.refresh_pad_slots()
         return page
 
     def game_controls(self):
         return merged_controls(self.game_settings().get("controls"))
+
+    def change_prompts(self, value):
+        self.change_game_setting("prompts", value)
+        self.refresh_pad_slots()
+
+    def pad_style(self):
+        style = self.game_settings().get("prompts", "auto")
+        if style in ("xbox", "playstation"):
+            return style
+        return self.gamepads.style() or "xbox"  # Auto: the connected controller's
+
+    def refresh_pad_slots(self):
+        style = self.pad_style()
+        controls = merged_pad_controls(self.game_settings().get("pad_controls"))
+        if not hasattr(self, "pad_images"):
+            self.pad_images = {}
+        height = self.px(22)
+        for action, cell in getattr(self, "pad_slots", {}).items():
+            if self.pad_capture == action:
+                cell.config(image="", text="Press a button…", fg=GOLD, bg=PANEL_HI, width=14, height=1)
+                continue
+            button = controls.get(action) if action in PAD_DEFAULTS else PAD_FIXED.get(action)
+            if not button:
+                cell.config(image="", text="—", fg=TEXT, bg=PANEL, width=14, height=1)
+                continue
+            key = (button, style, height)
+            if key not in self.pad_images:
+                self.pad_images[key] = ImageTk.PhotoImage(pad_icon(button, style, height))
+            cell.config(image=self.pad_images[key], text="", bg=PANEL, width=self.px(100), height=self.px(24))
+
+    def start_pad_capture(self, action):
+        self.stop_capture()
+        if not self.gamepads.sdl:
+            self.controls_hint.config(text="No controller support found (SDL3.dll).", fg=STOP_RED)
+            return
+        self.pad_capture = action
+        self.pad_capture_started = time.monotonic()
+        self.pad_capture_held = self.gamepads.held()  # buttons already down do not count
+        if not self.gamepads.pads:
+            self.controls_hint.config(text="Connect a controller, then click the slot again.", fg=STOP_RED)
+            self.pad_capture = None
+            return
+        self.controls_hint.config(text="Press a button on the controller (Escape cancels). Triggers and sticks "
+                                       "stay Aim, Fire, Move and Look.", fg=MUTED)
+        self.refresh_pad_slots()
+        self.root.bind_all("<Escape>", lambda e: self.stop_pad_capture())
+        self.root.after(30, self.poll_pad_capture)
+
+    def poll_pad_capture(self):
+        if self.pad_capture is None:
+            return
+        held = self.gamepads.held()
+        new = [b for b in SDL_BUTTONS if b in held and b not in self.pad_capture_held]
+        self.pad_capture_held &= held
+        if any(t in held and t not in self.pad_capture_held for t in ("lefttrigger", "righttrigger")):
+            self.controls_hint.config(text="The triggers stay Aim and Fire. Press a button.", fg=STOP_RED)
+        if new:
+            self.set_pad_binding(self.pad_capture, new[0])
+            return
+        if time.monotonic() - self.pad_capture_started > 8:
+            self.stop_pad_capture()
+            return
+        self.root.after(30, self.poll_pad_capture)
+
+    def stop_pad_capture(self):
+        self.pad_capture = None
+        self.root.unbind_all("<Escape>")
+        self.refresh_pad_slots()
+
+    def set_pad_binding(self, action, button):
+        settings = self.game_settings()
+        pad_controls = dict(settings.get("pad_controls") or {})
+        merged = merged_pad_controls(pad_controls)
+        if button:
+            # A button does one thing: the action that had it swaps to this one's old button.
+            for other, current in merged.items():
+                if current == button and other != action:
+                    pad_controls[other] = merged[action]
+        pad_controls[action] = button or ""
+        settings["pad_controls"] = {a: b for a, b in merged_pad_controls(pad_controls).items() if b != PAD_DEFAULTS.get(a)}
+        self.save_controls()
+        self.pad_capture = None
+        self.root.unbind_all("<Escape>")
+        self.refresh_pad_slots()
+        self.controls_hint.config(text="Saved for " + self.current_game()["name"] + ". Right-click a controller "
+                                       "slot to clear it; Reset controls restores the defaults.", fg=MUTED)
 
     def refresh_bindings(self):
         controls = self.game_controls()
@@ -1184,7 +1965,7 @@ class Launcher:
         bindings[slot] = binding
         controls[action] = [b for b in bindings if b][:2]
         self.game_settings()["controls"] = controls
-        write_config(self.config)
+        self.save_controls()
         self.controls_hint.config(
             text="Saved for " + self.current_game()["name"] + ". Click a slot, then press a key or a mouse button "
                  "(right-click a slot to clear it).", fg=MUTED)
@@ -1195,29 +1976,56 @@ class Launcher:
 
     def reset_controls(self):
         name = self.current_game()["name"]
-        if not messagebox.askyesno(APP_TITLE, f"Reset {name}'s keyboard and mouse controls?"):
+        if not messagebox.askyesno(APP_TITLE, f"Reset {name}'s keyboard, mouse and controller controls?"):
             return
         settings = self.game_settings()
-        settings.update({"controls": None, "mouse": True, "mouse_sens": "1.0", "mouse_invert": False})
-        write_config(self.config)
+        settings.update({"controls": None, "mouse": True, "mouse_sens": "1.0", "mouse_invert": False,
+                         "prompts": "auto", "pad_controls": None})
+        self.save_controls()
         self.refresh_controls()
+
+    def page_cheats(self):
+        page = self.page()
+        tk.Label(page, text="The games' own developer switches, applied when a game starts. They need update 1.02.",
+                 font=self.f_small, bg=BG, fg=MUTED, anchor="w").pack(side="top", fill="x", pady=(0, self.px(6)))
+        for name, title, hint in CHEATS:
+            def cheat(parent, key="cheat_" + name):
+                return Toggle(parent, self.s, self.config.get(key, False), lambda v, k=key: self.change_config(k, v))
+            self.row(page, title, hint, cheat)
+        return page
 
     def page_advanced(self):
         page = self.page()
 
+        def language(parent):
+            voices = voice_languages(self.game_dir())
+            options = [(code, label + ("  (+ voices)" if code in voices else "")) for code, label in LANGUAGES]
+            return Dropdown(parent, options, self.config.get("language", "1"),
+                            lambda v: self.change_config("language", v), self.f_small)
+        self.widgets["language"] = self.row(
+            page, "Language",
+            "Menus and subtitles in another language: pick it here, then press Square in a game's main "
+            "menu to switch. Languages marked + voices are also spoken in your copy of the game.", language)
+
+        def unlock(parent):
+            return Toggle(parent, self.s, self.config.get("unlock", False),
+                          lambda v: self.change_config("unlock", v))
+        self.row(page, "Unlock all chapters",
+                 "Every chapter in Chapter Select and the Brutal difficulty from the start, in all three "
+                 "games. Your saves and progress stay as they are. Needs update 1.02.", unlock)
+
         def diagnostics(parent):
             return Toggle(parent, self.s, self.config.get("diagnostics", True),
                           lambda v: self.change_config("diagnostics", v))
-        self.row(page, "Performance log", "Writes frame rate and GPU wait statistics to the log every 5 seconds, "
-                                          "for troubleshooting. A very small cost.", diagnostics)
+        self.row(page, "Performance log", "Writes frame rate statistics to the log every 5 seconds. Helps when "
+                                          "you report a problem.", diagnostics)
 
         def torch_forward(parent):
             return Toggle(parent, self.s, self.config.get("torch_forward", True),
                           lambda v: self.change_config("torch_forward", v))
         self.row(page, "Torch follows Nate (Uncharted 2)",
-                 "The torch lights where Nate's torch points. Off: as on PS4, it aims where the camera "
-                 "looks (turn the camera to face Nate and it lights the wall behind him). "
-                 "Needs update 1.02.", torch_forward)
+                 "The torch lights where Nate points it. Off: as on the PS4, it lights where the camera "
+                 "looks. Needs update 1.02.", torch_forward)
 
         def check_updates(parent):
             return Toggle(parent, self.s, self.config.get("check_updates", True),
@@ -1225,30 +2033,37 @@ class Launcher:
         version = updater.installed_version(ROOT)
         self.row(page, "Check for updates at start",
                  f"Installed: {updater.version_text(version) if version else 'source tree (updates with git)'}. "
-                 "New versions come from the project's GitHub releases; the launcher asks before it "
-                 "installs one.", check_updates)
-        buttons = tk.Frame(page, bg=BG)
-        buttons.pack(side="top", fill="x", pady=(self.px(6), self.px(10)))
-        for label, action in (("Open log folder", self.open_logs), ("Open save folder", self.open_saves),
-                              ("Desktop shortcut", self.desktop_shortcut), ("Clear shader cache", self.clear_cache),
-                              ("Reset all settings", self.reset),
-                              ("Check for updates", lambda: self.check_updates(manual=True))):
-            self.flat_button(buttons, label, action).pack(side="left", padx=(0, self.px(10)))
-        folder_row = tk.Frame(page, bg=BG)
-        folder_row.pack(side="top", fill="x", pady=(0, self.px(4)))
-        self.game_dir_label = tk.Label(folder_row, text=f"Game files: {self.game_dir()}", font=self.f_small,
+                 "The launcher asks before it installs anything.", check_updates)
+
+        def section(title, actions, note=""):
+            tk.Label(page, text=title, font=self.f_small, bg=BG, fg=GOLD, anchor="w").pack(
+                side="top", fill="x", pady=(self.px(10), self.px(4)))
+            line = tk.Frame(page, bg=BG)
+            line.pack(side="top", fill="x")
+            for label, action in actions:
+                self.flat_button(line, label, action).pack(side="left", padx=(0, self.px(10)))
+            if note:
+                tk.Label(line, text=note, font=self.f_small, bg=BG, fg=MUTED, anchor="w").pack(
+                    side="left", padx=(self.px(6), 0))
+        section("SHORTCUTS", (("Desktop shortcut", self.desktop_shortcut), ("Game shortcuts", self.game_shortcuts)),
+                "Game shortcuts: one per game on the desktop, each starts its game directly.")
+        section("FOLDERS", (("Open log folder", self.open_logs), ("Open save folder", self.open_saves),
+                            ("Change game folder", self.choose_game_dir)))
+        self.game_dir_label = tk.Label(page, text=f"Game files: {self.game_dir()}", font=self.f_small,
                                        bg=BG, fg=DIM, anchor="w")
-        self.game_dir_label.pack(side="left")
-        self.flat_button(folder_row, "Change game folder", self.choose_game_dir).pack(
-            side="left", padx=(self.px(10), 0))
+        self.game_dir_label.pack(side="top", fill="x", pady=(self.px(6), 0))
         self.update_label = tk.Label(page, text=self.update_text(), font=self.f_small, bg=BG, fg=DIM,
                                      anchor="w", justify="left")
         self.update_label.pack(side="top", fill="x")
         self.ini_label = tk.Label(page, text=f"Settings: {ini_file(self.config['game'])}", font=self.f_small,
                                   bg=BG, fg=DIM, anchor="w")
         self.ini_label.pack(side="top", fill="x")
-        tk.Label(page, text="In game: Insert or R3 + L2 opens the menu (display, frame rate, overlay).",
-                 font=self.f_small, bg=BG, fg=DIM, anchor="w").pack(side="top", fill="x")
+        section("TROUBLESHOOTING", (("Check for updates", lambda: self.check_updates(manual=True)),
+                                    ("Clear shader cache", self.clear_cache), ("Reset all settings", self.reset)))
+        # Credits for the anti-aliasing technologies (NVIDIA's DLSS license asks for its attribution).
+        tk.Label(page, text=CREDITS, font=self.f_small, bg=BG, fg=DIM, anchor="w", justify="left",
+                 wraplength=self.width - 2 * self.px(40) - self.px(30)).pack(side="top", fill="x",
+                                                                              pady=(self.px(10), 0))
         return page
 
     def flat_button(self, parent, label, action):
@@ -1419,7 +2234,10 @@ class Launcher:
 
     def change_game_setting(self, key, value):
         self.game_settings()[key] = value
-        write_config(self.config)
+        if key in ("mouse", "mouse_sens", "mouse_invert", "prompts"):
+            self.save_controls()
+        else:
+            write_config(self.config)
 
     def change_config(self, key, value):
         self.config[key] = value
@@ -1433,6 +2251,12 @@ class Launcher:
         else:
             self.play()
 
+    def play_game(self, key):
+        """A double-click on a game's card: choose it and play."""
+        self.select_game(key)
+        if not self.process:
+            self.play()
+
     def play(self):
         if not RUN_SCRIPT.exists():
             messagebox.showerror(APP_TITLE, f"Start script missing:\n{RUN_SCRIPT}")
@@ -1442,6 +2266,8 @@ class Launcher:
                                            "(CUSA02344, the folder with eboot.bin and sce_sys).")
             if not self.choose_game_dir():
                 return
+        if not self.confirm_without_update():
+            return
         self.follow_ini()  # the in-game menu's last changes, not older values kept here
         self.save_ini({k: self.ini.get(k, v) for k, v in INI_DEFAULTS.items()})
         write_config(self.config)
@@ -1449,20 +2275,20 @@ class Launcher:
         env = os.environ.copy()
         env["UNCHARTED_DIAGNOSTICS"] = "1" if self.config.get("diagnostics", True) else "0"
         env["UNCHARTED_TORCH_FORWARD"] = "1" if self.config.get("torch_forward", True) else "0"
+        env["UNCHARTED_JOB_SLEEP"] = "0" if self.config.get("job_sleep", "auto") == "off" else "1"
+        env["UNCHARTED_LANGUAGE"] = str(self.config.get("language", "1"))
+        env["UNCHARTED_UNLOCK"] = "1" if self.config.get("unlock", False) else "0"
+        env["UNCHARTED_CHEATS"] = ",".join(name for name, *_ in CHEATS if self.config.get("cheat_" + name, False))
         # Every game's own options: the Collection menu starts the others itself, and
         # tools/probe_uncharted.py applies the started game's (its settings file decides the
         # vblank rate for frame rates above 60).
         env.pop("GOW3_VBLANK_HZ", None)
         for key in GAME_KEYS:
             settings = self.config["games"][key]
-            env[f"UNCHARTED_RESOLUTION_{key.upper()}"] = settings["resolution"]
+            env[f"UNCHARTED_RESOLUTION_{key.upper()}"] = aspect_resolution(settings["resolution"],
+                                                                         settings.get("aspect", "16:9"))
             env[f"UNCHARTED_MULTITHREADED_{key.upper()}"] = "1" if settings["multithreaded"] else "0"
-            keys, mouse = control_maps(settings.get("controls"))
-            env[f"UNCHARTED_KEY_MAP_{key.upper()}"] = keys
-            env[f"UNCHARTED_MOUSE_MAP_{key.upper()}"] = mouse
-            env[f"UNCHARTED_MOUSE_{key.upper()}"] = "1" if settings.get("mouse", True) else "0"
-            env[f"UNCHARTED_MOUSE_SENS_{key.upper()}"] = settings.get("mouse_sens", "1.0")
-            env[f"UNCHARTED_MOUSE_INVERT_{key.upper()}"] = "1" if settings.get("mouse_invert") else "0"
+            # Controls: in each game's settings file (save_controls), where its menu changes them.
         python = Path(sys.executable)
         if python.name.lower() == "pythonw.exe" and python.with_name("python.exe").exists():
             python = python.with_name("python.exe")
@@ -1550,24 +2376,68 @@ class Launcher:
             tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-80:]
         except OSError:
             return None
+        for line in reversed(tail):
+            if line.startswith("Hang watchdog:") and " report " in line:
+                return ("The game froze. A report of where it stopped was saved:\n"
+                        + line.split(" report ", 1)[-1] + "\n\nPlease attach it with the log folder's "
+                        "boot.log to a GitHub issue.")
+        # A crash (exit code 3): the runtime's fault report names where it happened. Players
+        # reported just "error code 3" (GitHub #24, #27); the report is what tells the cause.
+        for i, line in enumerate(tail):
+            if line.startswith("Fault:"):
+                where = next((l.strip() for l in tail[i + 1:i + 6] if l.lstrip().startswith(("host #0", "#0"))), "")
+                return (line.strip() + (f"\n{where}" if where else "") + "\n\nPlease attach boot.log from the "
+                        "log folder (and your graphics card, game version and settings) to a GitHub issue.")
         for i, line in enumerate(tail):
             if line.startswith("STOP:") or "Unreachable code" in line or "Assertion" in line:
                 context = [l for l in tail[max(0, i - 2):i + 1] if l.strip()]
                 return "\n".join(context)[-600:]
         return None
 
+    def confirm_without_update(self):
+        """Without update 1.02 most of the port's game fixes (crash fixes among them) are skipped:
+        asks once per game folder (a 1.02 copy with the update merged in reports 1.02 itself)."""
+        folder = self.game_dir()
+        version = app_version(folder)
+        if game_update_dir(folder) or not version or version >= "01.02" or \
+                self.config.get("warned_no_update") == str(folder):
+            return True
+        title = folder.parent if folder.name.lower() == "uroot" else folder
+        if not messagebox.askokcancel(
+                APP_TITLE, f"Your game is version {version.lstrip('0')}, without update 1.02.\n\n"
+                "Most of this port's fixes, crash fixes among them, are written for update 1.02, so "
+                "without it the games crash more often.\n\nDump update 1.02 from your PS4 and extract it "
+                f"next to the game folder as {title.name}-patch (the Advanced tab then shows it).\n\n"
+                "Play anyway?"):
+            return False
+        self.config["warned_no_update"] = str(folder)
+        write_config(self.config)
+        return True
+
+    def play_direct(self):
+        self.play()
+        if not self.process:  # no game folder chosen, or the start failed (already reported)
+            self.root.destroy()
+
     def finished(self, code):
         self.process = None
         self.draw_play()
-        if code in (0, None) or getattr(self, "stopping", False):
+        reason = self.crash_reason()
+        # A freeze is reported however the game was closed (STOP, or Task Manager).
+        froze = bool(reason) and reason.startswith("The game froze")
+        if (code in (0, None) or getattr(self, "stopping", False)) and not froze:
             self.stopping = False
             self.set_status("Game closed.", "Ready to play again.")
-            return
-        reason = self.crash_reason()
-        self.set_status("The game stopped unexpectedly.", f"Exit code {code}. See the log for details.")
-        if reason:
-            if messagebox.askyesno(APP_TITLE, f"The game stopped with an error:\n\n{reason}\n\nOpen the log folder?"):
-                self.open_logs()
+        else:
+            self.stopping = False
+            self.set_status("The game froze." if froze else "The game stopped unexpectedly.",
+                            "A report was saved; see the log folder." if froze
+                            else f"Exit code {code}. See the log for details.")
+            if reason:
+                if messagebox.askyesno(APP_TITLE, f"The game stopped with an error:\n\n{reason}\n\nOpen the log folder?"):
+                    self.open_logs()
+        if self.direct:
+            self.root.after(200, self.root.destroy)
 
     def stop(self):
         if not self.process:
@@ -1602,24 +2472,48 @@ class Launcher:
         shutil.rmtree(cache, ignore_errors=True)
         messagebox.showinfo(APP_TITLE, "Shader cache cleared.")
 
-    def desktop_shortcut(self):
+    def make_shortcut(self, name, description, play=None):
+        """A desktop shortcut to the launcher, or with `play` (u1/u2/u3) to that game directly."""
         desktop = Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop"
-        link = desktop / "Uncharted.lnk"
+        link = desktop / f"{name}.lnk"
         pythonw = Path(sys.executable).with_name("pythonw.exe")
         target = pythonw if pythonw.exists() else Path(sys.executable)
         arguments = f"\"{Path(__file__).resolve()}\""
         if STARTER_EXE.exists():
             target, arguments = STARTER_EXE, ""
-        script = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{link}');"
-                  f"$s.TargetPath='{target}';$s.Arguments='{arguments}';"
-                  f"$s.WorkingDirectory='{ROOT}';$s.IconLocation='{ASSETS / 'uncharted.ico'}';"
-                  f"$s.Description='{APP_TITLE}';$s.Save()")
+        if play:
+            arguments = f"{arguments} --play {play}".strip()
+        def ps(value):  # a PowerShell single-quoted string ("Drake's" doubles the quote)
+            return "'" + str(value).replace("'", "''") + "'"
+        script = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut({ps(link)});"
+                  f"$s.TargetPath={ps(target)};$s.Arguments={ps(arguments)};"
+                  f"$s.WorkingDirectory={ps(ROOT)};$s.IconLocation={ps(ASSETS / 'uncharted.ico')};"
+                  f"$s.Description={ps(description)};$s.Save()")
         result = subprocess.run(["powershell", "-NoProfile", "-Command", script], creationflags=NO_WINDOW,
                                 capture_output=True, text=True)
+        return link, result
+
+    def desktop_shortcut(self):
+        link, result = self.make_shortcut("Uncharted", APP_TITLE)
         if result.returncode == 0:
             messagebox.showinfo(APP_TITLE, f"Shortcut created:\n{link}")
         else:
             messagebox.showerror(APP_TITLE, f"Could not create the shortcut:\n{result.stderr.strip()}")
+
+    def game_shortcuts(self):
+        """One desktop shortcut per game: starts it directly with the launcher's settings."""
+        made, failed = [], []
+        for game in GAMES:
+            name = game["name"].replace(":", " -")
+            link, result = self.make_shortcut(name, f"{game['name']} (starts directly)", play=game["key"])
+            (made if result.returncode == 0 else failed).append(link.name if result.returncode == 0
+                                                                else result.stderr.strip())
+        if failed:
+            messagebox.showerror(APP_TITLE, "Could not create the shortcuts:\n" + "\n".join(failed))
+        else:
+            messagebox.showinfo(APP_TITLE, "Shortcuts created on the desktop:\n" + "\n".join(made) +
+                                "\n\nEach starts its game directly with the launcher's settings. From a command "
+                                "prompt: \"Uncharted Launcher.exe\" --play u1 (or u2, u3).")
 
     def reset(self):
         name = self.current_game()["name"]
@@ -1650,10 +2544,47 @@ def main():
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("BilalReloaded.Uncharted.Launcher")
     except Exception:
         pass
+    # --play u1|u2|u3 (or 1/2/3): start that game directly (desktop game shortcuts, GitHub #25).
+    direct = None
+    if "--play" in sys.argv[1:]:
+        at = sys.argv.index("--play")
+        value = sys.argv[at + 1].lower() if at + 1 < len(sys.argv) else ""
+        direct = value if value in GAME_KEYS else f"u{value}" if f"u{value}" in GAME_KEYS else None
     root = tk.Tk()
-    Launcher(root)
+    if direct:
+        root.withdraw()
+    # Errors in button and timer callbacks go to the error log too (pythonw has no console).
+    root.report_callback_exception = lambda kind, value, trace: log_launcher_error(kind, value, trace)
+    Launcher(root, direct)
     root.mainloop()
 
 
+def log_launcher_error(kind, value, trace):
+    """Appends an error to analysis/uncharted-user/launcher-error.log: the launcher runs under
+    pythonw, so an error at start used to close it without a word (GitHub #21, 0.2.1)."""
+    import traceback
+    text = "".join(traceback.format_exception(kind, value, trace))
+    path = USER_DIR / "launcher-error.log"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as log:
+            log.write(time.strftime("%Y-%m-%d %H:%M:%S ") + APP_TITLE + "\n" + text + "\n")
+    except OSError:
+        pass
+    return text, path
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        text, path = log_launcher_error(*sys.exc_info())
+        try:
+            fallback = tk.Tk()
+            fallback.withdraw()
+            messagebox.showerror(APP_TITLE, f"The launcher could not start:\n\n{text[-1500:]}\n"
+                                            f"This was saved to:\n{path}")
+            fallback.destroy()
+        except Exception:
+            pass
+        raise

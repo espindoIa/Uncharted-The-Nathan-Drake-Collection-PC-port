@@ -14,7 +14,8 @@ unless it sits behind the game-hooks gate (below).
 - The playable port is in `Downloads\Jogos_e_Mods\Jogos\Uncharted-PC-Port`: `Uncharted\` is the extracted package, `Jogo\CUSA02344\` the game.
 - Remotes:
   - `origin` is the fork, `espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port`, and the work is on branch `claude/dlss-uncharted`.
-  - `upstream` is BilalReloaded's repo, which has moved on (0.3.0) and has not been merged here.
+  - `upstream` is BilalReloaded's repo. Its 0.3.0 is merged into the branch; the merge choices are listed under "Fork (espindoIa) notes" in `analysis/STATUS.md`.
+- Both sides patch some of the same game bytes. When taking more upstream work, look for duplicate patch tables in `tools/probe_uncharted.py`: a patch applied first keeps a later one's signature from matching.
 
 ## Commands
 

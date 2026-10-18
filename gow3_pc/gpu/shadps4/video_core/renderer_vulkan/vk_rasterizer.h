@@ -7,6 +7,8 @@
 #include <deque>
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
+#include <array>
 #include <vector>
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
@@ -33,6 +35,20 @@ class MemoryManager;
 }
 
 namespace Vulkan {
+
+/// gow3 diagnostics (GOW3_FAULT_STATS): which GPU command thread write into guest memory takes
+/// a write fault (1 WriteData, 2 graphics WriteData inline, 3 compute WriteData, 4 DMA, 5 fence
+/// fallback). Set around those writes.
+inline thread_local int g_gpu_write_site = 0;
+struct GpuWriteSite {
+    int previous;
+    explicit GpuWriteSite(int site) : previous{g_gpu_write_site} {
+        g_gpu_write_site = site;
+    }
+    ~GpuWriteSite() {
+        g_gpu_write_site = previous;
+    }
+};
 
 class GraphicsPipeline;
 class Runtime;
@@ -153,7 +169,12 @@ public:
     bool IsGpuSideThreadId(u32 tid) const;
     /// A guest write hit a protected page.
     bool OnWriteFault(VAddr addr, bool assume_locks);
+    /// gow3: a guest instruction keeps faulting on one page (see BufferCache::ReleaseStuckPage).
+    void ReleaseStuckPage(VAddr page, bool is_write, bool assume_locks);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
+    /// gow3: after a fault: lands a buffer readback that still read-protects the page of `addr`.
+    void LandWatchedReadback(VAddr addr, bool assume_locks);
+    void WaitDrawPipeForCapture();
     void ProcessDownloadImages();
     bool IsMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);
@@ -508,7 +529,25 @@ private:
     /// blood and other decals): the event's interrupt marks the batch done and the game reads
     /// the hits at once; fences are written when recorded, so it read stale results (no hits).
     std::vector<std::pair<VAddr, u64>> eop_readbacks;
+    /// gow3 18 Oct: ray-cast results (all EOP readback shaders but the 6a6422a9 copies) are read
+    /// back without protecting their pages: the guest reads them after the fence, which is
+    /// written once they land (GOW3_DEFER_RAYCAST_FENCES). Protected, every guest write into
+    /// those pages (the next batch) faulted and waited for the GPU thread and the readback:
+    /// Uncharted 3's ray-cast thread stalled with the ray-cast lock held (rooftops: 2-3 fast
+    /// frames, then one of 25-35 ms). Opt-in, GOW3_OPEN_RAYCAST_READBACKS=1: measured on the
+    /// rooftops it removed the faults on ray-cast pages but not the uneven frames (18 Oct).
+    std::vector<std::pair<VAddr, u64>> eop_open_readbacks;
     std::vector<std::pair<VAddr, u64>> eop_soft_readbacks; ///< gow3: tiny images, unprotected
+    struct ClothPeek {
+        VAddr address;
+        u64 size;
+        u64 shader;
+        u32 slot;
+        bool written;
+        const VideoCore::Buffer* buffer; ///< the buffer bound (arena or stream buffer)
+        u64 buffer_offset;
+    };
+    std::vector<ClothPeek> cloth_peeks; ///< gow3 diagnostics (GOW3_CLOTH_PEEK)
     bool sync_gpu_constants = [] {
         const char* env = std::getenv("GOW3_SYNC_GPU_CONSTANTS");
         return env && env[0] == '1';
@@ -547,6 +586,8 @@ public:
 private:
     /// Diagnostics for a garbage V#: where the walker took flattened dword `flat_dw` from.
     void DescribeSharpSource(const Shader::Info& info, u32 flat_dw, const char* problem);
+    /// gow3 diagnostics: a resource-table walk faulted: the tables it read, now and 3 ms later.
+    void ReportSrtFault(const Shader::Info& info);
     u64 srt_syncs = 0, srt_sync_reports = 0;
     void SyncDmaMemory(const Shader::Info* stage);
     /// VS of the draw whose dynamic state is being set (diagnostic overrides).
@@ -627,6 +668,12 @@ private:
         return nullptr;
     }
     std::unique_ptr<ConstantRing> constant_ring;
+    // gow3: Rasterizer::Flush calls (either pipe stage), and the GOW3_RING_STATS counters.
+    std::atomic<u64> flush_count{0};
+    u64 ring_copy_count = 0, ring_copy_bytes = 0, ring_repeat_count = 0, ring_repeat_bytes = 0;
+    std::array<u64, 4> ring_size_buckets{};
+    std::unordered_set<u64> ring_seen;
+    u64 ring_seen_flush = ~0ULL;
     /// Submissions (prepared draws) kept alive until stage B reaches the position.
     std::deque<std::pair<u64, std::shared_ptr<const void>>> pipe_keepalive;
     std::unique_ptr<DrawPipe> draw_pipe;

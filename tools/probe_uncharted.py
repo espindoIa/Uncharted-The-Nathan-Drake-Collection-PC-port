@@ -19,7 +19,8 @@ ROOT = Path(__file__).resolve().parent.parent
 # Code patches, applied to the linked image by byte pattern (hex, "??" = any byte). A patch lists
 # variants (description, [(pattern, offset in pattern, original bytes, replacement bytes), ...]):
 # the first variant whose pattern occurs exactly once is applied. The variants cover the game
-# versions 1.00 and 1.02 (the update recompiled all three executables).
+# versions 1.00 and 1.02 (the update recompiled all three executables). A variant can also make
+# several changes, all or none: (pattern, [(offset, original bytes, replacement bytes), ...]).
 def pattern_regex(text):
     import re
     text = text.replace(" ", "")
@@ -36,21 +37,11 @@ GPU_WAIT_PATCH = ("wait for GPU frame completion without the 2 s timeout", [
     ("c5f258c0 c5f82e05 ???????? 7739 f390 beffffffff", 12, bytes.fromhex("7739"), bytes.fromhex("9090")),
     ("c5f258c0 c5f82e05 ???????? 7710 f390 498b00", 12, bytes.fromhex("7710"), bytes.fromhex("9090")),
 ])
-# FrameBegin(N) (fg-draw-mgr.cpp:234) frees frame N-3's instances and asserts that frame's
-# m_gfxEopTick is set; it does not wait. The tick is not written by the GPU: a game thread
-# (U1 1.02 0x51e630, one of eight) waits on the GPU end-of-pipe interrupt, finds the frame's
-# done label (the last of its three end-of-pipe writes) and stores rdtsc there. The game runs up
-# to three frames ahead, so the check holds only while that thread wakes within about a frame of
-# the interrupt: on PC it lagged during loading (shader compiles) and with multithreaded
-# rendering, and U1 stopped (int 0x41) within minutes. The assert block becomes `pause; jmp` back
-# to the check: FrameBegin waits for the tick. Same bytes in the three games (tick at +0xa08 in
-# U1, +0xa28 in U2/U3).
-FRAME_BEGIN_WAIT_PATCH = ("FrameBegin waits for frame N-3's end-of-pipe tick instead of asserting", [
-    ("4883bc08 ?? 0a000000 753b 488b05", 11, bytes.fromhex("488b05"), bytes.fromhex("f390ebf1")),
-])
+# FrameBegin's m_gfxEopTick assert (frame N-3 not done yet): FRAME_BEGIN_WAIT_PATCHES below.
+# The tick is stored by a game thread that waits on the GPU end-of-pipe interrupt; on PC it lagged
+# during loading and with multithreaded rendering, and U1 stopped (int 0x41) within minutes.
 EBOOT_PATCHES = [
     GPU_WAIT_PATCH,
-    FRAME_BEGIN_WAIT_PATCH,
     # Silent sound effects (footsteps, gunfire, ambience; music and speech fine): the sound config
     # loader (biglib audio acm 0x515a50) opens reverbs/mixers/environments/prototypes.txt through
     # the sound file callback 0x8ef80 with flag 1, which `testb $5,%cl` at 0x8f1da turns into O_CREAT.
@@ -81,22 +72,9 @@ EBOOT_PATCHES = [
 # places that read the flag act as if it were set: the idle loop takes the sleep path, the sleep
 # path waits, the producer signals. The worker does not look at its queues again under the mutex
 # before waiting, so a job queued just then waits for the timeout: 1 ms instead of 10.
-# UNCHARTED_WORKER_SPIN=1 keeps the original. Same code in the three games.
-WORKER_SLEEP_PATCHES = [
-    ("job workers: idle loop takes the sleep path", [
-        ("4d8d7001 807f5900 ???? 4981f8e8030000", 8, None, bytes.fromhex("9090")),
-    ]),
-    ("job workers: sleep path waits", [
-        ("498b07 80785900 ???? 4889c7 4883ef80 4883c060 ba????0000", 7, None, bytes.fromhex("9090")),
-    ]),
-    ("job workers: wait at most 1 ms (lost wake-ups)", [
-        ("498b07 80785900 ???? 4889c7 4883ef80 4883c060 ba????0000", 20, bytes.fromhex("ba10270000"),
-         bytes.fromhex("bae8030000")),
-    ]),
-    ("job producer: always wakes the workers", [
-        ("b301 80785900 0f84????????", 6, None, bytes.fromhex("909090909090")),
-    ]),
-]
+# UNCHARTED_JOB_SLEEP=0 keeps the original. Same code in the three games.
+# The three flag reads are JOB_SLEEP_PATCHES below (the launcher's Idle game threads); the 1 ms
+# wait is added to them there.
 
 TORCH_FORWARD_PATCHES = [
     ("Uncharted 2 torch: no re-aim along the camera (frame update copy)", [
@@ -111,10 +89,321 @@ TORCH_FORWARD_PATCHES = [
     ]),
 ]
 
+# Idle job workers sleep (all three games, 1.02). The engine's 6 NdJobWorkerThreads spin on their
+# job queues with `pause` unless the job manager's sleep flag (byte +0x59, set by its own
+# SetSleepMode, U3 0xd96440) is on; with it on, an idle worker waits on the manager's condition
+# variable after 1000 spins (10 ms timeout) and every job submission broadcasts to wake them. On
+# the PS4 each worker owns a core and the flag stays off; on a 4-core PC the six spinning workers
+# took 390% of 400% CPU (GPU command thread 5%, title screen 19-27 FPS on an RTX 5080). Treat the
+# flag as on in the worker loop, its re-check before waiting, and the submit path.
+# UNCHARTED_JOB_SLEEP=0 keeps the original.
+JOB_SLEEP_PATCHES = [
+    ("idle job workers sleep (worker loop)", [
+        ("4d8d7001 807f5900 74?? 4981f8e8030000 7c??", 8, bytes.fromhex("74"), bytes.fromhex("9090")),
+    ]),
+    ("idle job workers sleep (re-check before waiting)", [
+        ("498b07 80785900 74?? 4889c7 4883ef80", 7, bytes.fromhex("74"), bytes.fromhex("9090")),
+    ]),
+    ("idle job workers sleep (job submission wakes them)", [
+        ("80785900 0f84????0000 4883c060", 4, bytes.fromhex("0f84"), bytes.fromhex("660f1f440000")),
+    ]),
+    # The worker does not look at its queues again under the mutex before waiting, so a job queued
+    # just then waits for the timeout: 1 ms instead of 10.
+    ("idle job workers wait at most 1 ms (lost wake-ups)", [
+        ("498b07 80785900 ???? 4889c7 4883ef80 4883c060 ba????0000", 20, bytes.fromhex("ba10270000"),
+         bytes.fromhex("bae8030000")),
+    ]),
+]
+
+# The games' own Options > Controls > Aiming > Sensitivity (1.02): a 10-notch slider from 0 to 1.0
+# with 0.5 in the middle (setting 0x1abac2d6; Reset Defaults sets 0.32). The aim speed is mixed
+# linearly from two tuning values by it, and the aiming code asserts it is at most 1 ("sensitivity
+# <= 1.0f"). Mouse aiming goes through the stick there, so the game's aim speed caps it: lift the
+# check and raise the slider's top. The value is a float in the save file, read with or without
+# this. UNCHARTED_AIM_RANGE=0 keeps the original sliders.
+AIM_RANGE_PATCHES = {
+    # Uncharted 1: the check at 0x276308; the slider (0x1453e4) holds steps, min, mid and max at
+    # +0x20..+0x2c and gets mid 2.5, max 5.0: a notch is 0.5, the second one the old maximum.
+    "eboot.bin": [
+        ("Uncharted 1 aim sensitivity above 1 (aim speed range check)", [
+            ("c5f82e05 ???????? 763d c5fa1145f4", 8, bytes.fromhex("763d"), bytes.fromhex("eb3d")),
+        ]),
+        ("Uncharted 1 aim sensitivity slider up to 5", [
+            ("488d0dd5738000 48894818 48c740200a000000 48b9 0000003f0000803f 48894828", 21,
+             bytes.fromhex("0000003f0000803f"), bytes.fromhex("000020400000a040")),
+        ]),
+    ],
+    # Uncharted 2: the check in 0x719d80; the slider item (0x5d25b1) takes its max from a constant
+    # (mid = max / 2): point it at a 5.0, so a notch is 0.5 and the second one the old maximum.
+    "big2-ps4_Shipping.elf": [
+        ("Uncharted 2 aim sensitivity above 1 (aim speed range check)", [
+            ("c5f82e05 ???????? 7649 488b05", 8, bytes.fromhex("7649"), bytes.fromhex("eb49")),
+        ]),
+        ("Uncharted 2 aim sensitivity slider up to 5", [
+            ("81f9d6c2ba1a 0f85???????? 4989ff 4c8d35???????? c5fa1005 75fa8800", 26,
+             bytes.fromhex("75fa8800"), bytes.fromhex("21fa8800")),
+        ]),
+    ],
+    # Uncharted 3: the check in UpdateAiming3Settings (0x927fe5). The slider's value -> notch
+    # (0x62bf60) and notch -> value (0x62c090) functions keep min/mid/max in registers (0, 0.5,
+    # 1.0); the aim setting's branch in each is rewritten in place: the same per-profile address
+    # (array 0x17f97a0 + profile * 64 + 0x20, in fewer bytes: imul, then sign extension) and max =
+    # 1.0 doubled twice = 4.0. The left half keeps its 0.1 notches, the right half goes 0.5 to 4.0.
+    "big3-ps4_Shipping.elf": [
+        ("Uncharted 3 aim sensitivity above 1 (aim speed range check)", [
+            ("c5fa1015???????? c5f82ed0 7351 488b05", 12, bytes.fromhex("7351"), bytes.fromhex("eb51")),
+        ]),
+        ("Uncharted 3 aim sensitivity slider up to 4 (value -> notch)", [
+            ("81f9d6c2ba1a7547 488d05dd63190148630048c1e006488d0dcfd71c01488d440120eb2b", 8,
+             bytes.fromhex("488d05dd63190148630048c1e006488d0dcfd71c01488d440120eb2b"),
+             bytes.fromhex("6b05dd631901404898488d0df4d71c014801c80f58c90f58c9eb2c90")),
+        ]),
+        ("Uncharted 3 aim sensitivity slider up to 4 (notch -> value)", [
+            ("3dd6c2ba1a7520 488d0da662190148630948c1e106488d1598d61c01488d4c0a20c5f828daeb36", 7,
+             bytes.fromhex("488d0da662190148630948c1e106488d1598d61c01488d4c0a20c5f828daeb36"),
+             bytes.fromhex("6b0da6621901404863c9488d15bcd61c014801d1c5f828da0f58c90f58c9eb36")),
+        ]),
+    ],
+}
+
+# FrameBegin (ndlib fg-draw-mgr.cpp, all three games, 1.02) frees frame N-3's instances and
+# asserts that frame's end-of-pipe GPU timestamp is set (m_gfxEopTick of the render frame params,
+# 32 slots: +0xa28, Uncharted 1 +0xa08). Players' crash logs (GitHub #11/#12/#17, RTX 3050 and
+# 5060, and ours) show it after 40-55 ms stalls (shader compiles, waits for a GPU that fell behind):
+# the timestamp, written when the GPU gets there (or after a ray-cast readback lands), was not
+# there yet. On the PS4 the GPU never lags that far. The assert's path (59 bytes up to where the
+# check continues) becomes a wait for the timestamp: pause in a loop until it is set, at most
+# 50 million times (about 0.1-1.5 s by CPU), then carry on. rdx (frame N-3) is kept; the rest of
+# the path's registers were scratch there. UNCHARTED_FRAME_WAIT=0 keeps the assert.
+def frame_begin_wait(offset):
+    code = (bytes.fromhex("488dbc08") + offset.to_bytes(4, "little")  # lea rdi, [rax + rcx + offset]
+            + bytes.fromhex("be80f0fa02")  # mov esi, 50000000
+            + bytes.fromhex("48833f00")  # loop: cmp qword ptr [rdi], 0
+            + bytes.fromhex("7506")  # jne done
+            + bytes.fromhex("f390")  # pause
+            + bytes.fromhex("ffce")  # dec esi
+            + bytes.fromhex("75f4")  # jnz loop
+            + bytes.fromhex("eb20"))  # done: jmp to where the check continues
+    return code + b"\xcc" * (59 - len(code))
+
+
+FRAME_BEGIN_ASSERTS = {  # executable: (the check and its assert path, timestamp offset)
+    "eboot.bin": ("4883bc08080a000000753b488b057035be004885c0742d488d3dd2053400488d35710434004889d3"
+                  "488d15fd053400488d0dd01c350041b8ea0000004531c9ffd04889dacd41", 0xa08),
+    "big2-ps4_Shipping.elf": ("4883bc08280a000000753b488b05609b99004885c0742d488d3dad5f2e00488d354c5e2e00"
+                              "4889d3488d15d85f2e00488d0d38ff210041b8ea0000004531c9ffd04889dacd41", 0xa28),
+    "big3-ps4_Shipping.elf": ("4883bc08280a000000753b488b05f06edb004885c0742d488d3d7df56400488d351cf46400"
+                              "4889d3488d15a8f56400488d0d6409570041b8ea0000004531c9ffd04889dacd41", 0xa28),
+}
+FRAME_BEGIN_WAIT_PATCHES = {
+    executable: [(f"FrameBegin waits for frame N-3's GPU timestamp (no m_gfxEopTick assert)", [
+        (code, 11, bytes.fromhex(code)[11:], frame_begin_wait(offset)),
+    ])]
+    for executable, (code, offset) in FRAME_BEGIN_ASSERTS.items()
+}
+
+# Uncharted 3 (1.02) Player::UpdateFocus (player.cpp:1897, 0xbcee10) springs the point Nate looks
+# at ([player + 0xef0], velocity + 0xf00) towards the target the player gives (kept at rbp-0x80) and
+# asserts the result is not NaN (GitHub #13: crash climbing the fort in chapter 8). Once NaN it
+# stays NaN, and the function's own reset (0xbcf27a, taken when the point is over 6 m off) never
+# runs for it: NaN compares false. The assert's path (53 bytes) now takes that reset instead when
+# the target itself is a number (velocity register xmm5 zeroed first, as on the reset's usual
+# way in); a NaN target still asserts. UNCHARTED_FOCUS_RESET=0 keeps the original.
+FOCUS_NAN_PATCHES = {
+    "big3-ps4_Shipping.elf": [
+        ("Uncharted 3 player focus: reset instead of asserting on NaN", [
+            ("c4e37904cb00c5f0c2c900c5f850c183f80f743a488b05f73302014885c07427488d3d74ff8900"
+             "488d3546fd8900488d1583ff8900488d0d6ece7d0041b86a0700004531c9ffd0cd41", 20,
+             bytes.fromhex("488b05f73302014885c07427488d3d74ff8900488d3546fd8900488d1583ff8900"
+                           "488d0d6ece7d0041b86a0700004531c9ffd0cd41"),
+             bytes.fromhex("c5d057edc5f8284580c5f8c2c800c5f850c183f80f0f84a5feffffcd41") + b"\xcc" * 24),
+        ]),
+    ],
+    # Uncharted 2 (1.02) PlayerBase::UpdateFocus (player-base.cpp:1101, 0x7272e0): the same spring
+    # (point [player + 0x2b0], velocity + 0x2c0, target at rbp-0x60) and the same NaN assert (GitHub
+    # #24, and the user's own U2 session on 16 Oct). Its reset when the point is far off (0x72769a)
+    # snaps the point to the target. The assert's path (53 bytes) now clears the velocity and takes
+    # that snap when the target is a number; a NaN target still asserts.
+    "big2-ps4_Shipping.elf": [
+        ("Uncharted 2 player focus: reset instead of asserting on NaN", [
+            ("c4e37904c900 c5f0c2c900 c5f850c1 83f80f 743a 488b05???????? 4885c0 7427 488d3d????????"
+             " 488d35???????? 488d15???????? 488d0d???????? 41b84d040000 4531c9 ffd0 cd41", 20,
+             bytes.fromhex("488b05e267e4004885c07427488d3d7d4c7600488d352c4b7600488d158c4c7600"
+                           "488d0dbdcb6c0041b84d0400004531c9ffd0cd41"),
+             bytes.fromhex("c5f8284da0c5f0c2d100c5f850c283f80f7511c5e857d2c5f82993c0020000"
+                           "e9e7feffffcd41") + b"\xcc" * 15),
+        ]),
+    ],
+}
+
+# Everything unlocked (launcher -> Advanced -> Unlock all chapters, UNCHARTED_UNLOCK=1): the three
+# games keep Bluepoint's tweak flags "Unlock Chapter Select by default" and "Unlock Brutal
+# difficulty by default" (debug menu; +2/+1 after the Crushing flag, which the Collection already
+# sets). At start the game fills the first and the chapter one from the *bp-ucctweaks* table
+# (Crushing on, chapters off); Brutal starts off. The chapter flag is now set where the table is
+# read, Brutal where it is cleared (1.02; U1 has two copies of that constructor).
+# Cheats (launcher -> Advanced -> Cheats, UNCHARTED_CHEATS=invincible,ammo,noreload,grenades,onehit):
+# the games keep Naughty Dog's debug-menu switches ("Invincible Player", "Infinite Ammo", "No
+# Reload", "Infinite Grenades", "One Hit Kills"; the menu itself is unreachable), each a byte the
+# menu item points at. The runtime keeps the chosen ones set (GOW3_POKE). Update 1.02 addresses
+# (guest image offsets); Uncharted 3's invincibility sits in an options block the game allocates,
+# reached through the pointer at 0x16e2f80.
+CHEATS = {
+    "eboot.bin": {"invincible": "aa5ff8", "ammo": "ab9c01"},
+    "big2-ps4_Shipping.elf": {"invincible": "104f877", "ammo": "104f84a", "noreload": "104f84b"},
+    "big3-ps4_Shipping.elf": {"invincible": "*16e2f80+a7", "ammo": "17faa91", "grenades": "17faa92",
+                              "noreload": "17faa93", "onehit": "17fab94"},
+}
+
+# 19 Oct: Uncharted 1 and 2 keep "Infinite Ammo" in their settings system (the Ultra Easy option
+# sets it there, id 0xa6effd08 in U2), which writes the byte back every frame: a poke does not
+# stick. Each place that reads it (`cmp byte [flag], 0; jne <infinite ammo>`) takes the jump as if
+# it were set (1.02 code; the lea's displacement makes each pattern unique).
+def _ammo_reader(pattern, jne_at):
+    return (pattern, jne_at, b"\x75", b"\xeb")
+
+
+def cheat_names(executable):
+    """The cheats asked for (UNCHARTED_CHEATS, launcher -> Cheats)."""
+    return [name for name in os.environ.get("UNCHARTED_CHEATS", "").replace(" ", "").split(",") if name]
+
+
+CHEAT_PATCHES = {
+    "eboot.bin": {"ammo": [
+        (f"Uncharted 1 infinite ammo (reader {n})", [_ammo_reader(pattern, at)])
+        for n, (pattern, at) in enumerate((("488d15caca8200 b101 803a00 75", 12),
+                                           ("488d0d79673800 803900 75", 10),
+                                           ("488d0d3a5b3800 803900 75", 10),
+                                           ("488d0d0a023800 803900 75", 10)), 1)]},
+    "big2-ps4_Shipping.elf": {"ammo": [
+        (f"Uncharted 2 infinite ammo (reader {n})", [_ammo_reader(pattern, at)])
+        for n, (pattern, at) in enumerate((("488d0dbc8d6f00 80793a00 75", 11),
+                                           ("488d0d63736f00 80793a00 75", 11),
+                                           ("488d0d09436f00 80793a00 75", 11),
+                                           ("488d0d98635600 80793a00 75", 11),
+                                           ("488d0d3b635600 80793a00 75", 11),
+                                           ("4c8d2d285f5600 41807d3a00 75", 12),
+                                           ("e8fd3e2600 41807d3a00 75", 10)), 1)]},
+}
+
+UNLOCK_PATCHES = {
+    "eboot.bin": [
+        (f"Uncharted 1 chapter select unlocked ({copy})", [
+            (f"e8{call} 4885c0 7411 8a08 888b302c0000 8a4001 8883322c0000", 18,
+             bytes.fromhex("8a40018883322c0000"), bytes.fromhex("c683322c0000016690")),
+        ]) for copy, call in (("1", "fe250000"), ("2", "f51d0000"))
+    ] + [
+        (f"Uncharted 1 Brutal difficulty unlocked ({copy})", [
+            (f"e8{call} c683302c000001 c683312c000000", 12,
+             bytes.fromhex("c683312c000000"), bytes.fromhex("c683312c000001")),
+        ]) for copy, call in (("1", "ea3b0000"), ("2", "e1330000"))
+    ],
+    "big2-ps4_Shipping.elf": [
+        ("Uncharted 2 chapter select unlocked", [
+            ("833800 0f9583a02d0000 83780400 0f9583a22d0000", 10,
+             bytes.fromhex("837804000f9583a22d0000"), bytes.fromhex("c683a22d0000010f1f4000")),
+        ]),
+        ("Uncharted 2 Brutal difficulty unlocked", [
+            ("c683a02d000001 c683a12d000000 c683a22d000000", 7,
+             bytes.fromhex("c683a12d000000"), bytes.fromhex("c683a12d000001")),
+        ]),
+    ],
+    "big3-ps4_Shipping.elf": [
+        ("Uncharted 3 chapter select unlocked", [
+            ("833800 0f9583602c0000 83780400 0f9583622c0000", 10,
+             bytes.fromhex("837804000f9583622c0000"), bytes.fromhex("c683622c0000010f1f4000")),
+        ]),
+        ("Uncharted 3 Brutal difficulty unlocked", [
+            ("c683602c000001 c683612c000000 c683622c000000", 7,
+             bytes.fromhex("c683612c000000"), bytes.fromhex("c683612c000001")),
+        ]),
+    ],
+}
+
+# Ultrawide (GitHub #20): the games keep a 16:9 camera's horizontal field of view at every aspect
+# ratio and lose the top and bottom of the picture instead (Vert-). The render camera holds
+# zoom = 1/tan(horizontal FOV / 2) and aspect = height/width (U2/U3 +0x254/+0x250, Drake's Fortune
+# +0x294/+0x290); the projection (x scale zoom, y scale zoom/aspect) and the view frustum's culling
+# planes are built from them. Where those read the zoom of a perspective camera it becomes
+# zoom * min(1, aspect * 16/9): wider than 16:9 keeps the 16:9 picture's vertical view and shows
+# more at the sides (Hor+), 16:9 and narrower views and square cameras are unchanged, and
+# orthographic cameras keep their own branches. The zoom loads jump to small stubs in dead assert
+# branches of the projection code (each now starts with int 0x41, so it still stops the game), and
+# back. Applied only to render sizes wider than 16:9 (UNCHARTED_HOR_PLUS=0: never).
+_XMM_BASE = {"rbx": 3, "rdi": 7}
+
+
+def _vex_mem(op, dst, src, base, disp):
+    """op xmm<dst>, xmm<src>, [base + disp32] (scalar single, VEX 2-byte; vmovss: src 0)."""
+    return bytes([0xc5, 0x80 | (~src & 15) << 3 | 2, op, 0x80 | dst << 3 | _XMM_BASE[base]]) + \
+        struct.pack("<i", disp)
+
+
+def _vex_rip(op, dst, src, at, target):
+    """op xmm<dst>, xmm<src>, [rip -> target], the 8-byte instruction placed at `at`."""
+    return bytes([0xc5, 0x80 | (~src & 15) << 3 | 2, op, dst << 3 | 5]) + struct.pack("<i", target - (at + 8))
+
+
+def hor_plus_variant(pattern, zoom, aspect, sites, caves):
+    """One patch variant: sites (offset, base register, xmm with the zoom, a free xmm) are
+    `vmovss xmm, [base + zoom]` loads; caves (offset, size, original first bytes) are the dead
+    assert branches that take the stubs. Offsets are from the start of the pattern's match."""
+    edits, cave_list = [], [list(cave) + [2] for cave in caves]  # + bytes used (after int 0x41)
+    stubs = {}
+    for offset, base, dst, free in sites:
+        assert dst < 8 and free < 8 and dst != free
+        cave = next(c for c in cave_list if c[3] + 37 + 8 <= c[1])
+        stubs.setdefault(cave[0], []).append((cave[0] + cave[3], offset, base, dst, free))
+        cave[3] += 37
+    for cave_offset, size, original, used in cave_list:
+        if cave_offset not in stubs:
+            continue
+        k, one = cave_offset + used, cave_offset + used + 4
+        code = b"\xcd\x41"
+        for at, site, base, dst, free in stubs[cave_offset]:
+            code += (_vex_rip(0x10, free, 0, at, k) +                     # vmovss free, [16/9]
+                     _vex_mem(0x59, free, free, base, aspect) +           # vmulss free, free, [aspect]
+                     _vex_rip(0x5d, free, free, at + 16, one) +           # vminss free, free, [1.0]
+                     _vex_mem(0x59, dst, free, base, zoom) +              # vmulss dst, free, [zoom]
+                     b"\xe9" + struct.pack("<i", site + 8 - (at + 37)))  # jmp back
+            edits.append((site, _vex_mem(0x10, dst, 0, base, zoom),
+                          b"\xe9" + struct.pack("<i", at - (site + 5)) + b"\x0f\x1f\x00"))
+        edits.insert(0, (cave_offset, original, code + struct.pack("<ff", 16 / 9, 1.0)))
+    return pattern, edits
+
+
+HOR_PLUS_PATCHES = {
+    # Render camera update 0x2c9660 (perspective: infinite far 0x2c982e, finite 0x2c9ac7) and its
+    # frustum planes 0x2ca4ca (Drake's Fortune 1.02).
+    "eboot.bin": [("Drake's Fortune ultrawide: wider view instead of a cropped one", [
+        hor_plus_variant("c5fa108b98020000 c5fa109b90020000 c5fa109394020000 c5f857c0 c5f82ec2 7251",
+                         0x294, 0x290,
+                         [(0x10, "rbx", 2, 0), (0x2a9, "rbx", 3, 0), (0xcac, "rdi", 0, 1)],
+                         [(0x22, 0x51, bytes.fromhex("c5fa115dc0c5fa1155d0")),
+                          (0x2c1, 0x63, bytes.fromhex("c5fa114db0c5fa115dc0"))]),
+    ])],
+    # 0x9dc750 (infinite far 0x9dc8fe, finite 0x9dcb55), frustum planes 0x9dd41d (Uncharted 2 1.02).
+    "big2-ps4_Shipping.elf": [("Uncharted 2 ultrawide: wider view instead of a cropped one", [
+        hor_plus_variant("c5fa10ab58020000 c5fa109b50020000 c5fa10a354020000 c5f857c0 c5f82ec4 0f82b6000000",
+                         0x254, 0x250,
+                         [(0x10, "rbx", 4, 0), (0x267, "rbx", 4, 0), (0xb2f, "rdi", 0, 1)],
+                         [(0x26, 0xb6, bytes.fromhex("488b055d16b9004885c0"))]),
+    ])],
+    # Infinite far 0x11c1107 (both of its paths), finite 0x11c11e1 and 0x11c1406, frustum planes
+    # 0x11c1f21 (Uncharted 3 1.02).
+    "big3-ps4_Shipping.elf": [("Uncharted 3 ultrawide: wider view instead of a cropped one", [
+        hor_plus_variant("80bb6902000000 c5fa10a358020000 c5fa108b50020000 c5fa109354020000 0f840a020000",
+                         0x254, 0x250,
+                         [(0x17, "rbx", 2, 3), (0xf1, "rbx", 2, 0), (0x316, "rbx", 1, 0), (0xe31, "rdi", 0, 1)],
+                         [(0x10d, 0x9f, bytes.fromhex("488b05b415a3004885c0")),
+                          (0x32e, 0x65, bytes.fromhex("488b059313a3004885c0"))]),
+    ])],
+}
+
 PATCHES = {
     "eboot.bin": EBOOT_PATCHES,
-    "big2-ps4_Shipping.elf": [GPU_WAIT_PATCH, FRAME_BEGIN_WAIT_PATCH],
-    "big3-ps4_Shipping.elf": [GPU_WAIT_PATCH, FRAME_BEGIN_WAIT_PATCH],
+    "big2-ps4_Shipping.elf": [GPU_WAIT_PATCH],
+    "big3-ps4_Shipping.elf": [GPU_WAIT_PATCH],
 }
 EXECUTABLES = tuple(PATCHES)
 # Exit code of sceSystemServiceLoadExec (runtime_services.c): the game asked for another
@@ -122,13 +411,30 @@ EXECUTABLES = tuple(PATCHES)
 LOADEXEC_EXIT = 30
 
 
+def job_sleep_enabled():
+    """JOB_SLEEP_PATCHES: on unless UNCHARTED_JOB_SLEEP=0 (launcher: Idle game threads -> Spin).
+    Spinning job threads starve 4-6 core CPUs (GPU thread 5% of a core), heat laptops and, on a
+    16-core desktop, used about 4 more cores for 2% fewer FPS."""
+    return os.environ.get("UNCHARTED_JOB_SLEEP", "auto").strip().lower() not in ("0", "off", "no")
+
+
 def apply_patches(image, patches):
     data = bytearray(image.read_bytes())
     for description, variants in patches:
-        for pattern, offset, original, replacement in variants:
+        for variant in variants:
+            pattern = variant[0]
             found = [match.start() for match in pattern_regex(pattern).finditer(data)]
             if len(found) != 1:
                 continue
+            if len(variant) == 2:  # several changes: all of them, or none if any bytes differ
+                edits = [(found[0] + offset, original, replacement) for offset, original, replacement in variant[1]]
+                if any(data[at:at + len(original)] != original for at, original, _ in edits):
+                    continue
+                for at, _, replacement in edits:
+                    data[at:at + len(replacement)] = replacement
+                print(f"Patched: {description} (image offset {found[0]:#x}, {len(edits)} changes)")
+                break
+            _, offset, original, replacement = variant
             at = found[0] + offset
             if original is not None and data[at:at + len(original)] != original:
                 raise SystemExit(f"Patch '{description}': unexpected bytes at {at:#x}")
@@ -358,6 +664,41 @@ def game_view(game, update):
     raise SystemExit("Could not combine the game and its update")
 
 
+def boot_view(base, update):
+    """For drives that hold no links (exFAT, FAT32): copies of the files the prepare scripts read
+    (the executables, sce_module, sce_sys), the update's over the game's, in analysis/views
+    (about 90 MB, copied again only when a source changes). The runtime reads the update over
+    the game itself (--app0-overlay)."""
+    chosen = {}
+    executables = {name.lower() for name in GAME_KEYS}
+    for layer in (base, update):  # the update last: its files win
+        for entry in layer.iterdir():
+            if entry.is_file() and entry.name.lower() in executables:
+                chosen[entry.name.lower()] = (entry.name, entry)
+            elif entry.is_dir() and entry.name.lower() in ("sce_module", "sce_sys"):
+                for path in entry.rglob("*"):
+                    if path.is_file():
+                        relative = path.relative_to(layer)
+                        chosen[str(relative).lower()] = (str(relative), path)
+    title, version = sfo_value(update, "TITLE_ID") or "game", sfo_value(update, "APP_VER") or "update"
+    view = ROOT / "analysis/views" / f"boot-{title}-{version}"
+    for relative, source in chosen.values():
+        dest = view / relative
+        wanted = source.stat()
+        try:
+            current = dest.stat()
+            # FAT32 keeps write times in 2-second steps.
+            if current.st_size == wanted.st_size and abs(current.st_mtime - wanted.st_mtime) <= 2:
+                continue
+        except OSError:
+            pass
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # copyfile, not copy2: a read-only source attribute would make the next refresh fail.
+        shutil.copyfile(source, dest)
+        os.utime(dest, ns=(wanted.st_atime_ns, wanted.st_mtime_ns))
+    return view
+
+
 def ini_value(path, key, default):
     try:
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -372,17 +713,27 @@ def run_once(args, executable, guest_args, loadexec):
     base = args.game.resolve()
     update = find_update(base)
     if not update:
+        version = sfo_value(base, "APP_VER")
+        if version and version < "01.02":
+            title = base.parent if base.name.lower() == "uroot" else base
+            print(f"Game version {version} without update 1.02: the fixes written for 1.02 are skipped "
+                  f"(the patches marked NOT applied). Extract update 1.02 next to the game folder as "
+                  f"{title.name}-patch.")
         return run_game(args, base, executable, guest_args, loadexec)
     print(f"Update {sfo_value(update, 'APP_VER') or '?'}: {update}")
     try:
         view = game_view(base, update)
     except SystemExit as error:
         # exFAT/FAT32 drives (USB sticks) hold no links ([WinError 1] Incorrect function): the
-        # game still starts, as dumped, instead of not at all.
-        print(f"{error}: starting the game without its update. exFAT and FAT32 drives (USB "
-              "sticks) cannot hold the links that combine them: copy the update's files over the "
-              "game folder, or keep both on an NTFS drive.")
-        return run_game(args, base, executable, guest_args, loadexec)
+        # runtime lays the update over the game itself, and the prepare scripts read copies of
+        # the few files they need.
+        print(f"{error}: the runtime lays the update over the game instead (drive without links)")
+        try:
+            boot = boot_view(base, update)
+        except OSError as copy_error:
+            print(f"Update files not copied ({copy_error}): starting the game without its update")
+            return run_game(args, base, executable, guest_args, loadexec)
+        return run_game(args, boot, executable, guest_args, loadexec, app0=base, overlays=[update])
     try:
         return run_game(args, view, executable, guest_args, loadexec)
     finally:
@@ -396,7 +747,63 @@ def run_once(args, executable, guest_args, loadexec):
             sys.path.pop(0)
 
 
-def run_game(args, game, executable, guest_args, loadexec):
+def hang_watchdog(process, log_path, dumps, seconds, reports):
+    """Freeze report: the runtime logs a Frame stats line every 5 s while frames are shown. With
+    none for `seconds` while the game runs, every thread's stack goes to hang-<time>.txt beside the
+    log (tools/hang_report.py; small enough to attach to an issue; appended to `reports`) and, in
+    the source tree or with UNCHARTED_HANG_DUMP=1, a minidump to dumps/ (hundreds of MB; the newest
+    2 stay). Once per freeze; frames coming back re-arm it. Long-session freezes left no trace
+    before: the log just stopped. (Not written into the log itself: the game writes it through its
+    own file position, over anything appended meanwhile.)"""
+    import re
+    import hang_report
+    position, last_frame, armed, seen, guest_base = 0, time.monotonic(), True, False, None
+    while process.poll() is None:
+        time.sleep(2)
+        try:
+            with open(log_path, "rb") as log:
+                log.seek(position)
+                chunk = log.read()
+                position += len(chunk)
+        except OSError:
+            continue
+        if guest_base is None and (found := re.search(rb"Guest image base: ([0-9a-fA-F]+)", chunk)):
+            guest_base = int(found.group(1), 16)
+        if b"Frame stats" in chunk:
+            last_frame, armed, seen = time.monotonic(), True, True
+            continue
+        if not (seen and armed) or time.monotonic() - last_frame < seconds or process.poll() is not None:
+            continue
+        armed = False
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        lines = [f"Hang watchdog: no new frame for {seconds} s (game frozen) at {stamp}; stacks of every thread:"]
+        started = time.monotonic()
+        try:
+            lines += hang_report.thread_report(process, guest_base)
+        except Exception as error:  # the report must never take the launcher down
+            lines.append(f"  (thread report failed: {error})")
+        lines.append(f"(report took {time.monotonic() - started:.1f} s)")
+        if os.environ.get("UNCHARTED_HANG_DUMP", "0" if (ROOT / "VERSION").exists() else "1") == "1":
+            dumps.mkdir(parents=True, exist_ok=True)
+            for old in sorted(dumps.glob("hang-*.dmp"))[:-1]:  # with the new one, the newest 2 stay
+                old.unlink(missing_ok=True)
+            dump = dumps / f"hang-{stamp}.dmp"
+            try:
+                lines.append(f"Hang watchdog: minidump {dump}" if hang_report.write_minidump(process, dump)
+                             else "Hang watchdog: the minidump failed")
+            except Exception as error:
+                lines.append(f"Hang watchdog: the minidump failed ({error})")
+        report = log_path.parent / f"hang-{stamp}.txt"
+        for old in sorted(log_path.parent.glob("hang-*.txt"))[:-9]:  # with the new one, the newest 10 stay
+            old.unlink(missing_ok=True)
+        report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        reports.append(report)
+        print(f"Hang watchdog: the game froze; report {report}", flush=True)
+
+
+def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=()):
+    """game: the folder the prepare scripts read; app0 (default: game) with overlays laid over
+    it is what the game sees as /app0."""
     out = ROOT / "analysis" / ("uncharted" if executable == "eboot.bin" else Path(executable).stem)
     user = ROOT / "analysis/uncharted-user"
     user.mkdir(parents=True, exist_ok=True)
@@ -407,10 +814,33 @@ def run_game(args, game, executable, guest_args, loadexec):
             prepare_command += ["--executable", executable]
         subprocess.run(prepare_command, check=True)
     patches = list(PATCHES[executable])
-    if os.environ.get("UNCHARTED_WORKER_SPIN") != "1":
-        patches.extend(WORKER_SLEEP_PATCHES)
     if executable == "big2-ps4_Shipping.elf" and os.environ.get("UNCHARTED_TORCH_FORWARD", "1") != "0":
         patches.extend(TORCH_FORWARD_PATCHES)
+    if os.environ.get("UNCHARTED_AIM_RANGE", "1") != "0":
+        patches.extend(AIM_RANGE_PATCHES.get(executable, []))
+    if os.environ.get("UNCHARTED_FRAME_WAIT", "1") != "0":
+        patches.extend(FRAME_BEGIN_WAIT_PATCHES.get(executable, []))
+    if os.environ.get("UNCHARTED_UNLOCK", "0") == "1":
+        patches.extend(UNLOCK_PATCHES.get(executable, []))
+    if os.environ.get("UNCHARTED_FOCUS_RESET", "1") != "0":
+        patches.extend(FOCUS_NAN_PATCHES.get(executable, []))
+    for cheat in cheat_names(executable):
+        patches.extend(CHEAT_PATCHES.get(executable, {}).get(cheat, []))
+    # Ultrawide render sizes (the launcher's aspect ratio): the wider view (HOR_PLUS_PATCHES).
+    size = (os.environ.get(f"UNCHARTED_RESOLUTION_{GAME_KEYS[executable].upper()}")
+            or os.environ.get("UNCHARTED_RESOLUTION", "")).lower()
+    if "x" in size and os.environ.get("UNCHARTED_HOR_PLUS", "1") != "0":
+        size_w, size_h = (int(value) for value in size.split("x"))
+        if size_w / size_h > 16 / 9 + 0.01:
+            patches.extend(HOR_PLUS_PATCHES.get(executable, []))
+    if job_sleep_enabled():
+        patches.extend(JOB_SLEEP_PATCHES)
+        # Diagnostics: UNCHARTED_JOB_SLEEP_SPINS=<n> idle spins before a worker sleeps (1000).
+        if spins := os.environ.get("UNCHARTED_JOB_SLEEP_SPINS", "").strip():
+            patches.append(("idle job workers: spins before sleeping", [
+                ("4d8d7001 807f5900 ???? 4981f8e8030000 7c??", 13, bytes.fromhex("e8030000"),
+                 int(spins).to_bytes(4, "little")),
+            ]))
     apply_patches(out / "boot-linked.bin", patches)
     # Settings per game (the launcher keeps them apart): the started game's own, also when the
     # Collection menu switches games.
@@ -428,6 +858,11 @@ def run_game(args, game, executable, guest_args, loadexec):
         # ~1620p it renders at the largest size that fits there, and the output is upscaled.
         move = executable != "eboot.bin"
         candidates = [(width, height)] + [size for size in U1_FALLBACK_SIZES if size[0] * size[1] < width * height]
+        if abs(width / height - 16 / 9) > 0.01:
+            # Ultrawide: smaller sizes of the same shape (width/8 and height/4 whole).
+            candidates = [(width, height)] + [
+                (int(width * scale) // 8 * 8, int(height * scale) // 4 * 4)
+                for scale in (0.9, 0.8, 0.75, 2 / 3, 0.6, 0.5)]
         extra_mib = 0
         for candidate in candidates:
             patched = bytearray(data)
@@ -444,6 +879,15 @@ def run_game(args, game, executable, guest_args, loadexec):
     else:
         extra_mib = 0
     env = os.environ.copy()
+    wanted = cheat_names(executable)
+    if wanted and "GOW3_POKE" not in env:
+        if (sfo_value(game, "APP_VER") or "") >= "01.02":
+            pokes = [CHEATS[executable][name] for name in wanted if name in CHEATS.get(executable, {})]
+            if pokes:
+                env["GOW3_POKE"] = ",".join(pokes)
+                print(f"Cheats: {', '.join(n for n in wanted if n in CHEATS.get(executable, {}))}")
+        else:
+            print("Cheats: need update 1.02 (not used)")
     # Measurement logging and live trigger files (frame/fault/wait statistics every 5 s, GPU
     # checkpoints, capture/readback/DMA triggers). On unless the launcher turns it off.
     diagnostics = env.get("UNCHARTED_DIAGNOSTICS", "1") != "0"
@@ -461,13 +905,23 @@ def run_game(args, game, executable, guest_args, loadexec):
         if limit.isdigit() and (int(limit) == 0 or int(limit) > 60):
             env["GOW3_VBLANK_HZ"] = "0"
     multithreaded = os.environ.get(f"UNCHARTED_MULTITHREADED_{game_key.upper()}")
+    # Drake's Fortune: its weapons (and at times other objects) drew with another draw's look on
+    # some frames with multithreaded rendering (flat grey guns, the player and GitHub #23, 18 Oct
+    # 2026), and it gains nothing from it (4 cores: 101.8 vs 103.2 FPS). Off until that is fixed,
+    # also when no launcher choice is given (the default below is on);
+    # UNCHARTED_U1_MULTITHREADED_TEST=1 keeps the launcher's choice (tests).
+    if executable == "eboot.bin" and multithreaded != "0" and \
+            os.environ.get("UNCHARTED_U1_MULTITHREADED_TEST") != "1":
+        print("Multithreaded rendering: off for Drake's Fortune (its weapons flicker with it)")
+        multithreaded = "0"
     if multithreaded is not None:
         env["GOW3_DRAW_PIPE"] = multithreaded
         env["GOW3_VK_RECORD_THREAD"] = multithreaded
     # Keyboard and mouse (launcher Controls tab, per game; explicit GOW3_* values win).
     for launcher_key, runtime_key in (("KEY_MAP", "GOW3_KEY_MAP"), ("MOUSE_MAP", "GOW3_MOUSE_MAP"),
                                       ("MOUSE", "GOW3_MOUSE"), ("MOUSE_SENS", "GOW3_MOUSE_SENS"),
-                                      ("MOUSE_INVERT", "GOW3_MOUSE_INVERT")):
+                                      ("MOUSE_INVERT", "GOW3_MOUSE_INVERT"), ("PROMPTS", "GOW3_PROMPTS"),
+                                      ("PAD_MAP", "GOW3_PAD_MAP")):
         value = os.environ.get(f"UNCHARTED_{launcher_key}_{game_key.upper()}")
         if value is not None and runtime_key not in os.environ:
             env[runtime_key] = value
@@ -486,30 +940,60 @@ def run_game(args, game, executable, guest_args, loadexec):
     # back with the submission it arrived a frame late, and NPCs floated in the air while Nate's
     # feet sank into the floor (also in 0.1.1 and other ports). It now comes back at the frame's
     # end-of-pipe fence, which waits for it (16 Oct; precise readbacks fixed it too, at ~50 FPS).
-    if executable == "big2-ps4_Shipping.elf":
+    # 17 Oct: Uncharted 3 too (user: Nate's legs flicker a little, NPCs float a bit; the same
+    # engine and copy shader). Two 90 s U3 runs at 1440p: stable, 56-58 FPS.
+    if executable in ("big2-ps4_Shipping.elf", "big3-ps4_Shipping.elf"):
         env.setdefault("GOW3_COPY64_EOP_READBACK", "1")
+    if executable in ("big2-ps4_Shipping.elf", "big3-ps4_Shipping.elf"):
         # Its aim depth of field reads the focus distance from a 1x1 render target the GPU writes;
         # never copied back it stayed 0 and everything behind Nate was blurred while aiming. Tiny
-        # GPU-written images now come back with the frame's end-of-pipe fence (16 Oct). Drake's
-        # Fortune and Uncharted 3 aim sharp without it, so they skip the copy and the wait.
+        # GPU-written images now come back with the frame's end-of-pipe fence (16 Oct).
+        # 19 Oct: Uncharted 3 too (user: the same blur when aiming; its focus value read 0.0 at
+        # 1440p, the same reader: global 0x1a5fdd0 + 0x35f8 in 1.02). Drake's Fortune aims sharp
+        # without it, so it skips the copy and the wait.
         env.setdefault("GOW3_TINY_IMAGE_READBACK", "1")
-    # Temporal upscalers need the camera and scene depth of each frame. The three games copy their
-    # camera into every scene vertex shader's user data (flat_camera.h; U2 17 Oct, U1 and U3
-    # 18 Oct) and start post-processing with the same cs aec539f0 (bloom downsample of the HDR
-    # scene color; GOW3_UPSCALER_TRACE=1 lists the dispatches after the last scene draw): with
-    # upscaler=dlss (or fsr3/fsr4/taa) in its settings file the runtime runs it on that color.
-    upscaler = ini_value(Path(env["GOW3_CONFIG"]), "upscaler", "off")
-    if upscaler not in ("off", "none", ""):
-        env.setdefault("GOW3_CAMERA_SOURCE", "flat")
-        env.setdefault("GOW3_UPSCALE_BEFORE_CS", "aec539f0")
-        # The render resolution above is the upscaler's output: DLSS/FSR presets below DLAA draw
-        # the scene at a fraction of it (SceneResolution::Native, the port's reduced targets).
-        env.setdefault("GOW3_SCENE_SIZE", f"{render_size[0]}x{render_size[1]}")
-        # Its half-resolution targets stay full size: the snow particles read the half-resolution
-        # depth natively in every draw, and resolving its proxy each time cost more than it saved.
-        env.setdefault("GOW3_SCENE_HALF_RES", "0")
-    else:
+    # The PS4's system language (launcher -> Advanced -> Language; runtime_services.c): each game's
+    # main menu offers it next to English (Square). 1 = English (US).
+    language = os.environ.get("UNCHARTED_LANGUAGE", "").strip()
+    if language.isdigit():
+        env.setdefault("GOW3_LANGUAGE", language)
+    # Temporal anti-aliasing and upscaling (in-game menu -> Image -> Anti-aliasing: TAA, FSR 3.1,
+    # FSR 4, DLSS; launcher -> Display) is always prepared, so the menu switches it on and off
+    # live. It runs on the lit scene before the post processing starts (compute aec539f0, the
+    # same in all three games). The camera comes from the scene vertex shaders' user data
+    # (flat_camera.h; U2 17 Oct, U1 and U3 18 Oct), with the port's object motion vectors: it
+    # follows a reduced scene too, so FSR/DLSS also offer their quality modes (the render
+    # resolution is then their output; SceneResolution draws the scene smaller).
+    # UNCHARTED_MOTION_SOURCE=velocity takes the camera from the motion blur's velocity pass
+    # instead (shader f4b18264, as in the reference Uncharted port; anti-aliasing at the render
+    # size only). UNCHARTED_TEMPORAL_AA=0 switches it all off (no camera tracking at all).
+    if os.environ.get("UNCHARTED_TEMPORAL_AA", "1") == "0":
         env["GOW3_UPSCALER"] = "none"
+    else:
+        if os.environ.get("UNCHARTED_MOTION_SOURCE", "") == "velocity":
+            env.setdefault("GOW3_VELOCITY_PS", "f4b18264")
+        else:
+            env.setdefault("GOW3_CAMERA_SOURCE", "flat")
+            # Half-resolution targets stay full size: the snow particles read the half-resolution
+            # depth natively in every draw, and resolving its proxy each time cost more than it saved.
+            env.setdefault("GOW3_SCENE_HALF_RES", "0")
+        env.setdefault("GOW3_UPSCALE_BEFORE_CS", "aec539f0")
+        env["GOW3_SCENE_SIZE"] = f"{render_size[0]}x{render_size[1]}"
+        # FSR 4's model files (gow3_pc/tools/fetch_fsr4_assets.sh), when installed; DLSS needs
+        # gow3_dlss.dll and nvngx_dlss.dll beside Uncharted.exe.
+        fsr4 = ROOT / "gow3_pc/fsr4_shaders"
+        if fsr4.is_dir():
+            env.setdefault("GOW3_FSR4_DIR", str(fsr4))
+        # The renderer's own default is FSR 3; here it starts off until it is picked.
+        config = Path(env["GOW3_CONFIG"])
+        if ini_value(config, "upscaler", None) is None:
+            try:
+                text = config.read_text(encoding="utf-8", errors="replace") if config.exists() else ""
+                if text and not text.endswith("\n"):
+                    text += "\n"
+                config.write_text(text + "upscaler=off\n", encoding="utf-8")
+            except OSError:
+                env.setdefault("GOW3_UPSCALER", "off")
     if extra_mib:
         env["GOW3_DMEM_MB"] = str(5056 + extra_mib + 64)
     # The movie player reads its (1080p) movies with the render size: the decoder scales them to it
@@ -579,11 +1063,13 @@ def run_game(args, game, executable, guest_args, loadexec):
     # (done: 0 hits from startup; nothing writes the LUT on the CPU)
     # if executable == "eboot.bin":
     #     env.setdefault("GOW3_EXEC_WATCH", "w:1134ab0000,w:1134ab0100,w:1134ab4000,w:1134ab8000")
-    # Dark-interior test: with async shader compilation a draw whose pipeline is still compiling
-    # is skipped (PipelineCache::GetGraphicsPipeline returns nullptr). A one-time draw at level
-    # load (suspect: the writer of the LUT above) would then never run. Synchronous compilation
-    # for this test; overrides async_shaders in probe.ini.
-    if executable == "eboot.bin":
+    # Dark interiors (14 Oct): with async shader compilation a draw whose pipeline is still
+    # compiling is skipped, and U1's one-time light ramp LUT draw (ps 2d7325a4, 256x8) never ran,
+    # so U1 compiled everything synchronously. Since 15 Oct the pipeline cache compiles draws to
+    # small targets (<= 256x256, SmallTargetDraw) synchronously in every game, which covers it;
+    # synchronous U1 froze for 1-2.4 s per new area on a Ryzen laptop (18 Oct). Back to the
+    # async_shaders setting; UNCHARTED_U1_SYNC_SHADERS=1 restores synchronous compilation.
+    if executable == "eboot.bin" and os.environ.get("UNCHARTED_U1_SYNC_SHADERS") == "1":
         env.setdefault("GOW3_ASYNC_SHADERS", "0")
     # Frame drops in the temple (45-57 FPS): GPU thread waits in DownloadMemory for CPU read faults
     # on GPU-modified pages. Every 5 s: fault counts/time, hottest guest instructions and windows.
@@ -646,7 +1132,9 @@ def run_game(args, game, executable, guest_args, loadexec):
         env.setdefault("GOW3_WINDOW_ICON", str(window_icon))
     command = [str(game_executable()), str(out / "boot-linked.bin"),
                "--no-game-hooks", "--low-image", "--content-profile", str(out / "content.bin"),
-               "--app0", str(game), "--user", str(user)]
+               "--app0", str(app0 or game), "--user", str(user)]
+    for overlay in overlays:
+        command += ["--app0-overlay", str(overlay)]
     # guest_args is the game's complete argv; argv[0] is the program name.
     command += ["--guest-path", guest_args[0] if guest_args else "/app0/" + executable]
     for value in guest_args[1:]:
@@ -679,6 +1167,14 @@ def run_game(args, game, executable, guest_args, loadexec):
     start = time.monotonic()
     with (out / (name + ".log")).open("wb") as log:
         process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
+        # Freeze watchdog (needs the Frame stats lines, i.e. diagnostics on). UNCHARTED_HANG_SECONDS
+        # sets its wait (30 s), 0 turns it off.
+        hang_seconds = int(os.environ.get("UNCHARTED_HANG_SECONDS", "30") or 0)
+        hang_reports = []
+        if os.name == "nt" and args.boot and hang_seconds > 0 and env.get("GOW3_FRAME_STATS") == "1":
+            import threading
+            threading.Thread(target=hang_watchdog, daemon=True,
+                             args=(process, out / (name + ".log"), out / "dumps", hang_seconds, hang_reports)).start()
         try:
             if args.capture:
                 while process.poll() is None:
@@ -699,10 +1195,17 @@ def run_game(args, game, executable, guest_args, loadexec):
             result["timed_out"] = True
     result["elapsed_seconds"] = round(time.monotonic() - start, 3)
     (out / (name + ".json")).write_text(json.dumps(result, indent=2), encoding="utf-8")
+    # The game has ended: the log can take the freeze reports' names (the launcher looks there).
+    if args.boot and hang_reports:
+        with open(out / (name + ".log"), "ab") as log:
+            log.write("".join(f"\nHang watchdog: the game froze; report {report}" for report in hang_reports)
+                      .encode("utf-8") + b"\n")
     attempt = out / "attempts" / (name + "-" + str(time.time_ns()))
     attempt.mkdir(parents=True)
     for suffix in (".log", ".json"):
         shutil.copy2(out / (name + suffix), attempt / (name + suffix))
+    for report in hang_reports if args.boot else []:
+        shutil.copy2(report, attempt / report.name)
     print(json.dumps(result, indent=2))
     print(f"Log: {out / (name + '.log')}")
     return result

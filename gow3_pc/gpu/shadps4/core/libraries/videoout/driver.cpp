@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "video_core/amdgpu/pm4_cmds.h"
 #include <cstring>
 #include <functional>
 #include "video_core/renderer_vulkan/vk_draw_pipe.h"
@@ -28,6 +29,7 @@
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
+#include "gow3_profiler.h"
 #include "core/libraries/videoout/videoout_error.h"
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -42,6 +44,8 @@ extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
 namespace Vulkan {
 extern std::atomic<u64> g_gow3_compile_ns;
 extern std::atomic<u32> g_gow3_compiles;
+extern std::atomic<u64> g_gow3_compile_kind_ns[6];
+extern std::atomic<u32> g_gow3_compile_kind_count[6];
 extern std::atomic<u64> g_gow3_capture_ns, g_gow3_async_ns, g_gow3_compile_wait_ns;
 extern std::atomic<u64> g_gow3_snapshot_ns, g_gow3_guest_wait_ns;
 extern std::atomic<u32> g_gow3_pending_draws;
@@ -303,7 +307,35 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
     return 0;
 }
 
+// gow3: GOW3_FRAME_LOG=<file>: one line per event, "<kind> <ms since start> <ms since the last
+// of that kind>": kind S = the guest submitted a flip (its frame is recorded), P = the flip was
+// presented (our pacing). For frame pacing analysis (1% lows).
+static void LogFrameEvent(char kind) {
+    static FILE* file = [] {
+        const char* path = std::getenv("GOW3_FRAME_LOG");
+        return path && path[0] ? std::fopen(path, "w") : nullptr;
+    }();
+    if (!file) {
+        return;
+    }
+    using Clock = std::chrono::steady_clock;
+    static const Clock::time_point start = Clock::now();
+    static std::mutex mutex;
+    static Clock::time_point last[2] = {start, start};
+    const auto now = Clock::now();
+    std::scoped_lock lock{mutex};
+    auto& previous = last[kind == 'P'];
+    std::fprintf(file, "%c %.3f %.3f\n", kind, std::chrono::duration<double, std::milli>(now - start).count(),
+                 std::chrono::duration<double, std::milli>(now - previous).count());
+    previous = now;
+    static u32 lines = 0;
+    if (++lines % 256 == 0) {
+        std::fflush(file);
+    }
+}
+
 void VideoOutDriver::Flip(const Request& req) {
+    LogFrameEvent('P');
     // Update HDR status before presenting, then present the frame (gow3: on the swap thread).
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
         presenter->SetHDR(hdr);
@@ -360,6 +392,7 @@ void VideoOutDriver::Flip(const Request& req) {
                                  u64(Vulkan::g_gow3_compile_ns.load()), u64(Vulkan::g_gow3_compiles.load()),
                                  Gow3Stats::t_gc.load()};
         if (stall) {
+            Gow3Profiler::NoteStall(frame_ms);
             std::printf("Stall: %.1f ms frame; waits: readback %.1f ms, GPU ticks %.1f ms, "
                         "recorder %.1f ms, host copies %.1f ms; %llu compiles %.1f ms; GC %.1f ms\n",
                         frame_ms, (wait_now[0] - last_wait[0]) / 1e6, (wait_now[1] - last_wait[1]) / 1e6,
@@ -368,6 +401,35 @@ void VideoOutDriver::Flip(const Request& req) {
                         (wait_now[4] - last_wait[4]) / 1e6, (wait_now[6] - last_wait[6]) / 1e6);
         }
         std::copy(std::begin(wait_now), std::end(wait_now), std::begin(last_wait));
+        // Its compiles by kind (where the time of a compile burst goes).
+        static u64 last_kind_ns[6];
+        static u32 last_kind_count[6];
+        u64 kind_ns[6];
+        u32 kind_count[6];
+        for (u32 k = 0; k < 6; ++k) {
+            kind_ns[k] = Vulkan::g_gow3_compile_kind_ns[k].load();
+            kind_count[k] = Vulkan::g_gow3_compile_kind_count[k].load();
+        }
+        if (stall && kind_count[0] + kind_count[1] + kind_count[2] + kind_count[3] + kind_count[4] +
+                             kind_count[5] !=
+                         last_kind_count[0] + last_kind_count[1] + last_kind_count[2] +
+                             last_kind_count[3] + last_kind_count[4] + last_kind_count[5]) {
+            const auto part = [&](u32 k) {
+                return std::make_pair(kind_count[k] - last_kind_count[k], (kind_ns[k] - last_kind_ns[k]) / 1e6);
+            };
+            const auto [cs, cs_ms] = part(0);
+            const auto [cv, cv_ms] = part(1);
+            const auto [gs, gs_ms] = part(2);
+            const auto [gv, gv_ms] = part(3);
+            const auto [cp, cp_ms] = part(4);
+            const auto [gp, gp_ms] = part(5);
+            std::printf("       compiles: compute shaders %u %.1f ms + variants %u %.1f ms, compute "
+                        "pipelines %u %.1f ms; graphics shaders %u %.1f ms + variants %u %.1f ms, "
+                        "graphics pipelines %u %.1f ms\n",
+                        cs, cs_ms, cv, cv_ms, cp, cp_ms, gs, gs_ms, gv, gv_ms, gp, gp_ms);
+        }
+        std::copy(std::begin(kind_ns), std::end(kind_ns), std::begin(last_kind_ns));
+        std::copy(std::begin(kind_count), std::end(kind_count), std::begin(last_kind_count));
         if (stall) {
             std::printf("       fault handlers: %llu read faults %.1f ms, write faults %.1f ms\n",
                         static_cast<unsigned long long>(rf - last_rf), (trf - last_trf) / 1e6,
@@ -611,6 +673,7 @@ void VideoOutDriver::DrawLastFrame() {
 
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
                                 bool is_eop /*= false*/) {
+    LogFrameEvent('S');
     {
         std::unique_lock lock{port->port_mutex};
         if (index != -1 && port->flip_status.flip_pending_num > 16) {
@@ -660,6 +723,17 @@ static void QueueFlipInOrder(Vulkan::Rasterizer& rasterizer, const u8* data) {
 }
 
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
+    // gow3 diagnostics (GOW3_FINISH_AT_FLIP=1): the GPU finishes all work before each flip, so the
+    // GPU work of consecutive frames never overlaps (Uncharted 3's cloth flicker shows only above
+    // 30 FPS, 16 Oct).
+    static const bool finish_at_flip = [] {
+        const char* env = std::getenv("GOW3_FINISH_AT_FLIP");
+        return env && env[0] == '1';
+    }();
+    if (finish_at_flip) {
+        presenter->GetRasterizer().Finish();
+    }
+    AmdGpu::g_gow3_flips.fetch_add(1, std::memory_order_relaxed);
     Vulkan::Frame* frame;
     if (index == -1) {
         frame = presenter->PrepareBlankFrame(false);
@@ -711,9 +785,25 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
     }
 }
 
+} // namespace Libraries::VideoOut
+
+namespace Libraries::Videodec2 {
+extern std::atomic<s64> last_movie_frame_ns; // shim/videodec2/videodec2.cpp
+} // namespace Libraries::Videodec2
+
+namespace Libraries::VideoOut {
+
+namespace {
+/// A movie frame was decoded in the last 300 ms: a prerecorded cutscene is playing.
+bool MovieActive(std::chrono::steady_clock::time_point now) {
+    const s64 last = Videodec2::last_movie_frame_ns.load(std::memory_order_relaxed);
+    return last && now.time_since_epoch().count() - last < 300'000'000;
+}
+} // namespace
+
 void VideoOutDriver::PresentThread(std::stop_token token) {
-    const std::chrono::nanoseconds vblank_period(1000000000 /
-                                                 EmulatorSettings.GetVblankFrequency());
+    const std::chrono::nanoseconds base_period(1000000000 / EmulatorSettings.GetVblankFrequency());
+    std::chrono::nanoseconds vblank_period = base_period;
 
     Common::SetCurrentThreadName("shadPS4:PresentThread");
     Common::SetCurrentThreadRealtime(vblank_period);
@@ -770,14 +860,64 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     // arrives and its slot allows, between vblanks, instead of on the next vblank tick.
     bool immediate_flips = frame_limit != 0;
 
+    // gow3 18 Oct 2026: the frame rate unlocked (480 Hz vblank, the limit paces the presents)
+    // with VSync and a limit at or above the display's refresh rate: frames the game made
+    // faster than the display queued up behind VSync and the game was held back in bursts.
+    // On the user's 75 Hz monitor at the 120 limit: two or three 6 ms frames, then one of
+    // 25-35 ms (75 FPS, 1% lows 32, 28% of the frames over 20 ms). The vblank then follows the
+    // display (up to 120 Hz) and the game paces itself to it, as at 60: 75 FPS, 1% lows 66,
+    // none over 20 ms. Live with the menu's VSync and limit; displays above 120 Hz, VSync off
+    // and lower limits keep the fast vblank (frames shown as soon as they are done).
+    const bool adaptive_vblank = EmulatorSettings.GetVblankFrequency() == 480;
+    const auto paced_period = [&](u32 limit) {
+        if (!adaptive_vblank) {
+            return base_period;
+        }
+        static const double refresh = Gow3DisplayRefreshRate();
+        const bool vsync = Gow3Settings::Get().vsync;
+        if (vsync && refresh > 29.5 && refresh < 120.5 && (limit == 0 || limit + 0.5 >= refresh)) {
+            return std::chrono::nanoseconds(s64(1e9 / refresh));
+        }
+        return base_period;
+    };
+
+    // gow3 (after the reference Uncharted port): prerecorded movies (the Collection's cutscenes)
+    // show one video frame per vblank of a 60 Hz display; with the frame rate unlocked (480 Hz
+    // vblank) they played too fast and out of sync with their sound (user, Uncharted 3, 18 Oct).
+    // While a movie is being decoded the guest gets vblanks and flips at 60 Hz; gameplay keeps
+    // the configured rate. The fork's fix paces the movie player by game time instead
+    // (src/movie_hook.h, cutscenes keep the frame rate): this stays the fallback for builds
+    // whose player the hook does not find (probe.c sets GOW3_MOVIE_PACED=1 when it installs).
+    constexpr std::chrono::nanoseconds movie_period{1000000000 / 60};
+    const bool movie_paced_by_game = [] {
+        const char* env = std::getenv("GOW3_MOVIE_PACED");
+        return env && env[0] == '1';
+    }();
+    auto next_movie_vblank = std::chrono::steady_clock::now();
+    bool movie_shown = false;
+
     while (!token.stop_requested()) {
         if (const u32 limit = current_limit(); limit != frame_limit) {
             frame_limit = limit;
             frame_period = limit ? std::chrono::nanoseconds(1000000000 / limit) : std::chrono::nanoseconds(0);
+            vblank_period = base_period - std::chrono::nanoseconds(1); // re-evaluated below
             immediate_flips = limit != 0;
             next_flip = std::chrono::steady_clock::now();
             std::printf("VideoOut: frame limit %u FPS\n", limit);
         }
+        if (const auto period = paced_period(frame_limit); period != vblank_period) {
+            vblank_period = period;
+            timer = Common::AccurateTimer{period};
+            // Following the display, presents keep its rate too (the higher limit let them run
+            // ahead between vblanks and queue up behind VSync again).
+            frame_period = period != base_period ? period
+                           : frame_limit         ? std::chrono::nanoseconds(1000000000 / frame_limit)
+                                                 : std::chrono::nanoseconds(0);
+            next_flip = std::chrono::steady_clock::now();
+            std::printf("VideoOut: vblank %.2f Hz (%s)\n", 1e9 / double(period.count()),
+                        period == base_period ? "fast" : "follows the display with VSync");
+        }
+        const bool fast_vblank = vblank_period < movie_period - std::chrono::microseconds(500);
         timer.Start();
         const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
 
@@ -790,7 +930,19 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         // Check if it's time to take a request.
         auto& vblank_status = main_port.vblank_status;
         const auto now = std::chrono::steady_clock::now();
-        const bool flip_slot = !frame_limit || now >= next_flip;
+        const bool movie = !movie_paced_by_game && fast_vblank && MovieActive(now);
+        if (movie != movie_shown) {
+            movie_shown = movie;
+            std::printf("VideoOut: %s\n", movie ? "movie playing, 60 Hz vblank" : "movie ended");
+        }
+        if (movie) {
+            if (now + vblank_period / 2 < next_movie_vblank) {
+                timer.End();
+                continue;
+            }
+            next_movie_vblank = std::max(next_movie_vblank + movie_period, now - movie_period);
+        }
+        const bool flip_slot = movie || !frame_limit || now >= next_flip;
         if (flip_slot && vblank_status.count % (main_port.flip_rate + 1) == 0) {
             const auto request = receive_request();
             if (request && frame_limit) {
@@ -834,7 +986,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             main_port.vblank_cv.notify_all();
         }
 
-        if (!immediate_flips || main_port.flip_rate != 0) {
+        if (!immediate_flips || main_port.flip_rate != 0 || movie) {
             timer.End();
             continue;
         }
