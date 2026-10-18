@@ -28,6 +28,12 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   characters and wind-blown plants get their own motion vectors (before, only the camera's):
   76-90% of the picture in U1's jungle and U2's train scene, at no measurable frame-rate cost.
   The snow in Uncharted 2 still has none (its flakes can double faintly).
+- **Drake's Fortune faster again: 99 -> 119 FPS uncapped** (now at the 120 FPS limit). The GPU
+  command processing scanned all 1664 register blocks on every draw, and copied 2.3 GB/s of
+  small constant buffers, 70% of them the same buffer again for the next draw; both are gone
+  (a buffer copied since the last synchronization point is shared). Also fixed three rare
+  ordering problems of multithreaded rendering, among them Uncharted 2's crosshair centre
+  correction, which did not apply with the option on.
 - **DLSS is installed from NVIDIA:** packages no longer include nvngx_dlss.dll; the launcher's
   DLSS row opens NVIDIA's download page and adds the file (it checks NVIDIA's signature).
 - **Launcher:** NVIDIA DLSS option (Display tab) when the DLSS files are installed; packages built

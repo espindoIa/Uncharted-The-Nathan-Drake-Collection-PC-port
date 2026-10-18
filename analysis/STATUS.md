@@ -1037,3 +1037,32 @@ sample (its UAC prompt was not accepted twice): no Nsight trace was taken.
 - Seen once in 7 U2 starts with multithreaded rendering (13:16, not reproduced in 6 more): a
   read fault in Rasterizer::FindPreparedStage (bind_prepared pointing at a freed prepared draw)
   on the draw recording thread during loading. Not fixed.
+
+## 18 October 2026: GPU-offload audit, register scan, constant ring reuse
+
+- **Audit** (8 areas, 2 adversarial checks each): nothing left on the CPU can usefully move to the
+  GPU. Detile, image copies/clears, indirect draws, Quad/Rect expansion and cs 6a6422a9 already
+  run there; the rest (SRT walks, pipeline lookup, sharps, constant snapshots) must be on the CPU
+  before the draw is recorded. Importing guest memory (VK_EXT_external_memory_host) was refuted:
+  fences complete when host copies finish, not when the GPU does (holding them cost 83 -> 79 and
+  60 -> 42 FPS before). The work is making the GPU command thread (stage A) cheaper.
+- **RegDirty** (regs.h): 26 u64 words walked with countr_zero instead of testing 1664 bitset bits
+  per draw (PostDraw self 19.2% -> 5.6% of stage A). U1 uncapped A/B: 99.3 -> 106.7 FPS.
+- **Fixes from the audit:** NotePendingGpuWrite from PostDraw recorded Head() before Commit
+  (entries now take the position after it); FixAimFocusCentre ran only on the non-ring path
+  (now also before the ring copy); BufferCache::WriteThrough could land in the stream buffer and
+  leave the arena stale (now always the arena).
+- **Constant ring reuse** (toggle 1 << 56): U1 copied 2.35 GB/s (850k copies/s, ~3 per draw);
+  70% repeated an (address, size) copied since the last drain. Reuse per epoch (bumped by any
+  drain, any RunInOrder task, and NotePendingGpuWrite over this epoch's copied bounds); reused
+  regions are held in ConstantRing until the reusing packet retires (EndPacket gives that packet a
+  unique ring end). GOW3_RING_REUSE_CHECK=1: 0 mismatches in ~2.8M reuses / 5 s (U1), 0 in U2/U3.
+  U1 reuses 1.46 GB/s; U3 only 40 MB/s (3350 drains/s). U1 A/B: 110.3 -> 119.1 FPS (120 cap).
+  Frame stats print "constant ring N guest copies/s, X MB/s" and the reuse line.
+- Tried and dropped: lock-free granule filter for IsRangeGpuWrittenShared plus an SrtPlan memo:
+  no measurable change with GOW3_FPS_LIMIT=0 (U1 113.9 vs 117.1, U3 141.9 vs 139.9, scene noise).
+- U2 train regression: 0 white flashes in 1000 frames (new C:\dev\cap\frames2.ps1 uses
+  PrintWindow; CopyFromScreen captured whatever window was in front).
+- **Open (user, 18 Oct):** cutscenes play too fast at 120 FPS and above. Gameplay uses the rdtsc dt
+  (clock update U1 0xfac70: dt = min(1/minFps, dt), forcefps override, time scale); IGCs must
+  follow another clock (per-frame step or audio). Not investigated yet.
