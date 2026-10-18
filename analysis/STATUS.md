@@ -1063,6 +1063,28 @@ sample (its UAC prompt was not accepted twice): no Nsight trace was taken.
   no measurable change with GOW3_FPS_LIMIT=0 (U1 113.9 vs 117.1, U3 141.9 vs 139.9, scene noise).
 - U2 train regression: 0 white flashes in 1000 frames (new C:\dev\cap\frames2.ps1 uses
   PrintWindow; CopyFromScreen captured whatever window was in front).
-- **Open (user, 18 Oct):** cutscenes play too fast at 120 FPS and above. Gameplay uses the rdtsc dt
-  (clock update U1 0xfac70: dt = min(1/minFps, dt), forcefps override, time scale); IGCs must
-  follow another clock (per-frame step or audio). Not investigated yet.
+- **FIXED (18 Oct): cutscenes too fast above 60 FPS, all three games.**
+  - Measured by camera-cut times (C:\dev\cap\cuts.ps1 thumbnails, cuts.py/cutfit.py vs 60 FPS, 9 cuts,
+    rms 6-15 ms), U3 opening: 30 FPS 1.000x, 45 1.000x, 90 1.501x, 120 1.996x: speed max(1, fps/60).
+  - The cutscenes are pre-rendered movies (build/main/movie1/ps4/*.bsf: U1 40, U2 48, U3 38) played
+    by ndlib movie-player.cpp. Its frame step (U1 0x4a0e62, U2 0xb84805, U3 0xdefd55) does
+    counter[+0x2254c]++ every game frame while the game clock runs, then catches up with the audio
+    clock target [+0x22550] when behind (up to 3 more); never waits when ahead. One game frame per
+    vblank on the PS4, so it was fps/60 too fast here; the movie audio stays real time (Ajm decode
+    rate identical at 60 and 120 FPS).
+  - Found with GOW3_FPS_LIMIT_FILE (30 -> 120 FPS in one run) and memrate5.py: ints growing 2 per frame
+    at 30 FPS and 1 per frame at 120, written by the movie player (watch: 0xdee5b9, 0xdefd5d).
+    Ruled out on the way: master/sub clocks, anim manager (sub0 dt, drift 0), the 10 rodata 1/60
+    constants (set to 1/240: still 2.0x), periods counter (+0x14 = 2.5 at 30 FPS: still 1.0x),
+    VideoOut status calls (the game makes none; flips go through Gnm and flip events).
+  - Fix: src/movie_hook.h, installed by probe.c for any build whose code matches (outside the
+    --no-game-hooks gate): a call to a stub that accumulates the clock's dt and shows the next frame
+    from half a vblank owed, paying one vblank, at most one per game frame. At or below 60 FPS
+    (frame-limited, phase noise under +-4 ms) every frame still advances; audio catch-up unchanged.
+    GOW3_MOVIE_PACING=0 keeps the original step. tests/test_movie_hook.cpp: 600 frames in 10 s at
+    60-240 FPS, signatures found once in each game. U3 at 120 FPS with the hook: 1.001x (9/9 cuts).
+    U1/U2: hook installs (boot.log "Movies: frame pacing"); their cutscenes were not measured.
+  - New diagnostics: GOW3_FPS_LIMIT_FILE (frame limit from a file, read twice a second);
+    GOW3_EXEC_WATCH_FILE takes up to 4 addresses, r: prefix for read/write watches;
+    GOW3_EXEC_WATCH_UNIQUE=1 logs each instruction once and prints per-instruction counts when the
+    watches move; GOW3_AUTO_CHOICE=1 accepts the save dialog's default (unattended new-game tests).

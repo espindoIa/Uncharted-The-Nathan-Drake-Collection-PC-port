@@ -11,6 +11,7 @@
 #include "cheat_hook.h"
 #include "actor_hook.h"
 #include "damage_hook.h"
+#include "movie_hook.h"
 #include "gpu/gow3gpu.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
@@ -78,6 +79,20 @@ static void *allocate_low_image(size_t size) {
 #endif
     }
     fail("cannot allocate guest image below 2 GiB");
+    return NULL;
+}
+/* A page within relative-call range (below 2 GiB) of a low guest image, for hook stubs; NULL when
+ * none is free. allocate() may return memory far above it. */
+static void *allocate_below_2gib(size_t size) {
+    for (uintptr_t address=UINT64_C(0x400000); address+size<UINT64_C(0x80000000); address+=UINT64_C(0x100000)) {
+#ifdef _WIN32
+        void *p=VirtualAlloc((void *)address,size,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+        if (p) return p;
+#else
+        void *p=mmap((void *)address,size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
+        if (p!=MAP_FAILED) return p;
+#endif
+    }
     return NULL;
 }
 static void protect(void *p, size_t size, unsigned flags) {
@@ -195,14 +210,40 @@ static void watch_string(char *out, size_t size, uint64_t address) {
     while (n<got && n+1<size && buf[n]>=0x20 && buf[n]<0x7f) { out[n]=(char)buf[n]; ++n; }
     out[n]=0;
 }
+/* Hits logged so far (400 at most); reset when the watches move (GOW3_EXEC_WATCH_FILE). */
+static volatile LONG watch_hits;
+/* GOW3_EXEC_WATCH_UNIQUE=1: only the first hit of each instruction is logged; the counts per
+ * instruction are printed when the watches move (watch_summary). */
+static int watch_unique=-1;
+static uint64_t watch_rip[512];
+static volatile LONG watch_rip_hits[512], watch_rip_count, watch_lock;
+static void watch_summary(void) {
+    while (InterlockedCompareExchange(&watch_lock,1,0)) YieldProcessor();
+    for (LONG i=0;i<watch_rip_count;++i)
+        printf("Watch summary: rip guest %#llx hits %ld\n",(unsigned long long)watch_rip[i],(long)watch_rip_hits[i]);
+    watch_rip_count=0;
+    InterlockedExchange(&watch_lock,0);
+    fflush(stdout);
+}
 static LONG watch_hit(EXCEPTION_POINTERS *info) {
-    static volatile LONG hits;
     CONTEXT *c=info->ContextRecord;
     DWORD64 dr6=c->Dr6;
     c->Dr6=0;
     /* Instruction breakpoints (GOW3_EXEC_WATCH) fault before the instruction: resume past them. */
     c->EFlags|=0x10000;
-    if (InterlockedIncrement(&hits)<=400 && image) {
+    if (watch_unique<0) { const char *env=getenv("GOW3_EXEC_WATCH_UNIQUE"); watch_unique=env && env[0]=='1'; }
+    if (watch_unique) {
+        const uint64_t rip=(uint64_t)(c->Rip-(uintptr_t)image)|(uint64_t)(dr6&0xf)<<60;
+        int fresh=0;
+        while (InterlockedCompareExchange(&watch_lock,1,0)) YieldProcessor();
+        LONG i=0;
+        while (i<watch_rip_count && watch_rip[i]!=rip) ++i;
+        if (i==watch_rip_count && i<512) { watch_rip[i]=rip; watch_rip_hits[i]=0; watch_rip_count=i+1; fresh=1; }
+        if (i<512) ++watch_rip_hits[i];
+        InterlockedExchange(&watch_lock,0);
+        if (!fresh) return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (InterlockedIncrement(&watch_hits)<=400 && image) {
         char line[1024], s1[64], s2[64];
         watch_string(s1,sizeof(s1),c->Rsi); watch_string(s2,sizeof(s2),c->Rdx);
         int n=snprintf(line,sizeof(line),"Watch: dr6 %#llx rip guest %#llx rax %#llx rcx %#llx rdx %#llx rsi %#llx rdi %#llx r8 %#llx r9 %#llx [rsi '%s'] [rdx '%s'] callers",
@@ -212,7 +253,7 @@ static LONG watch_hit(EXCEPTION_POINTERS *info) {
         const uint64_t *stack=(const uint64_t *)(uintptr_t)c->Rsp;
         for (int i=0,found=0;i<64 && found<6 && n<(int)sizeof(line)-24;++i) {
             uint64_t v=stack[i];
-            if (v-(uintptr_t)image<0x95d060) { n+=snprintf(line+n,sizeof(line)-n," %#llx",(unsigned long long)(v-(uintptr_t)image)); ++found; }
+            if (v-(uintptr_t)image<0x2000000) { n+=snprintf(line+n,sizeof(line)-n," %#llx",(unsigned long long)(v-(uintptr_t)image)); ++found; }
         }
         puts(line); fflush(stdout);
     }
@@ -239,6 +280,9 @@ static DWORD WINAPI exec_watch_thread(LPVOID unused) {
     (void)unused;
     DWORD *armed=exec_watch_armed;
     DWORD self=GetCurrentThreadId(), pid=GetCurrentProcessId();
+    /* GOW3_EXEC_WATCH_DELAY=<s>: arm only after that long (skip boot and menus). */
+    const char *delay=getenv("GOW3_EXEC_WATCH_DELAY");
+    if (delay && atoi(delay)>0) { SetEvent(exec_watch_ready); Sleep((DWORD)atoi(delay)*1000); printf("Exec watch: arming now\n"); fflush(stdout); }
     ULONGLONG start=GetTickCount64();
     const char *secs=getenv("GOW3_EXEC_WATCH_SECONDS");
     const ULONGLONG limit=(secs && atoi(secs)>0 ? (ULONGLONG)atoi(secs) : 600)*1000;
@@ -260,10 +304,11 @@ static DWORD WINAPI exec_watch_thread(LPVOID unused) {
                         DWORD64 *dr[4]={&ctx.Dr0,&ctx.Dr1,&ctx.Dr2,&ctx.Dr3};
                         ctx.Dr7=0;
                         for (int i=0;i<exec_watch_count;++i) {
-                            /* Bit 63 marks a data watch (w:<absolute address>): 8-byte writes. */
+                            /* Bit 63 marks a data watch (w:<absolute address>): 8-byte writes;
+                             * with bit 62 (r: in GOW3_EXEC_WATCH_FILE) reads too. */
                             if (exec_watch[i]>>63) {
-                                *dr[i]=(DWORD64)(exec_watch[i]&~(1ull<<63)&~7ull);
-                                ctx.Dr7|=(1ull<<(2*i))|(1ull<<(16+4*i))|(2ull<<(18+4*i));
+                                *dr[i]=(DWORD64)(exec_watch[i]&~(3ull<<62)&~7ull);
+                                ctx.Dr7|=(1ull<<(2*i))|((exec_watch[i]>>62&1 ? 3ull : 1ull)<<(16+4*i))|(2ull<<(18+4*i));
                             } else {
                                 *dr[i]=(DWORD64)(uintptr_t)(image+exec_watch[i]);
                                 ctx.Dr7|=1ull<<(2*i);
@@ -278,6 +323,32 @@ static DWORD WINAPI exec_watch_thread(LPVOID unused) {
             CloseHandle(snap);
         }
         if (round==0) SetEvent(exec_watch_ready);
+        /* GOW3_EXEC_WATCH_FILE=<path>: up to 4 hex absolute addresses written there (each
+         * optionally prefixed r: to catch reads too) replace the watches while the game runs
+         * (the file is removed once read). */
+        static const char *retarget_file;
+        if (!retarget_file) { retarget_file=getenv("GOW3_EXEC_WATCH_FILE"); if (!retarget_file) retarget_file=""; }
+        if (*retarget_file && (round%10)==0) {
+            FILE *f=fopen(retarget_file,"r");
+            if (f) {
+                uint64_t watches[4]; int count=0;
+                char word[64];
+                while (count<4 && fscanf(f,"%63s",word)==1) {
+                    const int rw=(word[0]=='r' || word[0]=='R') && word[1]==':';
+                    const unsigned long long target=strtoull(word+(rw ? 2 : 0),NULL,16);
+                    if (target) watches[count++]=target|(1ull<<63)|(rw ? 1ull<<62 : 0);
+                }
+                fclose(f); remove(retarget_file);
+                if (count) {
+                    if (watch_unique>0) watch_summary();
+                    for (int i=0;i<count;++i) exec_watch[i]=watches[i];
+                    exec_watch_count=count;
+                    InterlockedExchange(&exec_watch_armed_count,0);
+                    InterlockedExchange(&watch_hits,0);
+                    printf("Exec watch: %d data watches moved\n",count); fflush(stdout);
+                }
+            }
+        }
         Sleep(round<200 ? 1 : 20);
     }
     printf("Exec watch: done (%ld threads armed)\n",(long)exec_watch_armed_count);
@@ -554,6 +625,34 @@ static void install_cheats(Segment *segments, uint64_t count, uint64_t size) {
     }
 }
 
+/* Uncharted cutscene movies: their frame step paced by game time (src/movie_hook.h). Installed
+ * whenever the code matches (Uncharted runs with --no-game-hooks); GOW3_MOVIE_PACING=0 keeps the
+ * original step (one frame per game frame) for comparisons. */
+static void install_movie_pacing(Segment *segments, uint64_t count, uint64_t size) {
+    int32_t dt_offset = 0;
+    const uint64_t at = gow3_movie_find(image, size, &dt_offset);
+    if (at == UINT64_MAX || !mapped(segments, count, at, GOW3_MOVIE_HOOK_LENGTH) ||
+        memcmp(image + at, gow3_movie_step_original, GOW3_MOVIE_HOOK_LENGTH)) return;
+    const char *env = getenv("GOW3_MOVIE_PACING");
+    if (env && env[0] == '0') {
+        printf("Movies: frame pacing off (GOW3_MOVIE_PACING=0)\n");
+        return;
+    }
+    float *data = allocate(page_size);
+    unsigned char *stub = allocate_below_2gib(page_size);
+    const int64_t delta = stub ? (int64_t)(uintptr_t)stub - (int64_t)(uintptr_t)(image + at + 5) : INT64_MAX;
+    if (delta < INT32_MIN || delta > INT32_MAX) {
+        printf("Movies: frame pacing unavailable (hook outside relative-call range)\n");
+        return;
+    }
+    gow3_movie_init_data(data);
+    gow3_movie_build_stub(stub, dt_offset, (uintptr_t)data);
+    protect(stub, page_size, 5);
+    unsigned char call[GOW3_MOVIE_HOOK_LENGTH];
+    gow3_movie_build_call(call, (int32_t)delta);
+    memcpy(image + at, call, sizeof(call));
+    printf("Movies: frame pacing by game time at %#llx (clock dt +%#x)\n", (unsigned long long)at, (unsigned)dt_offset);
+}
 /* Damage hook for the enemy health bar (src/actor_hook.h). Always
  * installed when the code matches: it only records values; the overlay decides what to show. */
 static void install_actor_watch(Segment *segments, uint64_t count, uint64_t size) {
@@ -985,6 +1084,7 @@ int main(int argc, char **argv) {
         _exit(missing ? 1 : 0); /* no destructors: GPU threads are running */
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
+    if (gpu_enabled) install_movie_pacing(segments, ns, size);
     if (gpu_enabled && game_hooks) {
         install_orb_multiplier(segments, ns, size);
         install_cheats(segments, ns, size);

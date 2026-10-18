@@ -6,6 +6,10 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## 18 October 2026 (unreleased)
 
+- **Cutscenes play at the right speed above 60 FPS.** The cutscenes of all three games are videos
+  whose player showed one frame per game frame, as on the PS4 at 60 Hz: at 120 FPS they ran twice
+  as fast as their sound. They now follow the game's clock (Uncharted 3 at 120 FPS: 1.00x, was
+  2.0x); at 60 FPS and below nothing changes.
 - **Faster in CPU-heavy scenes.** The PS4 GPU command processing spent much of its time checking
   memory mappings and in lock bookkeeping; both are cheaper now (Uncharted 3's bar fight: frame
   time -4.4%).

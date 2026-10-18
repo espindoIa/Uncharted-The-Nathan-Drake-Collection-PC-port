@@ -727,8 +727,25 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     // Uncharted: the menu's limit also applies with the frame rate unlocked (GOW3_VBLANK_HZ=0,
     // 480 Hz vblank); only an explicit GOW3_FPS_LIMIT fixes it.
     const bool fixed_limit = std::getenv("GOW3_FPS_LIMIT") != nullptr;
+    // Diagnostics: GOW3_FPS_LIMIT_FILE=<path> (with GOW3_FPS_LIMIT) reads the limit from that file
+    // twice a second, to change it while the game runs (A/B within one run).
+    const char* limit_file = std::getenv("GOW3_FPS_LIMIT_FILE");
+    u32 file_limit = EmulatorSettings.GetFrameLimit();
+    auto file_checked = std::chrono::steady_clock::now();
     const auto current_limit = [&] {
         const auto& s = Gow3Settings::Get();
+        if (fixed_limit && limit_file) {
+            if (const auto now = std::chrono::steady_clock::now();
+                now - file_checked > std::chrono::milliseconds(500)) {
+                file_checked = now;
+                if (FILE* f = std::fopen(limit_file, "r")) {
+                    unsigned v = 0;
+                    if (std::fscanf(f, "%u", &v) == 1) file_limit = v;
+                    std::fclose(f);
+                }
+            }
+            return file_limit;
+        }
         return fixed_limit ? EmulatorSettings.GetFrameLimit()
                            : u32(Gow3Graphics::PresentLimit(s.fps_limit));
     };

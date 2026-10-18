@@ -944,6 +944,16 @@ void BeginChoice(const std::string& title, const std::vector<std::string>& items
     choice_index = focus >= 0 && focus < int(items.size()) ? focus : 0;
     choice_result = -1;
     choice_active = true;
+    // Test runs (GOW3_AUTO_CHOICE=1): the focused item is taken at once, like Cross.
+    static const bool auto_choice = [] {
+        const char* env = std::getenv("GOW3_AUTO_CHOICE");
+        return env && env[0] == '1';
+    }();
+    if (auto_choice && !items.empty()) {
+        choice_result = choice_index;
+        choice_active = false;
+        RetireChoiceTextures();
+    }
 }
 
 int PollChoice() {
