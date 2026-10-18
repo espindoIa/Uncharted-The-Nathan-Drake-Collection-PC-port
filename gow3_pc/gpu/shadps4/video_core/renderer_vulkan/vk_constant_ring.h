@@ -7,8 +7,10 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <deque>
 
 #include "common/assert.h"
 #include "common/types.h"
@@ -38,7 +40,9 @@ public:
         if (at % Capacity + size > Capacity) {
             at += Capacity - at % Capacity; // wrap to the ring start
         }
-        const auto in_use = [&] { return at + size > Capacity && at + size - Capacity > retired; };
+        const auto in_use = [&] {
+            return at + size > Capacity && at + size - Capacity > Floor();
+        };
         if (in_use()) {
             Retire();
             if (in_use()) {
@@ -46,7 +50,37 @@ public:
             }
         }
         position = at + size;
+        last_allocation = at;
         return at % Capacity;
+    }
+
+    /// Stage A: the absolute position of the last allocation (for Reusable and Hold).
+    [[nodiscard]] u64 LastAllocation() const noexcept {
+        return last_allocation;
+    }
+    /// Stage A: whether the region allocated at absolute position `at` still holds its bytes.
+    [[nodiscard]] bool Reusable(u64 at) const noexcept {
+        return position - at < Capacity / 2;
+    }
+    /// Stage A: the packet being built also binds the region allocated at `at`. Regions are
+    /// otherwise reused once the packet that allocated them is done on the GPU; this one must
+    /// stay until the packet being built is done too (EndPacket).
+    void Hold(u64 at) noexcept {
+        packet_hold = std::min(packet_hold, at);
+    }
+    /// Stage A, after the packet's allocations and before its Position() is read.
+    void EndPacket() {
+        if (packet_hold == NoHold) {
+            return;
+        }
+        // An end no earlier packet has: retired reaches it only when a stamp of this packet's
+        // submission or a later one is done (stamps of one tick keep only the last end).
+        ++position;
+        while (!holds.empty() && holds.back().at >= packet_hold) {
+            holds.pop_back(); // released no later than this one, and no lower
+        }
+        holds.push_back({packet_hold, position});
+        packet_hold = NoHold;
     }
 
     [[nodiscard]] u8* Data(u64 offset) noexcept {
@@ -92,6 +126,14 @@ private:
         last_published = end;
     }
 
+    /// Positions before this are free: retired, and not held by a later packet's binding.
+    u64 Floor() {
+        while (!holds.empty() && retired >= holds.front().end) {
+            holds.pop_front();
+        }
+        return holds.empty() ? retired : std::min(retired, holds.front().at);
+    }
+
     void Retire() {
         auto* semaphore = scheduler.GetWorkSemaphore();
         semaphore->Refresh();
@@ -112,6 +154,14 @@ private:
     VideoCore::Buffer buffer;
     u64 position = 0;     ///< stage A
     u64 retired = 0;      ///< stage A: the GPU is done with everything before this
+    u64 last_allocation = 0; ///< stage A
+    static constexpr u64 NoHold = ~u64{0};
+    u64 packet_hold = NoHold; ///< stage A: lowest reused position of the packet being built
+    struct HeldRegion {
+        u64 at;  ///< positions from here on stay
+        u64 end; ///< until retired reaches this (the end of the packet that reused them)
+    };
+    std::deque<HeldRegion> holds; ///< stage A: increasing `at` and `end`
     u64 pending_end = 0, pending_tick = 0, last_published = 0; ///< stage B
     std::array<StampEntry, 1024> stamps{};
     alignas(64) std::atomic<u64> stamps_head{0}; ///< stage B writes

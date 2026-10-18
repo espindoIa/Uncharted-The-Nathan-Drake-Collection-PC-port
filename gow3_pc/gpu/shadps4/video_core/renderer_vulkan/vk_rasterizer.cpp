@@ -179,6 +179,15 @@ std::mutex g_late_mutex;
 std::vector<LateConstant> g_late;
 std::atomic<u64> g_late_refreshed{0}, g_late_checked{0}, g_late_bytes{0};
 
+/// GOW3_RING_REUSE_CHECK=1: every reused constant ring copy is compared with guest memory.
+bool RingReuseCheck() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_RING_REUSE_CHECK");
+        return env && env[0] == '1';
+    }();
+    return enabled;
+}
+
 bool LateConstantsEnabled() {
     static const bool enabled = [] {
         const char* env = std::getenv("GOW3_LATE_CONSTANTS");
@@ -866,6 +875,7 @@ void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
     static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
     pipe_write_ranges.clear();
     pipe_writes_overflow = false;
+    NextRingEpoch();
     if (!stats) {
         draw_pipe->Drain(reason);
         return;
@@ -900,6 +910,9 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
     // hold before the recording thread ran the writing draw. Such entries wait for Commit().
     const u64 position = building_packet ? UnreachedPosition : draw_pipe->Head();
     const VAddr end = address + size;
+    if (address < ring_epoch_max && ring_epoch_min < end) {
+        NextRingEpoch();
+    }
     for (auto& write : pending_writes) {
         if (address <= write.end && write.begin <= end) {
             write.begin = std::min(write.begin, address);
@@ -957,7 +970,25 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
     }
     const u64 alignment = std::max<u64>(instance.StorageMinAlignment(),
                                         instance.UniformMinAlignment());
+    const bool reuse = !Gow3Toggle::Disabled(Gow3Toggle::RingReuse);
     const auto copy = [&](u32 index, const void* source, VAddr address, u64 size) {
+        RingCopy* cached = nullptr;
+        if (!source && reuse) {
+            // The same bytes copied earlier since the last drain: bind that copy. A drain, an
+            // in-order memory write or a GPU write over a copied range starts a new epoch.
+            const u64 key = address ^ (size << 48);
+            cached = &ring_copies[(key * 0x9E3779B97F4A7C15ull) >> (64 - RingCopyBits)];
+            if (cached->key == key && cached->epoch == ring_epoch &&
+                constant_ring->Reusable(cached->position)) {
+                constant_ring->Hold(cached->position);
+                if (RingReuseCheck()) {
+                    CheckRingReuse(address, constant_ring->Data(cached->offset), size);
+                }
+                ring_reused_bytes += size;
+                out.push_back({index, static_cast<u32>(size), cached->offset, address});
+                return;
+            }
+        }
         const auto offset = constant_ring->Allocate(size, alignment);
         if (!offset) {
             return;
@@ -967,6 +998,14 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
             std::memcpy(dst, source, size);
         } else {
             memory->CopySparseMemory(address, dst, size);
+            ring_guest_bytes += size;
+            ++ring_guest_copies;
+            if (cached) {
+                *cached = {address ^ (size << 48), ring_epoch, constant_ring->LastAllocation(),
+                           *offset};
+                ring_epoch_min = std::min(ring_epoch_min, address);
+                ring_epoch_max = std::max(ring_epoch_max, address + size);
+            }
         }
         constant_ring->Flush(*offset, size);
         if (LateConstantsEnabled()) {
@@ -1013,6 +1052,16 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
     }
 }
 
+void Rasterizer::CheckRingReuse(VAddr address, const u8* copy, u64 size) {
+    thread_local std::vector<u8> guest;
+    guest.resize(size);
+    memory->CopySparseMemory(address, guest.data(), size);
+    ++ring_reuse_checks;
+    if (std::memcmp(guest.data(), copy, size) != 0) {
+        ++ring_reuse_mismatches;
+    }
+}
+
 void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_prepared,
                           bool is_indexed, u32 index_offset, const AmdGpu::ComputeProgram* cs,
                           const IndirectDraw* indirect) {
@@ -1049,6 +1098,9 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
                                 sizeof(u32)) +
                     u32(ring.size() * sizeof(RingBinding));
         }
+    }
+    if (constant_ring) {
+        constant_ring->EndPacket();
     }
     if (cs) {
         size += AlignPacket(sizeof(AmdGpu::ComputeProgram));
@@ -1154,6 +1206,8 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
         task(*this, static_cast<const u8*>(data));
         return false;
     }
+    // Memory it writes may be bound later: constant ring copies made before are not reused.
+    NextRingEpoch();
     const u32 total = sizeof(TaskPacket) + AlignPacket(size);
     u8* out = draw_pipe->Begin(total);
     *reinterpret_cast<TaskPacket*>(out) = {PacketKind::Task, size, task};
@@ -1312,11 +1366,26 @@ void Rasterizer::PrintPipeStats() {
     const double cycles = double(tsc - last_tsc);
     const u64 busy = draw_pipe->busy_cycles.load(std::memory_order_relaxed);
     std::printf("Draw pipe: %.0f draws/s pipelined, %.0f drains/s that waited, stage A waited "
-                "%.1f%%, stage B busy %.1f%%\n",
+                "%.1f%%, stage B busy %.1f%%; constant ring %.0f guest copies/s, %.1f MB/s\n",
                 (draw_pipe->packets - last_packets) / seconds,
                 (draw_pipe->drains - last_drains) / seconds,
                 100.0 * (draw_pipe->drain_cycles - last_drain_cycles) / cycles,
-                100.0 * (busy - last_busy) / cycles);
+                100.0 * (busy - last_busy) / cycles, ring_guest_copies / seconds,
+                ring_guest_bytes / seconds / 1e6);
+    if (ring_reused_bytes || RingReuseCheck()) {
+        std::printf("  constant ring reuse: %.1f MB/s bound without a copy",
+                    ring_reused_bytes / seconds / 1e6);
+        if (RingReuseCheck()) {
+            std::printf(", %llu of %llu checked reuses differed from guest memory",
+                        static_cast<unsigned long long>(ring_reuse_mismatches),
+                        static_cast<unsigned long long>(ring_reuse_checks));
+            ring_reuse_mismatches = ring_reuse_checks = 0;
+        }
+        std::printf("\n");
+    }
+    ring_reused_bytes = 0;
+    ring_guest_copies = 0;
+    ring_guest_bytes = 0;
     std::printf("  drains by reason/s:");
     for (u32 r = 0; r < DrawPipe::NumReasons; ++r) {
         if (const u64 n = draw_pipe->drains_by_reason[r]) {

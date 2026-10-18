@@ -582,6 +582,25 @@ private:
     /// PostDraw: written ranges noted for the packet being built get the position after it.
     static constexpr u64 UnreachedPosition = ~u64{0};
     bool building_packet = false;
+    u64 ring_guest_copies = 0, ring_guest_bytes = 0; ///< stage A statistics (GOW3_FRAME_STATS)
+    /// Stage A: guest copies in the constant ring since the last drain (RingReuse).
+    struct RingCopy {
+        u64 key;      ///< address ^ size << 48
+        u64 epoch;
+        u64 position; ///< absolute ring position
+        u64 offset;   ///< in the ring
+    };
+    static constexpr u32 RingCopyBits = 12;
+    std::array<RingCopy, 1u << RingCopyBits> ring_copies{};
+    u64 ring_epoch = 1;
+    VAddr ring_epoch_min = ~VAddr{0}, ring_epoch_max = 0; ///< bounds of this epoch's copies
+    u64 ring_reused_bytes = 0, ring_reuse_checks = 0, ring_reuse_mismatches = 0;
+    void NextRingEpoch() {
+        ++ring_epoch;
+        ring_epoch_min = ~VAddr{0};
+        ring_epoch_max = 0;
+    }
+    void CheckRingReuse(VAddr address, const u8* copy, u64 size);
     u64 proxy_samples = 0; ///< texture bindings that read a scene proxy (statistics)
     float sampler_lod_bias = 0.0f; ///< gow3: extra bias of this draw's samplers
     bool scene_debug_frame = false; ///< GOW3_SCENE_DEBUG: this frame's passes are printed
