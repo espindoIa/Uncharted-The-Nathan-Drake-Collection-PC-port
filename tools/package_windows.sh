@@ -31,6 +31,23 @@ ldd gow3_pc/out/gow3-probe.exe | awk '/clang64/ {print $3}' | sort -u | while re
     cp "$dll" "$stage/gow3_pc/out/"
 done
 
+# DLSS (optional): DLSS_BRIDGE=<gow3_dlss.dll, built with MSVC from gow3_pc/gpu/dlss_bridge> and
+# DLSS_SDK=<NVIDIA DLSS SDK root> add the bridge and NVIDIA's production nvngx_dlss.dll (lib/
+# Windows_x86_64/rel, not the watermarked dev build) next to the runtime. The runtime loads them
+# at run time and keeps its other upscalers without them. NVIDIA's license goes with them
+# (DLSS SDK license 2c: distributed under terms at least as protective; supplement 7.1(b):
+# attribution in README.txt).
+if [[ -n ${DLSS_BRIDGE:-} || -n ${DLSS_SDK:-} ]]; then
+    ngx=${DLSS_SDK:-}/lib/Windows_x86_64/rel/nvngx_dlss.dll
+    [[ -f ${DLSS_BRIDGE:-} && -f $ngx ]] || {
+        echo "DLSS: need DLSS_BRIDGE (gow3_dlss.dll) and DLSS_SDK (with $ngx)" >&2; exit 1; }
+    cp "$DLSS_BRIDGE" "$ngx" "$stage/gow3_pc/out/"
+    mkdir -p "$stage/licenses/nvidia-dlss" "$stage/licenses/gow3-dlss-bridge"
+    cp "$DLSS_SDK/LICENSE.txt" "$stage/licenses/nvidia-dlss/LICENSE.txt"
+    cp gow3_pc/gpu/dlss_bridge/LICENSE.txt "$stage/licenses/gow3-dlss-bridge/LICENSE.txt"
+    echo "DLSS: gow3_dlss.dll and nvngx_dlss.dll included"
+fi
+
 cp gow3_pc/scripts/*.py "$stage/gow3_pc/scripts/"
 cp tools/probe_uncharted.py tools/apply_update.py "$stage/tools/"
 cp launcher/uncharted_launcher.pyw launcher/updater.py "$stage/launcher/"

@@ -54,3 +54,11 @@ License
 GNU GPL v2 or later (LICENSE.txt); the source is at the address above. The licenses of the
 bundled libraries are in licenses\ (THIRD-PARTY.txt lists every DLL package, its version,
 license and source). Not affiliated with Sony, Naughty Dog or Bluepoint Games.
+
+NVIDIA DLSS
+Packages that include gow3_dlss.dll and nvngx_dlss.dll use NVIDIA DLSS (NVIDIA RTX, GeForce
+RTX GPUs only). NVIDIA, GeForce RTX and DLSS are trademarks of NVIDIA Corporation.
+nvngx_dlss.dll is NVIDIA's, under the NVIDIA RTX SDK license (licenses\nvidia-dlss\LICENSE.txt);
+it is a separate program the port loads at run time through gow3_dlss.dll (MIT,
+licenses\gow3-dlss-bridge\LICENSE.txt), not part of the GPL runtime. Without them, or on other
+GPUs, the port uses its other upscalers.

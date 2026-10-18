@@ -73,6 +73,19 @@ INI_DEFAULTS = {
     "display_mode": "windowed", "vsync": "1", "fps_limit": "60", "frames_queued": "1",
     "async_shaders": "1", "fsr1": "0", "rcas": "1", "rcas_strength": "75", "show_fps": "1",
 }
+# NVIDIA DLSS (gow3_dlss.dll + nvngx_dlss.dll next to the runtime): the runtime's upscaler and
+# preset keys (gow3_settings: preset 0 DLAA, 1 Quality, 2 Balanced, 3 Performance, 4 Ultra
+# Performance). With a mode below DLAA the render resolution above is DLSS's output.
+DLSS_MODES = [("off", "Off"), ("0", "DLAA"), ("1", "Quality"), ("2", "Balanced"), ("3", "Performance"),
+              ("4", "Ultra Perf.")]
+DLSS_GAMES = ("u2",)  # games whose camera the runtime finds (tools/probe_uncharted.py)
+
+
+def dlss_available():
+    out = ROOT / "gow3_pc" / "out"
+    return all((out / name).is_file() for name in ("gow3_dlss.dll", "nvngx_dlss.dll"))
+
+
 LAUNCHER_DEFAULTS = {"game": "u1", "diagnostics": True, "game_dir": "", "check_updates": True}
 GAME_KEYS = ("u1", "u2", "u3")
 GAME_SETTING_DEFAULTS = {"preset": "medium", "resolution": "1920x1080", "multithreaded": False,
@@ -657,6 +670,8 @@ class Launcher:
                 widget.set(self.ini.get(key, INI_DEFAULTS[key]) == "1")
             elif isinstance(widget, Segmented):
                 widget.set(self.ini.get(key, INI_DEFAULTS[key]))
+        if isinstance(self.widgets.get("dlss"), Segmented):
+            self.widgets["dlss"].set(self.dlss_value())
         settings = self.game_settings()
         if isinstance(self.widgets.get("resolution"), Segmented):
             self.widgets["resolution"].set(settings["resolution"])
@@ -860,6 +875,14 @@ class Launcher:
                                                "frame is shown (no extra delay).")
         self.ini_toggle(page, "fsr1", "Upscale with FSR 1",
                         "When the game draws below your screen's resolution, FSR 1 upscales it sharper than plain scaling.")
+        if dlss_available():
+            def dlss(parent):
+                return Segmented(parent, DLSS_MODES, self.dlss_value(), self.change_dlss, self.f_small)
+            self.widgets["dlss"] = self.row(
+                page, "NVIDIA DLSS",
+                "NVIDIA RTX GPUs. DLAA smooths edges at the render resolution; the other modes draw the scene "
+                "smaller and rebuild it at the render resolution above (set it to your screen's). Uncharted 2 "
+                "only for now; on other GPUs the game runs without it.", dlss)
 
         def sharpening(parent):
             value = self.ini.get("rcas_strength", "75") if self.ini.get("rcas", "1") == "1" else "off"
@@ -868,6 +891,14 @@ class Launcher:
         self.widgets["sharpening"] = self.row(page, "Sharpening (FSR RCAS)", "Sharpens the final image.", sharpening)
         self.ini_toggle(page, "show_fps", "Show FPS counter", "A small performance overlay in a corner of the screen.")
         return page
+
+    def dlss_value(self):
+        return self.ini.get("preset", "0") if self.ini.get("upscaler", "off") == "dlss" else "off"
+
+    def change_dlss(self, value):
+        updates = {"upscaler": "off"} if value == "off" else {"upscaler": "dlss", "preset": value}
+        self.ini.update(updates)
+        self.save_ini(updates)
 
     def change_sharpening(self, value):
         if value == "off":
