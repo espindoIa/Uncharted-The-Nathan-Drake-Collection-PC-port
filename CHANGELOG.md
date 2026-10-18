@@ -11,7 +11,13 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   scene. With `upscaler=dlss` (or `fsr3`, `fsr4`, `taa`) in `probe-u2.ini` and `gow3_dlss.dll` plus
   NVIDIA's `nvngx_dlss.dll` next to the runtime, Uncharted 2 runs DLAA on its HDR scene before the
   bloom (60 FPS on an RTX 5070 at 1080p). Characters and snow have no motion vectors of their own
-  yet; Uncharted 1 and 3 and lower render resolutions are not done.
+  yet; Uncharted 1 and 3 are not done.
+- **Uncharted 2: DLSS Quality, Balanced, Performance and Ultra Performance.** With the render
+  resolution set to the screen's (e.g. 4K) and `preset=1..4`, the scene is drawn at a fraction of it
+  and DLSS rebuilds the full image before the game's post-processing. It uses NVIDIA's transformer
+  model K in every mode. In Uncharted 2 the scene itself is cheap, so on an RTX 5070 at 4K every
+  mode runs at about native speed (97-100 FPS against 103): it is anti-aliasing, not a frame-rate
+  boost.
 
 ## 16 October 2026 (0.1.2)
 

@@ -69,10 +69,20 @@ bool SceneTargets::ShaderResampled(const VideoCore::Image& image) const {
 }
 // 1 for the scene size, 2 for half resolution (the game's post-processing chain), else 0.
 // Half resolution needs a scene size that halves exactly: the proxy keeps the scene's factor,
-// so the shaders' FragCoord conversion (1920 / scene width) stays correct for it.
+// so the shaders' FragCoord conversion (native / scene width) stays correct for it. Native is
+// 1920x1080, or the render resolution of the Uncharted resolution patch (GOW3_SCENE_SIZE).
 static u32 SizeDivisor(const VideoCore::ImageInfo& i, SceneResolution::Size scene) {
-    if (i.size.width == 1920 && i.size.height == 1080) return 1;
-    if (i.size.width == 960 && i.size.height == 540 && scene.width % 2 == 0 &&
+    const auto native = SceneResolution::Native();
+    if (i.size.width == native.width && i.size.height == native.height) return 1;
+    // GOW3_SCENE_HALF_RES=0 keeps them native: Uncharted 2 samples its half-resolution depth
+    // through native descriptors in each of ~120 particle draws, and every draw resolved the
+    // proxy (3.1 ms of a 13.6 ms frame at 4K, 17 Oct profile).
+    static const bool half_res = [] {
+        const char* env = std::getenv("GOW3_SCENE_HALF_RES");
+        return !(env && env[0] == '0');
+    }();
+    if (half_res && i.size.width * 2 == native.width && i.size.height * 2 == native.height &&
+        scene.width % 2 == 0 &&
         scene.height % 2 == 0 && !Gow3Toggle::Disabled(Gow3Toggle::SceneHalfRes)) {
         return 2;
     }
@@ -93,7 +103,9 @@ bool SceneTargets::Eligible(const VideoCore::Image& image) const {
     return Blittable(image.backing->image.image_ci.format) || ShaderResampled(image);
 }
 bool SceneTargets::EligibleScene(const VideoCore::Image& image) const {
-    return image.info.size.width == 1920 && image.info.size.height == 1080 && Eligible(image);
+    const auto native = SceneResolution::Native();
+    return image.info.size.width == native.width && image.info.size.height == native.height &&
+           Eligible(image);
 }
 SceneResolution::Size SceneTargets::ProxySize(const VideoCore::Image& image, u32 level) const {
     const u32 div = std::max(1u, SizeDivisor(image.info, size));
@@ -108,8 +120,9 @@ bool SceneTargets::SetSize(SceneResolution::Size next) {
     ++generation;
     recent = {};
     size = next;
-    std::printf("Scene resolution: raster %ux%u, half-resolution targets %ux%u, UI 1920x1080 "
-                "(live)\n", size.width, size.height, size.width / 2, size.height / 2);
+    std::printf("Scene resolution: raster %ux%u, half-resolution targets %ux%u, UI %ux%u "
+                "(live)\n", size.width, size.height, size.width / 2, size.height / 2,
+                SceneResolution::Native().width, SceneResolution::Native().height);
     return true;
 }
 void SceneTargets::ResolveAll() {

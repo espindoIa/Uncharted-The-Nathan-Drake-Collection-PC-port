@@ -54,6 +54,9 @@ struct Profile {
     bool needs_unorm_fixup{};
     bool needs_clip_distance_emulation{};
     bool supports_shader_stencil_export{};
+    /// gow3: reduced-scene FragCoord conversion (SceneResolution::Pack): 2 = 1/16-pixel units of
+    /// a 1920x1080 reference, any native scene size. Part of the profile so older caches rebuild.
+    u32 scene_coord_version{2};
 
     bool operator==(const Profile&) const = default;
 };

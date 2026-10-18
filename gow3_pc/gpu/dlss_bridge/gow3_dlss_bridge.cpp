@@ -169,6 +169,23 @@ int32_t CreateFeature(VkCommandBuffer command, const Gow3DlssFeature* desc) {
         NVSDK_NGX_PerfQuality_Value_DLAA, NVSDK_NGX_PerfQuality_Value_MaxQuality,
         NVSDK_NGX_PerfQuality_Value_Balanced, NVSDK_NGX_PerfQuality_Value_MaxPerf,
         NVSDK_NGX_PerfQuality_Value_UltraPerformance};
+    // The render size NGX recommends for this mode and output (Programming Guide 3.3), logged
+    // beside the port's own preset size (SceneResolution::ForPreset) so the two can be compared.
+    unsigned optimal_w{}, optimal_h{}, max_w{}, max_h{}, min_w{}, min_h{};
+    float optimal_sharpness{};
+    if (NVSDK_NGX_SUCCEED(NGX_DLSS_GET_OPTIMAL_SETTINGS(
+            state.capabilities, desc->output_width, desc->output_height,
+            qualities[std::clamp(desc->quality, 0, 4)], &optimal_w, &optimal_h, &max_w, &max_h,
+            &min_w, &min_h, &optimal_sharpness))) {
+        const bool within = desc->input_width >= min_w && desc->input_width <= max_w &&
+                            desc->input_height >= min_h && desc->input_height <= max_h;
+        Log(within ? 0 : 1, "DLSS optimal render size %ux%u for %ux%u (dynamic %ux%u..%ux%u); "
+            "using %ux%u%s", optimal_w, optimal_h, desc->output_width, desc->output_height,
+            min_w, min_h, max_w, max_h, desc->input_width, desc->input_height,
+            within ? "" : ", outside the supported range");
+    } else {
+        Log(1, "DLSS optimal settings query failed");
+    }
     NVSDK_NGX_DLSS_Create_Params settings{};
     settings.Feature.InWidth = desc->input_width;
     settings.Feature.InHeight = desc->input_height;

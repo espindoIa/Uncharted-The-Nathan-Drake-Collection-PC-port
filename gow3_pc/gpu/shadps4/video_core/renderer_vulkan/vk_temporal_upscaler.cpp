@@ -299,8 +299,11 @@ bool TemporalUpscaler::OnFrameStart() {
     const int output = settings.output_res.load();
     const bool output_changed = !scaled_session && applied_output != output;
     if (output_changed) {
-        target_width = Gow3Settings::OutputWidths[output];
-        target_height = Gow3Settings::OutputHeights[output];
+        // With GOW3_SCENE_SIZE the game itself draws at the output size (Uncharted's render
+        // resolution patch): the upscaler reconstructs that size, the menu's output is unused.
+        const bool fixed = std::getenv("GOW3_SCENE_SIZE") != nullptr;
+        target_width = fixed ? SceneResolution::Native().width : Gow3Settings::OutputWidths[output];
+        target_height = fixed ? SceneResolution::Native().height : Gow3Settings::OutputHeights[output];
         std::printf("Output resolution: %ux%u (live)\n", target_width, target_height);
         failed = false;
         fsr4_failed = false;
@@ -351,7 +354,7 @@ bool TemporalUpscaler::OnFrameStart() {
     // CameraMotion::OnDisplayPass has already cleared Depth(). Use the context's render
     // size, which survives the frame boundary (Performance 960 -> 1920 needs 32 phases).
     const u32 phases = Scaled() ? Motion::JitterPhases(render_width, target_width)
-        : Motion::JitterPhases(scene_targets.Size().width, 1920);
+        : Motion::JitterPhases(scene_targets.Size().width, SceneResolution::Native().width);
     jitter_index = jitter_index % phases + 1;
     jitter = {Halton(jitter_index, 2) - 0.5f, Halton(jitter_index, 3) - 0.5f};
     return changed;
@@ -442,7 +445,8 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
         .arrayLayers = 1,
         .samples = vk::SampleCountFlagBits::e1,
         .tiling = vk::ImageTiling::eOptimal,
-        .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
+        .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
+                 vk::ImageUsageFlagBits::eTransferDst,
         .initialLayout = vk::ImageLayout::eUndefined,
     });
     output_image = VideoCore::UniqueImage(device, allocator);
@@ -1068,9 +1072,28 @@ void TemporalUpscaler::Run() {
     own_barrier(vk::Image(output_image), vk::ImageLayout::eUndefined, all,
                 vk::AccessFlagBits2::eNone, vk::ImageLayout::eGeneral, all, rw);
 
+    // GOW3_GPU_PROFILE: the port's passes and the upscaler itself in segments of their own.
+    const auto mark = [](const char* label) {
+        if (auto* profiler = GpuProfiler::Get()) {
+            profiler->Mark(0xF5A1'0000ull ^ std::hash<std::string_view>{}(label),
+                           [label] { return std::string{label}; });
+        }
+    };
+    mark("upscaler motion vectors");
     camera_motion.RecordMotion(cmdbuf, input_depth_view, *motion_view, w, h);
+    if (Gow3Toggle::Disabled(Gow3Toggle::UpscalerMotion)) {
+        // Negative control (tests): no motion at all; panning must then ghost and blur.
+        own_barrier(vk::Image(motion_image), vk::ImageLayout::eGeneral,
+                    vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite,
+                    vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eTransfer,
+                    vk::AccessFlagBits2::eTransferWrite);
+        cmdbuf.clearColorImage(vk::Image(motion_image), vk::ImageLayout::eGeneral,
+                               vk::ClearColorValue{std::array<float, 4>{}},
+                               vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1});
+    }
     own_barrier(vk::Image(motion_image), vk::ImageLayout::eGeneral,
-                vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite,
+                vk::PipelineStageFlagBits2::eComputeShader | vk::PipelineStageFlagBits2::eTransfer,
+                vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eTransferWrite,
                 vk::ImageLayout::eGeneral, all, vk::AccessFlagBits2::eShaderRead);
 
     const bool has_reactive = mask_ready || RecordReactive(input_color_view);
@@ -1090,6 +1113,7 @@ void TemporalUpscaler::Run() {
         dispatched = RecordFsr4(cmdbuf, {input_color, input_color_view, w, h},
                                 {input_depth, input_depth_view, w, h}, w, h, ow, oh, frame_ms);
     } else if (UseDlss()) {
+        mark("DLSS evaluate (NGX)");
         dispatched = RecordDlss(
             cmdbuf,
             {input_color, input_color_view, color.info.pixel_format, vk::ImageAspectFlagBits::eColor, w, h},
@@ -1165,6 +1189,7 @@ void TemporalUpscaler::Run() {
         }
     }
     if (dispatched) {
+        mark("upscaler merge into the scene color");
         reset = false;
         dispatched_last_frame = true;
         if (Gow3Settings::Get().upscaler != Gow3Settings::UpscalerTaa) {
@@ -1280,12 +1305,17 @@ std::array<u32, 2> TemporalUpscaler::SceneSize(u32 w, u32 h) const {
 float TemporalUpscaler::SceneMipBias() const {
     if (!Active() || Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa) return 0.0f;
     const float render = float(Gow3Settings::Get().active_render_width.load());
-    const float output = float(Scaled() ? target_width : 1920u);
-    return render > 0.0f && render < output ? std::log2(render / output) : 0.0f;
+    const float output = float(Scaled() ? target_width : SceneResolution::Native().width);
+    if (!(render > 0.0f && render < output)) return 0.0f;
+    // DLSS Programming Guide 3.5: log2(render / display) - 1 (Performance: -2). DLAA (render =
+    // display) keeps the game's bias: it was validated at 0 and has no detail to restore.
+    return std::log2(render / output) - (UseDlss() ? 1.0f : 0.0f);
 }
 
 bool TemporalUpscaler::Scaled() const {
-    return scaled_session || target_width != 1920 || target_height != 1080;
+    // The upscaler's output is the guest's own scene size: HDR reconstruction before the post.
+    const auto native = SceneResolution::Native();
+    return scaled_session || target_width != native.width || target_height != native.height;
 }
 
 void TemporalUpscaler::OnColorTarget(VideoCore::ImageId color) {

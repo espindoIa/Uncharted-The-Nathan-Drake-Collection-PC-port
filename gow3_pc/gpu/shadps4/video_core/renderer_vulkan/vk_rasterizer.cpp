@@ -661,6 +661,10 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             }
         }
     }
+    // Uncharted: scene geometry (light pre-pass, materials) draws with the jittered scene depth;
+    // its textures take the upscaler's LOD bias (BindResources).
+    flat_scene_draw = camera_motion->FlatSource() && db_desc.first && cb_descs[0].first &&
+                      (db_desc.first == flat_camera_depth || JitteredDepth(db_desc.first));
     if (upscaler->Enabled() && cb_descs[0].first) {
         upscaler->OnColorTarget(cb_descs[0].first);
     }
@@ -2757,8 +2761,9 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // log2(render / output)). Shadows, post-processing and UI keep the guest's bias.
     sampler_lod_bias = 0.0f;
     if (!pipeline->IsCompute() && !Gow3Toggle::Disabled(Gow3Toggle::SceneMipBias) &&
-        std::popcount(static_cast<const GraphicsPipeline*>(pipeline)->GetGraphicsKey().mrt_mask &
-                      0xff) >= 5) {
+        (std::popcount(static_cast<const GraphicsPipeline*>(pipeline)->GetGraphicsKey().mrt_mask &
+                       0xff) >= 5 ||
+         flat_scene_draw)) {
         sampler_lod_bias = upscaler->SceneMipBias();
         static float reported = 0.0f;
         if (sampler_lod_bias != reported) {
@@ -4310,7 +4315,10 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             std::fflush(stdout);
         }
     }
-    if (std::popcount(key.mrt_mask & 0x7f) >= 5 && db_desc.first &&
+    // The scene starts with God of War III's G-buffer (5+ targets) or, in Uncharted, the first
+    // draw with the camera's scene depth (the light pre-pass): from there to the upscale the
+    // scene-size targets are drawn reduced (presets below Native AA / DLAA).
+    if (db_desc.first && (std::popcount(key.mrt_mask & 0x7f) >= 5 || flat_scene_draw) &&
         scene_targets->EligibleScene(texture_cache.GetImage(db_desc.first))) scene_started = true;
     // A proxy attachment cannot represent MSAA or a feedback loop that reads the
     // same image through the guest's native descriptor during this draw.
@@ -4369,7 +4377,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         }
         std::printf("Scene pass: reduced %d %s\n", reduced, why.c_str());
     }
-    push_data.scene_size = reduced ? SceneResolution::Pack(scene_targets->Size()) : 0;
+    push_data.scene_size =
+        reduced ? SceneResolution::PackCoord(scene_targets->Size(), SceneResolution::Native()) : 0;
     if (Gow3Stats::enabled) {
         Gow3Stats::reduced_draws.fetch_add(reduced, std::memory_order_relaxed);
         Gow3Stats::scene_draws.fetch_add(scene_started, std::memory_order_relaxed);
@@ -4636,12 +4645,14 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     }
 
     if (reduced) {
-        // Half-resolution passes keep the scene's factor (proxy / native = scene / 1920).
+        // Half-resolution passes keep the scene's factor (proxy / native = scene / native).
         const auto size = scene_targets->Size();
+        const auto native = SceneResolution::Native();
         const auto proxy = pass_size.value_or(size);
         state.width = proxy.width;
         state.height = proxy.height;
-        target_scale = {float(size.width) / 1920.0f, float(size.height) / 1080.0f};
+        target_scale = {float(size.width) / float(native.width),
+                        float(size.height) / float(native.height)};
     }
     if (FrameCapture::Active()) {
         std::array<const VideoCore::ImageInfo*, AmdGpu::NUM_COLOR_BUFFERS> colors{};

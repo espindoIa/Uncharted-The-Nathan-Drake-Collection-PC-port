@@ -22,6 +22,26 @@
 
 namespace Vulkan {
 
+u32 Dlss::TransformerPreset(int quality) {
+    // A transformer model by name (NVSDK_NGX_DLSS_Hint_Render_Preset J=10, K=11, L=12, M=13),
+    // so a driver or OTA update cannot swap the model (Programming Guide 3.12.1). K for every
+    // mode: the guide's default for DLAA/Quality/Balanced and its cheapest transformer. The
+    // guide's Performance default M cost 2.80 ms per 4K frame on an RTX 5070 against K's 1.97 ms
+    // (17 Oct profile; guide table 2.98 / 2.11 ms), more than the reduced Uncharted 2 scene saves.
+    // GOW3_DLSS_MODEL=j|k|l|m picks another one.
+    if (const char* model = std::getenv("GOW3_DLSS_MODEL"); model && model[0]) {
+        switch (model[0] | 0x20) {
+        case 'j': return 10;
+        case 'k': return 11;
+        case 'l': return 12;
+        case 'm': return 13;
+        default: break;
+        }
+    }
+    (void)quality;
+    return 11;
+}
+
 int Dlss::QualityForScale(float scale) {
     // DLAA only for equal sizes: any real upscale needs at least the Quality mode.
     return scale >= 2.9f ? 4 : scale >= 1.95f ? 3 : scale >= 1.65f ? 2 : scale > 1.01f ? 1 : 0;
@@ -206,7 +226,7 @@ bool Dlss::CreateFeature(vk::CommandBuffer command, const FeatureDesc& desc) {
     impl->feature.reset();
     const Gow3DlssFeature feature{desc.input_width,  desc.input_height, desc.output_width,
                                 desc.output_height, desc.quality,      0,
-                                0,                  desc.hdr ? 1 : 0};
+                                TransformerPreset(desc.quality), desc.hdr ? 1 : 0};
     if (!impl->api->CreateFeature(command, &feature)) {
         return false;
     }

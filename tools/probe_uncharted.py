@@ -461,6 +461,12 @@ def run_game(args, game, executable, guest_args, loadexec):
     if executable == "big2-ps4_Shipping.elf" and upscaler not in ("off", "none", ""):
         env.setdefault("GOW3_CAMERA_SOURCE", "flat")
         env.setdefault("GOW3_UPSCALE_BEFORE_CS", "aec539f0")
+        # The render resolution above is the upscaler's output: DLSS/FSR presets below DLAA draw
+        # the scene at a fraction of it (SceneResolution::Native, the port's reduced targets).
+        env.setdefault("GOW3_SCENE_SIZE", f"{render_size[0]}x{render_size[1]}")
+        # Its half-resolution targets stay full size: the snow particles read the half-resolution
+        # depth natively in every draw, and resolving its proxy each time cost more than it saved.
+        env.setdefault("GOW3_SCENE_HALF_RES", "0")
     else:
         env["GOW3_UPSCALER"] = "none"
     if extra_mib:
