@@ -183,6 +183,7 @@ tag `v0.1.1`; GitHub Actions then builds the package and publishes the release w
 | `launcher/` | The Uncharted launcher (Tkinter + Pillow). |
 | `tools/probe_uncharted.py` | Prepares a game executable (patches, render resolution, update) and starts the runtime. |
 | `tools/package_windows.sh` | Builds the Windows package; `tools/windows_starter/` its `.exe`. |
+| `tools/play.py` | Scripted play for tests and agents: start a game, hold buttons and sticks for a time, get the current screen as a PNG after each step (taken inside the port), record and replay routes, compare shots, measure frame times. `python tools/play.py --help`. |
 | `tools/release.sh`, `tools/release-notes/` | Publishes a release (see above). |
 | `gow3_pc/` | The runtime: C runtime (`src/`), GPU library (`gpu/`: shadPS4 video core and shims), preparation scripts (`scripts/`). |
 | `analysis/` | Compatibility notes (`STATUS.md`) and the plan (`PLAN.md`). |

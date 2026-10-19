@@ -1522,7 +1522,31 @@ Merge choices (details in the sections below and in CHANGELOG.md):
 - Tried and dropped: no drain for compute IndirectBuffer packets (55.5 vs 55.3 FPS; the waits moved
   to SyncSrtTables' pipe_write_ranges check: the graphics SRT walks read what the dispatches
   write). pipe_write_ranges overflows at 256 dispatches (U3: ~1,230 a frame), after which every
-  walk drains: candidate for a CPU-bound scene, not measured.
+  walk drains. Both measured together at DLAA model K (CPU-bound, 4 states x 2 rounds in one
+  session): merging ranges took the SRT drains from ~1,040 to ~94 a second and all waited drains
+  from ~4,000 to ~1,250, but FPS stayed (base 61.4/61.2, merge 60.8/60.5, nested 61.4/60.1, both
+  62.2/58.7; p99 within 20.6-23.4 ms everywhere): stage B (draw recording) is then ~90% busy and
+  stage A waits for it instead. Not kept; useful again once stage B is faster.
+- Settings, same scene, current build: DLSS evaluate (DLAA 4K) model M 7.8 ms, model K 2.2 ms.
+  DLAA K: 60.8 FPS, p50 15.9, p99 23.6 ms, GPU 64% (CPU-bound); DLSS Quality M (2560x1440):
+  60.5 FPS, GPU 70%. Before/after at the player's settings (same protocol, 0.3.0 package copy vs
+  current): U3 49.8 -> 54.1 FPS (p50 19.8 -> 17.8, p99 35.6 -> 29.9), U1 93.9 -> 94.0 (GPU 93%,
+  renders 2880x1620: 4K targets do not fit its GPU area), U2 64.1 -> 63.5 (GPU 94%).
+- Checks (current build, player's settings):
+  - Vulkan validation (SDK 1.4.363, sync validation), U3 into gameplay and ~1 min of walking:
+    MT on and MT off give the same 7 ids (VUID-vkCmdDraw-None-09600, GraphicsPipelineCreateInfo
+    layout-07988/07990, RuntimeSpirv OpEntryPoint-08743/Location-06272, SYNC-HAZARD-WRITE-AFTER-
+    WRITE and READ-AFTER-WRITE on the 1920x1080 D32S8 depth at 0x10513e8000: a layout transition
+    after vkCmdEndRendering without LATE_FRAGMENT_TESTS in srcStageMask, and a LOAD after a
+    transition whose dst was SHADER_READ only). Pre-existing, not multithreading; not fixed.
+  - U1 grey guns (#23): 60 s aiming the pistol and turning in the jungle (Sully), every live frame
+    (~20 ms) kept; one-frame flashes counted as 16x16 blocks more than half differing from both
+    neighbours while the neighbours agree (C:\dev\bench\livecap.py). MT on: 15 of 1132 frames
+    with 2+ blocks, MT off: 23 of 658, all aim/unaim camera changes where the capture skipped
+    frames; the pistol always textured. GOW3_PIPE_VERIFY=16 and GOW3_RING_REUSE_CHECK=1 during the
+    MT run: 0 resource tables changed after stage A, 0 register copy differences, 0 of ~1.7M
+    reused ring copies per 5 s differing. Not reproduced in that scene (the user's report was a
+    gunfight; the boats were not reached).
 - DMA overtakes (GOW3_TEST_OVERTAKE_LOG): decision to leave them. DMA_DATA already waits for the
   recorder-thread copies and fences (WaitHostCopies/WaitDeferredSignals); what it can pass is a
   fence held for a ray-cast readback, which on the PS4 is an end-of-pipe write that completes after
