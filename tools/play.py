@@ -8,10 +8,13 @@ see the screen as it is now, in a loop (look, decide, act).
     python tools/play.py move f --ms 2000      left stick: f b l r fl fr bl br, or x,y in -1..1
     python tools/play.py look r --ms 400       right stick, same directions
     python tools/play.py do "r2 lx=128 ly=0" --ms 1500    any pad tokens held together
+    python tools/play.py seq "left=f@800" "left=f cross@150"   steps held back to back (--burst 300)
     python tools/play.py wait 3                let the game run, then a shot
     python tools/play.py status                process, last frame stats, newest frame
-    python tools/play.py mark | save <route>   start a route here | write the inputs since the mark
+    python tools/play.py mark | save <route> [--max-idle 1500]   start a route here | write the
+                                               inputs since the mark (pauses between steps shortened)
     python tools/play.py replay <route> [--times N]        played back by the game itself
+                         [--marks 10,30 --prefix P]        shots at those seconds and at the end
     python tools/play.py measure 20 [--route R] [--tag T]  frame times (port and PresentMon), GPU use
     python tools/play.py compare a.png b.png   SSIM and changed pixels of two shots
     python tools/play.py stop
@@ -139,18 +142,34 @@ def write_pad(tokens):
 
 def hold(tokens, ms, args=None):
     """Holds the tokens for ms; with --shot-at, the shot is taken that far into the hold."""
+    hold_steps([(tokens, ms)], args)
+
+
+def hold_steps(steps, args=None):
+    """Holds each (tokens, ms) in turn with no release between them (seq); --shot-at takes the shot
+    that far in, --burst one every that many ms (a shot can delay the next step by ~0.1 s)."""
     state = load_state()
     if not game_running():
         sys.exit("The game is not running (python tools/play.py start <game>)")
-    write_pad(tokens)
-    trace(state, tokens)
     started = time.time()
+    shots = []
     shot_at = getattr(args, "shot_at", 0) or 0
-    if 0 < shot_at < ms:
-        time.sleep(shot_at / 1000)
-        shot(width=args.width, after=time.time())
+    burst = getattr(args, "burst", 0) or 0
+    total = sum(ms for _, ms in steps)
+    if 0 < shot_at < total:
+        shots = [shot_at / 1000]
         args.no_shot = True  # the shot was taken while held
-    time.sleep(max(0.0, ms / 1000 - (time.time() - started)))
+    elif burst:  # to see what a fast scene does
+        shots = [i * burst / 1000 for i in range(1, int(total / burst) + 1) if i * burst < total]
+    end = 0.0
+    for tokens, ms in steps:
+        write_pad(tokens)
+        trace(state, tokens)
+        end += ms / 1000
+        while shots and shots[0] < end:
+            time.sleep(max(0.0, shots.pop(0) - (time.time() - started)))
+            shot(width=args.width, after=time.time() - 0.03)
+        time.sleep(max(0.0, end - (time.time() - started)))
     write_pad("")
     trace(state, "")
 
@@ -204,6 +223,7 @@ def shot(out=None, width=0, after=None, timeout=3.0, quiet=False):
     state["shots"] = index
     save_state(state)
     path = Path(out) if out else SHOTS / f"{index:04d}.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
     image.save(path)
     shutil.copyfile(path, PLAY / "shot.png")
     info = live_info()
@@ -247,6 +267,11 @@ def cmd_start(args):
     env = dict(os.environ)
     env["GOW3_LIVE_VIEW"] = str(LIVE)
     env.setdefault("GOW3_LIVE_VIEW_MS", str(args.live_ms))
+    if not args.input:
+        # 19 Oct: the borderless window covers the desktop, and someone's mouse and keys there
+        # turned the camera and paused U2 in the middle of a route. Only the pad file plays.
+        env.setdefault("GOW3_KEYBOARD", "0")
+        env.setdefault("GOW3_MOUSE", "0")
     key = args.game.upper()
     if args.mt is not None:
         env[f"UNCHARTED_MULTITHREADED_{key}"] = str(args.mt)
@@ -302,6 +327,19 @@ def cmd_press(args):
 def cmd_do(args):
     started = time.time()
     hold(args.tokens, args.ms, args)
+    finish(args, started)
+
+
+def cmd_seq(args):
+    """Steps "tokens@ms" held back to back; left=<dir> / right=<dir> set a stick as move/look do."""
+    steps = []
+    for step in args.steps:
+        tokens, _, ms = step.rpartition("@")
+        words = [stick(w[5:], "l") if w.startswith("left=") else
+                 stick(w[6:], "r") if w.startswith("right=") else w for w in tokens.split()]
+        steps.append((" ".join(words), int(ms)))
+    started = time.time()
+    hold_steps(steps, args)
     finish(args, started)
 
 
@@ -362,9 +400,15 @@ def cmd_save(args):
     ROUTES.mkdir(parents=True, exist_ok=True)
     path = Path(args.route) if os.sep in args.route or "/" in args.route else ROUTES / f"{args.route}.txt"
     out = ["0 0 128 128 128 128 0 0"]
+    shift, last_ms, last_rest = 0, 0, "0 128 128 128 128 0 0"
     for line in lines:
         ms, rest = line.split(" ", 1)
-        out.append(f"{max(0, int(ms) - start_ms)} {rest}")
+        ms = max(0, int(ms) - start_ms)
+        if args.max_idle and last_rest == "0 128 128 128 128 0 0":
+            # the pad was released (an agent thinking between steps): keep at most max_idle of it
+            shift += max(0, ms - last_ms - args.max_idle)
+        last_ms, last_rest = ms, rest
+        out.append(f"{ms - shift} {rest}")
     path.write_text("\n".join(out) + "\n", encoding="ascii")
     print(f"{path}: {len(lines)} input changes, {int(out[-1].split()[0]) / 1000:.1f} s")
 
@@ -384,17 +428,31 @@ def route_seconds(path):
     return int(lines[-1].split()[0]) / 1000 if lines else 0
 
 
+def arm_replay(path):
+    """Starts the game's replay of a route; returns when the token was written. The runtime reads
+    pad file tokens into 64 characters (runtime_pad.c), which an absolute path overflows (0 samples
+    loaded, 19 Oct): the route goes to a short path relative to the game's folder (the repo)."""
+    shutil.copyfile(path, PLAY / "replay.txt")
+    started = time.time()
+    write_pad("replay=analysis/play/replay.txt")
+    time.sleep(0.4)
+    write_pad("")
+    return started
+
+
 def cmd_replay(args):
     path = route_path(args.route)
     length = route_seconds(path)
+    marks = sorted(float(m) for m in args.marks.split(",")) if args.marks else []
     for i in range(args.times):
-        started = time.time()
-        write_pad(f"replay={path}")
-        time.sleep(0.4)
-        write_pad("")
+        prefix = args.prefix and (f"{args.prefix}-{i + 1}" if args.times > 1 else args.prefix)
+        started = arm_replay(path)
+        for mark in marks:  # within ~40 ms of the replay's clock, plus the live view's age
+            time.sleep(max(0, started + mark - time.time()))
+            shot(out=prefix and f"{prefix}_{mark:g}s.png", width=args.width, after=time.time() - 0.03)
         time.sleep(max(0, length + 0.6 - (time.time() - started)))
         if not args.no_shot:
-            shot(width=args.width, after=time.time() - 0.05)
+            shot(out=prefix and f"{prefix}_end.png", width=args.width, after=time.time() - 0.05)
 
 
 def read_frametimes():
@@ -447,9 +505,7 @@ def cmd_measure(args):
         path = route_path(args.route)
         length = route_seconds(path)
         while time.time() - started < args.seconds:
-            write_pad(f"replay={path}")
-            time.sleep(0.4)
-            write_pad("")
+            arm_replay(path)
             time.sleep(min(length + 0.6, max(0, args.seconds - (time.time() - started))))
     else:
         time.sleep(args.seconds)
@@ -544,6 +600,7 @@ def main():
     def with_shot(p):
         p.add_argument("--no-shot", action="store_true", help="no screenshot afterwards")
         p.add_argument("--shot-at", type=int, default=0, help="take the shot this many ms into the hold")
+        p.add_argument("--burst", type=int, default=0, help="also a shot every this many ms while held")
         p.add_argument("--width", type=int, default=960)
         return p
 
@@ -554,6 +611,7 @@ def main():
     p.add_argument("--game-dir", help="the extracted game (default: the launcher's)")
     p.add_argument("--env", action="append", default=[], help="NAME=value for the game")
     p.add_argument("--live-ms", type=int, default=200, help="live frame interval")
+    p.add_argument("--input", action="store_true", help="keep the keyboard and mouse (off by default)")
     p.add_argument("--restart", action="store_true")
     p.set_defaults(func=cmd_start)
     sub.add_parser("stop").set_defaults(func=cmd_stop)
@@ -570,6 +628,9 @@ def main():
     p.add_argument("tokens")
     p.add_argument("--ms", type=int, default=500)
     p.set_defaults(func=cmd_do)
+    p = with_shot(sub.add_parser("seq"))
+    p.add_argument("steps", nargs="+", help='"tokens@ms" each, e.g. "left=f@800" "left=f cross@150"')
+    p.set_defaults(func=cmd_seq)
     p = with_shot(sub.add_parser("move"))
     p.add_argument("direction")
     p.add_argument("--ms", type=int, default=1000)
@@ -590,10 +651,13 @@ def main():
     sub.add_parser("mark").set_defaults(func=cmd_mark)
     p = sub.add_parser("save")
     p.add_argument("route")
+    p.add_argument("--max-idle", type=int, default=0, help="shorten pad-released stretches to this many ms")
     p.set_defaults(func=cmd_save)
     p = with_shot(sub.add_parser("replay"))
     p.add_argument("route")
     p.add_argument("--times", type=int, default=1)
+    p.add_argument("--marks", help="also a shot this many seconds into the route, e.g. 10,30,60")
+    p.add_argument("--prefix", help="shots go to <prefix>_<mark>s.png and <prefix>_end.png")
     p.set_defaults(func=cmd_replay)
     p = sub.add_parser("measure")
     p.add_argument("seconds", type=float)
