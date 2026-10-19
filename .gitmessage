@@ -1,0 +1,17 @@
+
+# <area>: <what is now true, in plain words>      (max 72 characters, no full stop)
+# Areas: u1 u2 u3 games gpu runtime launcher package tools docs merge release
+#
+# Why:
+# The problem as the player or developer saw it. Issue number if there is one.
+#
+# What changed:
+# - The main pieces, one line each.
+#
+# Tested:
+# - What was run (game, settings, GPU) and what it showed, with numbers.
+#
+# Not tested:
+# - What could break and was not checked.
+#
+# Lines starting with # are left out. Rules: CONTRIBUTING.md

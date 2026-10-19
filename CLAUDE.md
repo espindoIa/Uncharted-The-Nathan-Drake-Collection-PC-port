@@ -72,6 +72,7 @@ The toolchain is MSYS2 CLANG64. From Git Bash, wrap commands like this:
 
 ## Conventions
 
+- Commits and pull requests follow `CONTRIBUTING.md`: subject `<area>: <what is now true>` (max 72 chars, English; areas u1 u2 u3 games gpu runtime launcher package tools docs merge release), body with Why / What changed / Tested / Not tested; PRs use `.github/pull_request_template.md`. One change per commit.
 - Every behaviour change gets a `CHANGELOG.md` entry (newest date first, player-facing wording). `analysis/STATUS.md` gets the technical detail: evidence, measurements, what was not verified.
 - Code comments explain the why with dated evidence (e.g. "17 Oct profile: …"); match that density and style.
 - Never commit `gow3_pc/stat-multipliers-test.ini` or the dirty submodule `gow3_pc/gpu/third_party/fsr-vulkan`. Stage files by name. `.claude/ship.md` has these ship rules.

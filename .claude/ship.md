@@ -1,6 +1,7 @@
 # Ship rules for this repo (read by the /ship skill)
 
 - Branch: commit directly on the current branch; no merge or push unless asked.
+- Commit messages: `CONTRIBUTING.md` (subject `<area>: <what is now true>`, body Why / What changed / Tested / Not tested).
 - Never commit: `gow3_pc/stat-multipliers-test.ini`, the dirty submodule `gow3_pc/gpu/third_party/fsr-vulkan`.
 - Build (MSYS2 CLANG64): `/c/msys64/usr/bin/bash.exe -lc "export MSYSTEM=CLANG64 PATH=/clang64/bin:/usr/bin:\$PATH; cd /c/dev/uncharted/gow3_pc && ./build.sh"`; on failure read `gow3_pc/out/gpu-build.log`.
 - Unit tests: built in `gow3_pc/out/gpu` (e.g. `movie-hook-test.exe`), run under the same CLANG64 PATH.
