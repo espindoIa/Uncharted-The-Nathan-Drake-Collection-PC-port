@@ -44,8 +44,9 @@ Theme: catch up with upstream, then fix what players hit most.
     multithreading off for Uncharted 3);
   - duplicate patch tables in `tools/probe_uncharted.py`.
   
-  Also settle the version numbers: upstream has its own 0.4.0, so fork releases need a clearly
-  different name (for example `0.5.0-ee`) to avoid confusing the update check and players.
+  Version name (decided 19 Oct): the next fork release is **0.5.0 "Expedition"**. Upstream also
+  has a 0.4.0; the launcher checks only the fork's releases, and the "Expedition" name tells
+  players which one they have. Done: merged in 4ecc8fd.
 - **Crash triage from the open upstream issues**, each reproduced or ruled out, with a STATUS note:
   - "Exit code 3" / "ErrorCode3" in all games (#24, #27, #30, #59);
   - Drake's Fortune crash at start or in the first levels (#42, #58);
@@ -53,9 +54,9 @@ Theme: catch up with upstream, then fix what players hit most.
   - Uncharted 3 (#44, #46, #47, #54).
 - **Drake's Fortune "Device lost" after 26 minutes** (#57). The log shows a 960x540 image with
   6,755 layers (15.8 GB) being created. Reject impossible image descriptions in the texture cache
-  instead of allocating them.
+  instead of allocating them. Done 19 Oct (d3b1e13): the size wrapped in u32 past the 1 GB check.
 - **Open issues on the fork** with a bug report template asking for `boot.log`, the launcher
-  settings, the game version and the GPU.
+  settings, the game version and the GPU. Done 19 Oct (`.github/ISSUE_TEMPLATE/bug_report.yml`).
 
 Done when: the merge is in; each crash issue above is fixed, has its cause written in STATUS, or
 needs more information from its reporter; and a 30-minute run of each game at the player's
