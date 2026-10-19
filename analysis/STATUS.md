@@ -2068,3 +2068,108 @@ Details:
   ignored `play.py press cross` (12 times). `play.py seq "cross@150" "@1500"` (press, then
   release) closes it, as a real controller does (the user, 19 Oct). It is not a game or port
   bug.
+- Soak note: the soak script was not stopped with U1's game. It went on to U2 and ran it from
+  16:08 to 16:17 (about 9 minutes, Continue, the camera and Nate moving): no fault, 69-70 FPS.
+  U3's 30-minute soak and U1's and U2's full 30 minutes are still to do.
+
+## 19 October 2026: Uncharted 3 performance at the player's settings
+
+Setup:
+- Player's settings: 4K, DLAA (DLSS model M), 120 FPS cap, multithreading on; RTX 5070, Ryzen 5
+  5600.
+- Scene: the US save's Continue, the bar fight, standing still.
+- Tools:
+  - PresentMon 2.6 (winget; the account is in Performance Log Users) runs inside `play.py
+    measure`, which now prints PresentMon's frame times, time on screen, GPU busy and GPU wait.
+  - `C:\dev\bench\ab2.sh` alternates on/off windows in one session, the order flipped every
+    round, and keeps each window's raw frame times.
+  - `abstats.py` gives a hierarchical bootstrap (windows resampled within each state): median,
+    p99 and 1% low, with 95% intervals of the difference.
+  - The port's sampling profiler (GOW3_PROFILE=10, GOW3_PROFILE_MS=5) on the GPU command, draw
+    recording, Vulkan recording and game flip threads, symbolized with llvm-symbolizer. The build
+    is RelWithDebInfo with DWARF; LTO is unavailable in this toolchain.
+  - Not available: WPR/ETW kernel sampling ("Failed to enable the policy to profile system
+    performance": it needs an elevated prompt); Nsight (not installed); scipy (the bootstrap is
+    numpy).
+- Noise, A/A (6+6 windows of 10 s, model M): median +0.01 ms [-0.02, +0.03], FPS +0.08
+  [-0.19, +0.33]. p99 moves by up to 1-2 ms between windows of the same build.
+
+What limits the frame:
+- At the player's settings the GPU is the limit: PresentMon GPU busy 14.6 of 14.8 ms (99%).
+- GOW3_GPU_PROFILE, 15.6 ms of GPU work per frame:
+  - DLSS evaluate (model M, DLAA) 7.9 ms;
+  - GPU idle between submissions 0.8 ms;
+  - the port's passes (camera motion vectors 0.23, merge 0.17, a 4K R8Uint upload 0.07);
+  - the rest is the game's own passes.
+- DLSS cost is NVIDIA's, not the port's. NVIDIA's DLSS Programming Guide (execution times,
+  RTX 5070, 3840x2160 output) lists K 2.11 ms and M 2.98 ms. The port measures, in Performance
+  mode (1080p input): K 1.99, M 2.90. With DLAA (4K input) it measures K 2.2, M 7.9. So model M
+  scales with the input size and model K hardly does. NVIDIA's defaults are K for DLAA, Quality
+  and Balanced and M for Performance.
+- With model K at DLAA, U3 is CPU-bound at ~97 FPS (GPU busy 86%):
+  - The game's submitting thread waits 61% of the time in WaitGpuIdle. After sceGnmSubmitDone,
+    the next frame's first submission waits until the GPU command thread has finished the
+    previous frame (GOW3_SUBMIT_WAIT_STATS: ~97 waits a second, 6.4 ms each).
+  - The GPU command thread (stage A):
+    - compute dispatches 48%: U3 has ~600 dispatches of one 1x1x1 group a frame, plus 74 and 60
+      of two others;
+    - constant ring copies (memcpy in CopySparseMemory) 24%, 2.5 GB/s;
+    - draw pipe drains 24%;
+    - compute pipeline key refresh (RefreshFlatBuf through SyncSrtTables) 15%;
+    - LandDeferredFenceFor 11%.
+  - The draw recording thread (stage B) is 72% busy: dispatch bindings 28%, GpuRangesAdd and
+    its interval set 12%.
+
+Constant ring reuse (toggle second word 32 RingPreciseWrites, 64 RingKeepOnCommands):
+- Before: 2.5 GB/s of guest constants copied, 55% of the bytes repeating a range already copied
+  in the same flush (GOW3_RING_STATS), but only ~40 MB/s reused. A new epoch (no reuse of
+  earlier copies) started:
+  - on every in-order task: ~97,000 a second, the EOP/EOS events, WRITE_DATA, DMA and compute
+    RELEASE_MEM around the dispatches;
+  - on every drain, ~3,300 a second of them for queued commands (guest fault downloads);
+  - on any GPU write between the lowest and highest copied address, which covered nearly every
+    write.
+- Now:
+  - A GPU write starts an epoch only over a 1 KiB line a copy of the epoch came from (hashed
+    epoch tags): ~290,000 writes a second keep it, ~1,100 do not.
+  - WRITE_DATA and DMA already note their exact range. The events and RELEASE_MEM note their
+    label (8 bytes).
+  - Command drains keep the epoch: they write only GPU-written memory, which is never copied.
+  - New: an epoch per guest submission and per compute ring ding (NewGuestEpoch), and after
+    every WAIT_REG_MEM. The guest may rewrite constants once a label tells it the GPU is done;
+    the old rules covered that by accident.
+- After: 1.7 GB/s copied, 820 MB/s reused; the ring is no longer full (it handed 1-3 thousand
+  copies a second to stage B before, 0 now).
+- Correctness:
+  - GOW3_RING_REUSE_CHECK=1 compares every reused copy with guest memory. A reuse only happens on
+    ranges with no GPU write registered or pending, so guest memory is then the truth. Result: 0
+    of ~2.8 million checked reuses differed.
+  - Paused frame, toggles alternated: on/off differs in 0.29-0.56% of pixels, on/on and off/off
+    in 0.13-0.69%, and on1/off2 in 0.00% (max 6/255).
+  - No ASSERT/Fault/Invalid packet/VK_ERROR in the logs.
+- A/B (6+6 windows of 10 s; port frame times, then PresentMon):
+
+  | Settings | Median frame time | FPS | p99 |
+  |---|---|---|---|
+  | DLAA, model M (player's) | -0.25 ms [-0.28, -0.20]; PM -0.26 [-0.29, -0.24] | 67.5 -> 68.4 (+1.4%); PM +1.14 [+0.99, +1.28] | no change beyond noise |
+  | DLAA, model K | -0.53 ms [-0.79, -0.15]; PM -0.69 [-1.03, -0.34] | 97.1 -> 101.5; PM 96.4 -> 102.8 (+6.6%) | -0.6 / -1.0 ms, intervals include 0 |
+
+- Even GPU-bound, the frame is shorter: the GPU idles between a frame's last submission and the
+  next frame's first, and that gap follows the GPU command thread.
+- U1 (4+4 windows) and U2 boot and play. U1's scene changed during the run (99 -> 83 -> 99
+  FPS), so its FPS interval is ±10; reuse there was 240-360 MB/s on and 137-291 off.
+- Tests: image-size-test and movie-hook-test pass.
+
+Ruled out (do not reinvestigate without new data):
+- The port's DLSS call: it matches NVIDIA's published cost in Performance mode (above).
+- Removing the submission wait (GOW3_SUBMIT_NO_WAIT=1, measurement only): slower and broken.
+  Model K went 89.8 -> 81.8 FPS (GPU busy 86 -> 67%); model M fell to 55.7 FPS, with visible
+  glitches (the user saw them). The serialization is not the gain.
+- The 4K R8Uint image upload each frame: 0.07 ms of GPU, under the noise.
+
+Not verified:
+- Other U3 scenes. The EU chapter 3 save is copied to `C:\dev\bench\backup_ch3` for that
+  (BACKUP=... bench.sh).
+- Other GPUs and CPUs.
+- Long sessions with the change.
+- U1's gain (its scene drifted).

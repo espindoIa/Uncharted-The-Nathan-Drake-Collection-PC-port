@@ -110,6 +110,13 @@ enum : std::uint64_t {
     /// not when its interrupt fires (that waits for the ray-cast readbacks before it, and by then
     /// the next frame's work was queued ahead of the frame's last submission).
     PrepareAtFlipPacket = 16,
+    /// A GPU write starts a new constant ring epoch (no reuse of earlier copies) only when it
+    /// overlaps a 1 KiB line a copy of the epoch came from, not whenever it falls between the
+    /// lowest and highest copied address (19 Oct: in U3 that span covered nearly every write).
+    RingPreciseWrites = 32,
+    /// Draining the draw pipe for a queued command (guest fault downloads, readback landings,
+    /// flips) keeps the ring epoch: those write only GPU-written memory, which is never copied.
+    RingKeepOnCommands = 64,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

@@ -899,7 +899,14 @@ void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
     static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
     pipe_write_ranges.clear();
     pipe_writes_overflow = false;
-    NextRingEpoch();
+    // gow3 19 Oct 2026: a queued command (U3: ~3,300 a second, mostly guest faults into
+    // GPU-written pages) changes only GPU-written memory, which CollectRingBindings never copies.
+    if (reason == DrawPipe::ReasonCommands &&
+        !Gow3Toggle::Disabled2(Gow3Toggle::RingKeepOnCommands)) {
+        ++ring_command_drains_kept;
+    } else {
+        NextRingEpoch(EpochDrain);
+    }
     if (!stats) {
         draw_pipe->Drain(reason);
         return;
@@ -934,9 +941,7 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
     // hold before the recording thread ran the writing draw. Such entries wait for Commit().
     const u64 position = building_packet ? UnreachedPosition : draw_pipe->Head();
     const VAddr end = address + size;
-    if (address < ring_epoch_max && ring_epoch_min < end) {
-        NextRingEpoch();
-    }
+    NoteRingWrite(address, size);
     for (auto& write : pending_writes) {
         if (address <= write.end && write.begin <= end) {
             write.begin = std::min(write.begin, address);
@@ -950,6 +955,30 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
     pending_writes.push_back({address, end, position});
     pending_min = std::min(pending_min, address);
     pending_max = std::max(pending_max, end);
+}
+
+void Rasterizer::NoteRingWrite(VAddr address, u64 size) {
+    if (!draw_pipe || !size || !OnStageA()) {
+        return;
+    }
+    if (address < ring_epoch_max && ring_epoch_min < address + size) {
+        if (Gow3Toggle::Disabled2(Gow3Toggle::RingPreciseWrites) ||
+            RingLinesOverlap(address, size)) {
+            NextRingEpoch(EpochWrite);
+        } else {
+            ++ring_writes_kept;
+        }
+    }
+}
+
+void Rasterizer::NewGuestEpoch() {
+    // gow3 19 Oct 2026: the guest rewrites constants between its submissions, once a label told
+    // it the GPU was done with them, or while the GPU waits on a label it then writes: ring
+    // copies are reused within one submission and between memory waits only.
+    // Without RingPreciseWrites every in-order task (labels among them) starts an epoch anyway.
+    if (draw_pipe && OnStageA() && !Gow3Toggle::Disabled2(Gow3Toggle::RingPreciseWrites)) {
+        NextRingEpoch(EpochSubmission);
+    }
 }
 
 bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
@@ -1050,6 +1079,7 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         }
         const auto offset = constant_ring->Allocate(size, alignment);
         if (!offset) {
+            ++ring_alloc_failures;
             return;
         }
         u8* dst = constant_ring->Data(*offset);
@@ -1064,6 +1094,7 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
                            *offset};
                 ring_epoch_min = std::min(ring_epoch_min, address);
                 ring_epoch_max = std::max(ring_epoch_max, address + size);
+                MarkRingLines(address, size);
             }
         }
         constant_ring->Flush(*offset, size);
@@ -1259,7 +1290,8 @@ void Rasterizer::RetireSubmission() {
     }
 }
 
-bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 toggle) {
+bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 toggle,
+                            bool writes_noted) {
     // gow3 18 Oct 2026: the ring has one producer, the GPU command thread. On the draw recording
     // thread (an EOP flip: SignalFlip -> SubmitFlipInternal queues the flip from there) every
     // earlier packet has run already, so the task runs here, in stream order; pushed from both
@@ -1272,7 +1304,11 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
         return false;
     }
     // Memory it writes may be bound later: constant ring copies made before are not reused.
-    NextRingEpoch();
+    // gow3 19 Oct 2026: unless the caller passes what it writes to NoteRingWrite (labels,
+    // WRITE_DATA, DMA): U3 runs ~1,000 such tasks a frame, and each ended the ring's reuse.
+    if (!writes_noted || Gow3Toggle::Disabled2(Gow3Toggle::RingPreciseWrites)) {
+        NextRingEpoch(EpochTask);
+    }
     const u32 total = sizeof(TaskPacket) + AlignPacket(size);
     u8* out = draw_pipe->Begin(total);
     *reinterpret_cast<TaskPacket*>(out) = {PacketKind::Task, size, task};
@@ -1451,6 +1487,15 @@ void Rasterizer::PrintPipeStats() {
     ring_reused_bytes = 0;
     ring_guest_copies = 0;
     ring_guest_bytes = 0;
+    std::printf("  constant ring epochs/s: drain %.0f, in-order task %.0f, GPU write %.0f, "
+                "submission %.0f; kept over %.0f writes and %.0f command drains/s; %.0f copies/s "
+                "left to stage B (ring in use)\n",
+                ring_epoch_causes[EpochDrain] / seconds, ring_epoch_causes[EpochTask] / seconds,
+                ring_epoch_causes[EpochWrite] / seconds,
+                ring_epoch_causes[EpochSubmission] / seconds, ring_writes_kept / seconds,
+                ring_command_drains_kept / seconds, ring_alloc_failures / seconds);
+    ring_epoch_causes = {};
+    ring_writes_kept = ring_command_drains_kept = ring_alloc_failures = 0;
     std::printf("  drains by reason/s:");
     for (u32 r = 0; r < DrawPipe::NumReasons; ++r) {
         if (const u64 n = draw_pipe->drains_by_reason[r]) {

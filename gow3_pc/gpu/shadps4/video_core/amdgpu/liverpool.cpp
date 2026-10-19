@@ -433,6 +433,17 @@ void Liverpool::ProcessLoop(std::stop_token stoken) {
 }
 
 namespace {
+/// gow3 19 Oct 2026: a memory wait may be met by a label the guest writes after it rewrote
+/// memory the GPU reads next: constant ring copies made before (by any queue) are not reused.
+struct GuestEpochOnExit {
+    Vulkan::Rasterizer* rasterizer;
+    ~GuestEpochOnExit() {
+        if (rasterizer) {
+            rasterizer->NewGuestEpoch();
+        }
+    }
+};
+
 /// gow3 18 Oct 2026: GOW3_FEWER_DRAINS=1 (multithreaded rendering): memory waits met by a fence
 /// still queued for the draw recording thread, nested compute buffers and compute memory waits
 /// do not drain the draw pipe. Off by default until it has run long enough without problems.
@@ -1441,6 +1452,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     if (dcb_stats) {
         ScanDcb(dcb, dcb_depth);
     }
+    if (rasterizer && dcb_depth == 0) {
+        rasterizer->NewGuestEpoch();
+    }
 
     cblock.Reset();
 
@@ -1884,16 +1898,21 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::EventWriteEos: {
                 const auto* event_eos = reinterpret_cast<const PM4CmdEventWriteEos*>(header);
                 if (rasterizer &&
-                    rasterizer->RunInOrder(&RunEventWriteEos, event_eos, sizeof(*event_eos))) {
+                    rasterizer->RunInOrder(&RunEventWriteEos, event_eos, sizeof(*event_eos),
+                                           Gow3Toggle::PipelinedTasks, true)) {
                     NotePendingFences(*event_eos);
+                    rasterizer->NoteRingWrite(event_eos->Address<VAddr>(), sizeof(u64));
                 }
                 break;
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
                 if (rasterizer) {
-                    if (rasterizer->RunInOrder(&RunEventWriteEop, event_eop, sizeof(*event_eop))) {
+                    if (rasterizer->RunInOrder(&RunEventWriteEop, event_eop, sizeof(*event_eop),
+                                               Gow3Toggle::PipelinedTasks, true)) {
                         NotePendingFences(*event_eop);
+                        rasterizer->NoteRingWrite(reinterpret_cast<VAddr>(event_eop->Address<u8>()),
+                                                  sizeof(u64));
                     }
                 } else {
                     SignalEop(*event_eop);
@@ -1906,7 +1925,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     break;
                 }
                 if (rasterizer->RunInOrder(&RunDmaData, dma_data, sizeof(PM4DmaData),
-                                           Gow3Toggle::PipelinedMemoryWrites) &&
+                                           Gow3Toggle::PipelinedMemoryWrites, true) &&
                     (dma_data->dst_sel == DmaDataDst::Memory ||
                      dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
                     rasterizer->NotePendingGpuWrite(dma_data->DstAddress<VAddr>(),
@@ -1924,7 +1943,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                            (count - 2) * sizeof(u32),
                                            Gow3WriteLog::WriteDataIntent);
                     if (rasterizer->RunInOrder(&RunWriteData, header, (count + 1) * sizeof(u32),
-                                               Gow3Toggle::PipelinedMemoryWrites)) {
+                                               Gow3Toggle::PipelinedMemoryWrites, true)) {
                         NotePendingWrite(*write_data, (count - 2) * sizeof(u32));
                         rasterizer->NotePendingGpuWrite(write_data->Address<VAddr>(),
                                                         (count - 2) * sizeof(u32));
@@ -1973,6 +1992,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::WaitRegMem: {
                 const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
+                const GuestEpochOnExit guest_epoch{rasterizer};
                 // ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
                 // gow3 diagnostics (GOW3_WAIT_TRACE=1): graphics waits on memory, 5 s statistics
                 // by address window and whether they were met at once.
@@ -2201,6 +2221,11 @@ template <bool is_indirect>
 Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     FIBER_ENTER(acb_task_name[vqid]);
     auto& queue = asc_queues[{vqid}];
+    if constexpr (!is_indirect) {
+        if (rasterizer) {
+            rasterizer->NewGuestEpoch();
+        }
+    }
 
     struct IndirectPatch {
         const PM4Header* header;
@@ -2482,6 +2507,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::WaitRegMem: {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
+            const GuestEpochOnExit guest_epoch{rasterizer};
             if (FewerDrains()) {
                 // Not drained up front: as on the graphics queue, a fence handed to the draw
                 // recording thread counts as written, and an unmet wait lets it catch up first.
@@ -2514,7 +2540,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
             if (rasterizer) {
                 ComputeRelease release{.packet = *release_mem, .pipe_id = queue.pipe_id};
-                rasterizer->RunInOrder(&RunComputeReleaseMem, &release, sizeof(release));
+                if (rasterizer->RunInOrder(&RunComputeReleaseMem, &release, sizeof(release),
+                                           Gow3Toggle::PipelinedTasks, true)) {
+                    rasterizer->NoteRingWrite(release_mem->Address<VAddr>(), sizeof(u64));
+                }
                 break;
             }
             release_mem->SignalFence(

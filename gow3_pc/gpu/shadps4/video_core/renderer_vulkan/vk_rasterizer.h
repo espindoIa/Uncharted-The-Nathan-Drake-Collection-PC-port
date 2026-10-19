@@ -122,8 +122,16 @@ public:
     /// thread while the draw pipeline is in use (PipelinedTasks), else here after a drain.
     using OrderedTask = void (*)(Rasterizer& rasterizer, const u8* data);
     /// Returns true when the task was handed to the recording thread (not run yet).
+    /// `writes_noted`: the caller passes the memory the task writes to NoteRingWrite (or
+    /// NotePendingGpuWrite), so constant ring copies elsewhere stay reusable.
     bool RunInOrder(OrderedTask task, const void* data, u32 size,
-                    u64 toggle = Gow3Toggle::PipelinedTasks);
+                    u64 toggle = Gow3Toggle::PipelinedTasks, bool writes_noted = false);
+    /// Stage A: GPU work queued for the recording thread writes [address, address + size):
+    /// constant ring copies of those bytes are not reused (NotePendingGpuWrite does this too).
+    void NoteRingWrite(VAddr address, u64 size);
+    /// Stage A: a guest submission (graphics or a compute ring's new packets) starts, or a
+    /// memory wait ends: the guest may have rewritten memory copied before.
+    void NewGuestEpoch();
     /// Stage A: the draw pipe position after the last handed-over packet, and whether the
     /// recording thread has run everything before a position.
     [[nodiscard]] u64 DrawPipeHead() const {
@@ -637,8 +645,43 @@ private:
     u64 ring_epoch = 1;
     VAddr ring_epoch_min = ~VAddr{0}, ring_epoch_max = 0; ///< bounds of this epoch's copies
     u64 ring_reused_bytes = 0, ring_reuse_checks = 0, ring_reuse_mismatches = 0;
-    void NextRingEpoch() {
+    /// gow3 19 Oct 2026: the 1 KiB lines this epoch's copies came from, as a hash table of epoch
+    /// tags (a collision only starts a new epoch early). A GPU write starts a new epoch only
+    /// over one of them (Gow3Toggle::RingPreciseWrites). U3 at 4K: 2.5 GB/s copied, about half of
+    /// it repeating a range copied in the same flush, ~40 MB/s reused with the bounds test.
+    static constexpr u32 RingLineBits = 15;
+    static constexpr u32 RingLineShift = 10;
+    std::unique_ptr<u64[]> ring_lines{new u64[1u << RingLineBits]{}};
+    static u32 RingLineSlot(VAddr line) {
+        return static_cast<u32>((line * 0x9E3779B97F4A7C15ull) >> (64 - RingLineBits));
+    }
+    void MarkRingLines(VAddr address, u64 size) {
+        for (VAddr line = address >> RingLineShift; line <= (address + size - 1) >> RingLineShift;
+             ++line) {
+            ring_lines[RingLineSlot(line)] = ring_epoch;
+        }
+    }
+    bool RingLinesOverlap(VAddr address, u64 size) const {
+        if (size > (4ull << 20)) {
+            return true; // not worth walking: a new epoch
+        }
+        for (VAddr line = address >> RingLineShift; line <= (address + size - 1) >> RingLineShift;
+             ++line) {
+            if (ring_lines[RingLineSlot(line)] == ring_epoch) {
+                return true;
+            }
+        }
+        return false;
+    }
+    /// What started each epoch: a drain, an in-order task, a GPU write, a guest submission.
+    enum RingEpochCause : u32 { EpochDrain, EpochTask, EpochWrite, EpochSubmission, EpochCauses };
+    std::array<u64, EpochCauses> ring_epoch_causes{};
+    u64 ring_writes_kept = 0;   ///< GPU writes inside the bounds that kept the epoch
+    u64 ring_command_drains_kept = 0;
+    u64 ring_alloc_failures = 0; ///< copies left to stage B: the ring was still in use
+    void NextRingEpoch(RingEpochCause cause = EpochDrain) {
         ++ring_epoch;
+        ++ring_epoch_causes[cause];
         ring_epoch_min = ~VAddr{0};
         ring_epoch_max = 0;
     }

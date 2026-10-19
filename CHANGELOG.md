@@ -6,6 +6,12 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork 0.5.0 "Expedition")
 
+- **Uncharted 3 runs a little faster with multithreaded rendering.** Every second, the GPU
+  thread copied 2.5 GB of the small data blocks the game's GPU jobs read (constants). Half of
+  them it had already copied, and almost none of those copies were reused. It now reuses a copy until something
+  could have changed those bytes: a GPU write over them, or a new submission from the game. At
+  4K with DLAA in the bar fight: +1.4% with DLSS model M, +6.6% with model K (about 102 FPS).
+
 - **Bug reports on this fork:** the fork's GitHub page now has Issues, with a form that asks for
   what the crash needs to be traced (boot.log, game version, graphics card, launcher settings).
 
