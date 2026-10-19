@@ -16,6 +16,18 @@ adds the work below on top of 0.3.0. Where both did the same thing, one was kept
   looked like a crash) or reused a command buffer still being read ("Invalid packet"). They now
   queue behind that fence. 8 minutes of play at those settings without a problem, 66-78 FPS
   against 52 without multithreading.
+- **Three more multithreaded freezes fixed** (Uncharted 3, found by restarting the game into
+  gameplay again and again): a fence written by the Vulkan recording thread into a protected page,
+  and two cases of a GPU interrupt delivered on a thread that already held the lock its handler
+  needed (the flip presents a frame). Fences from that thread now go through the backing view;
+  interrupts raised inside a handler or a GPU-side fault wait for the thread's next safe point.
+- **Faster when the game writes into memory the GPU just wrote** (Uncharted 3: ~30 times a
+  second): the game's own thread now waits for that GPU work, not the thread that feeds the GPU.
+  Uncharted 3, chapter 3 street, 4K, DLAA model M, alternating 15 s windows in one session:
+  55-56 FPS against 49-50 without it (p50 17.4 against 19.6 ms).
+- **Scripted play** (`tools/play.py`): start a game, press buttons and move the sticks for a set
+  time, get the current screen as a PNG after each step (taken inside the port, window focus not
+  needed), record and replay routes, compare screenshots, measure frame times.
 - **Sharper cutscenes above 1080p.** The cutscenes are 1080p movies (DLSS and FSR never touch
   them: the game draws each movie frame as one picture); their scale to the render resolution now
   uses Lanczos instead of bicubic (`GOW3_MOVIE_SCALER=bicubic` for the old filter).

@@ -124,13 +124,20 @@ def write_pad(tokens):
     PAD.write_text(tokens, encoding="ascii")
 
 
-def hold(tokens, ms):
+def hold(tokens, ms, args=None):
+    """Holds the tokens for ms; with --shot-at, the shot is taken that far into the hold."""
     state = load_state()
     if not game_running():
         sys.exit("The game is not running (python tools/play.py start <game>)")
     write_pad(tokens)
     trace(state, tokens)
-    time.sleep(ms / 1000)
+    started = time.time()
+    shot_at = getattr(args, "shot_at", 0) or 0
+    if 0 < shot_at < ms:
+        time.sleep(shot_at / 1000)
+        shot(width=args.width, after=time.time())
+        args.no_shot = True  # the shot was taken while held
+    time.sleep(max(0.0, ms / 1000 - (time.time() - started)))
     write_pad("")
     trace(state, "")
 
@@ -275,26 +282,26 @@ def finish(args, started):
 
 def cmd_press(args):
     started = time.time()
-    hold(" ".join(args.buttons), args.ms)
+    hold(" ".join(args.buttons), args.ms, args)
     finish(args, started)
 
 
 def cmd_do(args):
     started = time.time()
-    hold(args.tokens, args.ms)
+    hold(args.tokens, args.ms, args)
     finish(args, started)
 
 
 def cmd_move(args):
     started = time.time()
     extra = " " + " ".join(args.with_buttons) if args.with_buttons else ""
-    hold(stick(args.direction, "l") + extra, args.ms)
+    hold(stick(args.direction, "l") + extra, args.ms, args)
     finish(args, started)
 
 
 def cmd_look(args):
     started = time.time()
-    hold(stick(args.direction, "r"), args.ms)
+    hold(stick(args.direction, "r"), args.ms, args)
     finish(args, started)
 
 
@@ -318,7 +325,8 @@ def cmd_gameplay(args):
         recent = frame_stats(state, 2)
         if len(recent) == 2 and all(draws_per_frame(l) >= args.draws for l in recent):
             print(f"Gameplay ({draws_per_frame(recent[-1])} draws/frame)")
-            shot(width=args.width)
+            if (LIVE / "live.bmp").exists():  # builds before GOW3_LIVE_VIEW have none
+                shot(width=args.width)
             return
         hold("cross", 200)
         time.sleep(3.5)
@@ -522,6 +530,7 @@ def main():
 
     def with_shot(p):
         p.add_argument("--no-shot", action="store_true", help="no screenshot afterwards")
+        p.add_argument("--shot-at", type=int, default=0, help="take the shot this many ms into the hold")
         p.add_argument("--width", type=int, default=960)
         return p
 

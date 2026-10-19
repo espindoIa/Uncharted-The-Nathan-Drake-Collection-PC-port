@@ -438,6 +438,9 @@ private:
     bool FetchOldGpuBytes(VAddr page);
     /// The window tick of `page` when its GPU data can be fetched early (submitted), else 0.
     u64 FetchableWindowTick(VAddr page);
+    /// gow3: on the faulting (guest) thread, before the fetch request: waits for the submitted
+    /// GPU work that last wrote the page of `address`, so the GPU command thread does not.
+    void PrewaitPageWrites(VAddr address);
     void FinishPageFetch(VAddr page);
     bool arena_host_mapped = false;
     vk::UniqueCommandPool urgent_pool;

@@ -539,6 +539,8 @@ static std::atomic<u32> g_direct_page_reads{0};
 static std::array<std::atomic<u32>, 64> g_download_reasons{};
 static std::atomic<u32> g_old_byte_fetches{0};
 static std::array<std::atomic<u32>, 4> g_fetch_refused{}; // lazy, readback, no tick, open buffer
+static std::atomic<u32> g_fault_prewaits{0};               // PrewaitPageWrites that waited
+static std::atomic<u64> g_fault_prewait_us{0};
 
 static bool LazyWritesEnabled() {
     static const bool enabled = [] {
@@ -647,6 +649,11 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                             g_lazy_writes.exchange(0), g_lazy_cpu_wins.exchange(0),
                             static_cast<unsigned long long>(std::exchange(g_shared_writes_count, 0)),
                             g_direct_page_reads.exchange(0));
+                {
+                    const u32 prewaits = g_fault_prewaits.exchange(0);
+                    std::printf("  waited on the faulting thread first: %u (%.2f ms each)\n", prewaits,
+                                prewaits ? g_fault_prewait_us.exchange(0) / 1000.0 / prewaits : 0.0);
+                }
                 {
                     const u32 lazy_lines = g_guard_lazy_lines.exchange(0);
                     const u32 lines = g_guard_lines.exchange(0) + lazy_lines;
@@ -990,6 +997,14 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     if (assume_locks) {
         flush_request();
     } else {
+        // gow3 19 Oct 2026: a guest write into GPU-written memory. The GPU command thread fetches
+        // the page once the GPU work that wrote it is done (CopyFinishedGpuPage) and waited for
+        // that work itself: Uncharted 3 at 4K, ~140 a second, ~1.4 ms each, a fifth of that
+        // thread. This thread waits anyway: it waits for that work first, and the fetch then
+        // finds it done. Toggle: second word, FaultPrewait.
+        if (is_write && !Gow3Toggle::Disabled2(Gow3Toggle::FaultPrewait)) {
+            PrewaitPageWrites(device_addr);
+        }
         const auto queued = std::chrono::steady_clock::now();
         liverpool->SendCommand<true>(std::move(flush_request));
         if (!is_write) {
@@ -2392,6 +2407,34 @@ u64 BufferCache::FetchableWindowTick(VAddr page) {
         return 0;
     }
     return tick;
+}
+
+void BufferCache::PrewaitPageWrites(VAddr address) {
+    const VAddr page = Common::AlignDown(address, 4096);
+    u64 tick = 0;
+    {
+        std::shared_lock lock{gpu_ranges_mutex};
+        if (const auto it = gpu_write_window_tick.find(page >> 20); it != gpu_write_window_tick.end()) {
+            tick = it->second;
+        }
+        if (const auto it = gpu_write_page_tick.find(page >> 12); it != gpu_write_page_tick.end()) {
+            tick = std::max(tick, it->second);
+        }
+    }
+    auto* semaphore = scheduler.GetWorkSemaphore();
+    // Work in the open command buffer is submitted by the GPU command thread only (the download
+    // path takes it): not waited for here.
+    if (!tick || tick >= semaphore->CurrentTick() || semaphore->IsFree(tick)) {
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    // Bounded: if the GPU work ever needed this thread, the request below still goes ahead.
+    semaphore->WaitFor(tick, 50'000'000);
+    g_fault_prewaits.fetch_add(1, std::memory_order_relaxed);
+    g_fault_prewait_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now() - start)
+                                     .count(),
+                                 std::memory_order_relaxed);
 }
 
 void BufferCache::FinishPageFetch(VAddr page) {

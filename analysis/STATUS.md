@@ -1485,6 +1485,50 @@ Merge choices (details in the sections below and in CHANGELOG.md):
   now read when the first movie plays. Cutscenes are 1080p movies drawn as one quad (2 draws a
   frame, no upscaler run): their 4K scale (videodec2 WriteMovieCopy) is now Lanczos.
 
+### Scripted play, four more multithreaded freezes, fault prewait (19 Oct, evening)
+- tools/play.py: start/stop a game, pad tokens held for a time (sticks as directions or x,y),
+  a fresh shot after each action (or `--shot-at` inside the hold), every input recorded as a
+  GOW3_PAD_REPLAY route (`mark`/`save`, `replay`), `measure` (GOW3_FRAME_TIMES percentiles,
+  nvidia-smi, PresentMon when the account may trace: it needs admin or the "Performance Log
+  Users" group, S-1-5-32-559), `compare` (SSIM in numpy, changed pixels, heat map).
+  GOW3_LIVE_VIEW=<dir>: the presenter blits the presented image to 960 wide every 200 ms
+  (GOW3_LIVE_VIEW_MS/_WIDTH), written as live.bmp/live.txt off the GPU threads. The pad file is
+  re-read on its 100 ns write time on Windows (stat's whole seconds missed same-size edits).
+- Bench (C:\dev\bench: bench.sh, ab.sh): player's U3 ini on all three games (4K, DLAA, model M,
+  120 FPS cap, MT on), saves restored before each run, Continue into gameplay, stand still.
+  U3 chapter 3 (Cartagena street) before: 46.9-50.8 FPS, p50 20.9 ms, p99 34.6 ms, GPU 72-78%.
+  GPU profile there: 20.6 ms/frame of which 4.9 ms idle; DLSS evaluate (DLAA, model M, 4K) 7.8 ms,
+  cs 1c957b01 1.3 ms (one 1024-thread group, LDS sort), 1231 tiny cs 8f067540 0.7 ms. GPU ceiling
+  at these settings ~64 FPS. GPU command thread (stage A) profile: 37% draining the draw pipe
+  (compute IndirectBuffer 23.8%, LandDeferredFenceFor 10.9%), 21% SideQueueFetch for guest writes
+  into GPU-written pages (~140/s, ~1.4 ms each waiting for the GPU), real work ~30%.
+- Freezes found by the bench (hang watchdog thread reports, llvm-addr2line), all fixed:
+  1. Compute RELEASE_MEM label written by the Vulkan recording thread with a plain store into a
+     protected page: fault -> download through the GPU command thread -> drain -> flip on the draw
+     recording thread waiting for the recording thread. Labels there now always go through the
+     backing view (as SignalEop does); seen twice (GPU-written page, then CPU-write tracking).
+  2. IrqController::Signal re-entered on one thread (flip handler -> PrepareFrame poll -> held
+     fence -> GfxEop): second lock of the same mutex. Nested interrupts are delivered after the
+     handler.
+  3. Draw recording thread faulting inside TextureCache::FindImage (texture cache mutex held);
+     the inline fault handling landed readbacks, a held fence raised GfxEop, the flip handler's
+     PrepareFrame locked the same mutex. Interrupts raised during a GPU-side fault are held
+     (IrqController::HoldScope) and delivered at the thread's next safe point (draw pipe packet
+     end, ProcessCommands, command processor idle).
+- Fault prewait (toggle file second word, bit 1 = off): a guest write fault into GPU-written
+  memory waits on its own thread for the GPU work that wrote the page (gpu_write_window/page_tick,
+  submitted ticks only, 50 ms bound) before the GPU command thread fetches it. ~160 per 5 s, ~8 ms
+  each on the guest thread. A/B in one session (alternating 15 s windows): see CHANGELOG numbers.
+- Tried and dropped: no drain for compute IndirectBuffer packets (55.5 vs 55.3 FPS; the waits moved
+  to SyncSrtTables' pipe_write_ranges check: the graphics SRT walks read what the dispatches
+  write). pipe_write_ranges overflows at 256 dispatches (U3: ~1,230 a frame), after which every
+  walk drains: candidate for a CPU-bound scene, not measured.
+- DMA overtakes (GOW3_TEST_OVERTAKE_LOG): decision to leave them. DMA_DATA already waits for the
+  recorder-thread copies and fences (WaitHostCopies/WaitDeferredSignals); what it can pass is a
+  fence held for a ray-cast readback, which on the PS4 is an end-of-pipe write that completes after
+  the CP has already executed later DMA_DATA packets; holding the DMA instead would feed later
+  draws stale data (its destinations are read by the following GPU work).
+
 
 ## 18 October 2026: performance pass (GPU command thread), multithreaded-rendering hang
 

@@ -15,6 +15,8 @@ extern "C" __attribute__((returns_twice)) int gow3_setjmp(sigjmp_buf buffer);
 #endif
 
 extern "C" std::uint64_t runtime_disabled_optimizations;
+/// The toggle file's second number (Disabled2): switches added once the first 64 bits ran out.
+extern "C" std::uint64_t runtime_disabled_optimizations2;
 /// Recovery point for speculative guest memory reads on this thread (runtime_memory.c).
 extern "C" __thread sigjmp_buf* runtime_fault_recover;
 
@@ -85,6 +87,16 @@ enum : std::uint64_t {
 };
 inline bool Disabled(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations, __ATOMIC_RELAXED) & bit) != 0;
+}
+/// The toggle file's second number ("<first> <second>"); bit set: off.
+enum : std::uint64_t {
+    /// A guest write fault into GPU-written memory waits on its own thread for the GPU work that
+    /// wrote the page before the GPU command thread fetches it (19 Oct: ~140 a second in U3 at
+    /// 4K, ~1.4 ms each of the command thread's time waiting for the GPU).
+    FaultPrewait = 1,
+};
+inline bool Disabled2(std::uint64_t bit) {
+    return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;
 }
 } // namespace Gow3Toggle
 
