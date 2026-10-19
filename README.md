@@ -10,7 +10,8 @@ DLSS/DLAA in all three games, multithreaded rendering, smoother frame pacing and
 launcher of its own, and the US version (CUSA02320) with update 1.02 tested. It builds on the port
 by **BilalReloaded** ([GitHub](https://github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port)),
 whose releases up to 0.3.1 are merged in. What changed and when: [CHANGELOG.md](CHANGELOG.md).
-How commits and pull requests are written: [CONTRIBUTING.md](CONTRIBUTING.md).
+How commits and pull requests are written: [CONTRIBUTING.md](CONTRIBUTING.md). The plan up to
+1.0: [ROADMAP.md](ROADMAP.md).
 
 > **No game files are in this repository or its builds.** You need your own copy of the game
 > (the dumped CUSA02320 or CUSA02344 folder). This project is not affiliated with Sony, Naughty Dog or
