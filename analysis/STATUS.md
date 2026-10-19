@@ -1515,6 +1515,11 @@ Merge choices (details in the sections below and in CHANGELOG.md):
      PrepareFrame locked the same mutex. Interrupts raised during a GPU-side fault are held
      (IrqController::HoldScope) and delivered at the thread's next safe point (draw pipe packet
      end, ProcessCommands, command processor idle).
+  4. Caused by 3 (seen once, MT off, on the title screen): an end-of-pipe interrupt held that way
+     was the one that submits the flip (sceVideoOutSubmitEopFlip's handler runs
+     SubmitFlipInternal inline), and the GPU command thread then blocked in WaitVoLabel for that
+     flip's label without passing a safe point. Held interrupts are now delivered before that
+     wait too.
 - Fault prewait (toggle file second word, bit 1 = off): a guest write fault into GPU-written
   memory waits on its own thread for the GPU work that wrote the page (gpu_write_window/page_tick,
   submitted ticks only, 50 ms bound) before the GPU command thread fetches it. ~160 per 5 s, ~8 ms

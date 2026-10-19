@@ -25,6 +25,11 @@ adds the work below on top of 0.3.0. Where both did the same thing, one was kept
   second): the game's own thread now waits for that GPU work, not the thread that feeds the GPU.
   Uncharted 3, chapter 3 street, 4K, DLAA model M, alternating 15 s windows in one session:
   55-56 FPS against 49-50 without it (p50 17.4 against 19.6 ms).
+- **Where the frame time goes at 4K with DLAA.** At 4K DLAA all three games are limited by the
+  GPU, and much of it is DLSS itself: model M costs 7.8 ms a frame there, model K 2.2 ms
+  (Uncharted 3: 54 FPS with M, 61 with K). Drake's Fortune and Uncharted 2 run the same as before
+  at 4K DLAA M (94 and 64 FPS, GPU 93-94% busy); with model K or the DLSS Quality mode Uncharted 3
+  is then held by the port's draw recording thread at ~61 FPS (next to work on).
 - **Scripted play** (`tools/play.py`): start a game, press buttons and move the sticks for a set
   time, get the current screen as a PNG after each step (taken inside the port, window focus not
   needed), record and replay routes, compare screenshots, measure frame times.

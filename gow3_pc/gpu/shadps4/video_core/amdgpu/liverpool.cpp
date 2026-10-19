@@ -1972,6 +1972,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     if (rasterizer) {
                         rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
                     }
+                    // gow3 19 Oct 2026: an end-of-pipe interrupt held by a fault this thread
+                    // handled (IrqController::HoldScope) may be the one that submits the flip
+                    // this label waits for: delivered first, or the wait never ends (U3 froze
+                    // on the title screen, multithreaded rendering off).
+                    Platform::IrqC::Instance()->FlushHeld();
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
                     break;
                 }
