@@ -224,6 +224,9 @@ void Liverpool::ScanPackets(u32 queue, std::span<const u32> words, int depth) {
 }
 
 void Liverpool::ProcessCommands() {
+    // gow3: interrupts held by a guest fault this thread handled (IrqController::HoldScope):
+    // here no cache lock is held.
+    Platform::IrqC::Instance()->FlushHeld();
     // gow3: fences deferred until their ray-cast readbacks land are written as soon as those land
     // (checked every 64 packets: the semaphore query is a kernel call), not only per submission.
     if (rasterizer) {
@@ -298,6 +301,8 @@ void Liverpool::Process(std::stop_token stoken) {
 #endif
 
     while (!stoken.stop_requested()) {
+        // Interrupts held by a fault in the last packet (the guest may wait for them to submit).
+        Platform::IrqC::Instance()->FlushHeld();
         {
             const auto idle_start = std::chrono::steady_clock::now();
             std::unique_lock lk{submit_mutex};
@@ -729,24 +734,21 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
         if (backing) {
             rasterizer.NoteLabelWrite(label, sel == DataSelect::Data32Low ? 4 : 8);
         }
-        // gow3 19 Oct 2026: GPU writes recorded after this release (later in the stream) can
-        // protect the label's page before the Vulkan recording thread writes it. A plain store
-        // then faulted on that thread, and the fault's download waited for the GPU command thread,
-        // which waited for the draw pipe to drain, which (presenting a frame) waited for the
-        // recording thread: Uncharted 3 froze for good right after loading a save at 4K. The page
-        // is checked again when the label is written; GPU data there now came after the release,
-        // so the backing store (no fault) is the right order and needs no bookkeeping here.
-        auto& cache = rasterizer.GetBufferCache();
-        rasterizer.SignalAfterHostCopies([packet = release.packet, pipe_id, backing, &cache] {
+        // gow3 19 Oct 2026: the Vulkan recording thread must never fault on guest memory: a fault
+        // there downloads through the GPU command thread, which drains the draw pipe, which
+        // (presenting a frame) waits for the recording thread. A plain store into a protected
+        // page (GPU writes later in the stream, or CPU-write tracking of a bound buffer) froze
+        // Uncharted 3 for good after loading a save at 4K, twice. The label always goes through
+        // the backing view, as end-of-pipe labels do (SignalEop; the window is marked
+        // backing-written for the buffer cache); a plain store only where there is no backing.
+        rasterizer.SignalAfterHostCopies([packet = release.packet, pipe_id] {
             packet.SignalFence(
                 [pipe_id] {
                     Platform::IrqC::Instance()->SignalAsync(static_cast<Platform::InterruptId>(pipe_id));
                 },
                 [](VAddr, u16, u16) {},
-                [backing, &cache](void* address, u64 value, u32 num_bytes) {
-                    const VAddr page = reinterpret_cast<VAddr>(address) & ~VAddr{4095};
-                    const bool protectable = backing || cache.MayBeGpuWritten(page, 4096);
-                    if (!protectable || !Core::Memory::Instance()->TryWriteBacking(address, &value, num_bytes)) {
+                [](void* address, u64 value, u32 num_bytes) {
+                    if (!Core::Memory::Instance()->TryWriteBacking(address, &value, num_bytes)) {
                         std::memcpy(address, &value, num_bytes);
                     }
                 });
@@ -2211,6 +2213,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         // check one by one) and memory waits (they drain only while unmet, as on the graphics
         // queue): compute drains were up to 35% of the command thread in Uncharted 3 on a Ryzen
         // laptop. Off by default (see the graphics WaitRegMem).
+        // 19 Oct 2026: skipping the drain for nested buffers alone (their packets drain one by
+        // one) was measured in Uncharted 3 at 4K: 55.5 vs 55.3 FPS, p99 no better (the waits
+        // moved to the packets inside). Not kept.
         const bool pipelined_wait = FewerDrains() && (opcode == PM4ItOpcode::IndirectBuffer ||
                                                       opcode == PM4ItOpcode::WaitRegMem);
         if (rasterizer && opcode != PM4ItOpcode::Nop && opcode != PM4ItOpcode::SetShReg &&

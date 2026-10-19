@@ -26,6 +26,7 @@
 #include "common/assert.h"
 #include "common/thread.h"
 #include "common/types.h"
+#include "core/platform.h"
 
 namespace Vulkan {
 
@@ -204,6 +205,8 @@ private:
             }
             const u64 start = __rdtsc();
             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
+            // Interrupts held by a fault handled during the packet (IrqController::HoldScope).
+            Platform::IrqC::Instance()->FlushHeld();
             busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
             at += header->size;
             consumed.store(at, std::memory_order_release);

@@ -80,6 +80,10 @@ struct IrqController {
         // and in the order raised.
         thread_local u32 depth = 0;
         thread_local std::vector<InterruptId> raised_inside;
+        if (HoldDepth()) {
+            Held().push_back(irq);
+            return;
+        }
         if (depth) {
             raised_inside.push_back(irq);
             return;
@@ -91,6 +95,35 @@ struct IrqController {
         }
         raised_inside.clear();
         --depth;
+    }
+
+    /// gow3 19 Oct 2026: the GPU command and draw recording threads handle guest faults inline,
+    /// possibly inside cache code that holds its locks. Landing readbacks there writes the fences
+    /// held behind them, and their interrupts ran the flip handler in place: Presenter::
+    /// PrepareFrame locked the texture cache mutex that the faulting TextureCache::FindImage held
+    /// (Uncharted 3 froze on the title screen). Interrupts raised inside a HoldScope wait for the
+    /// thread's next safe point (FlushHeld: between draw pipe packets, at each command processor
+    /// packet), in the order raised.
+    struct HoldScope {
+        HoldScope() {
+            ++HoldDepth();
+        }
+        ~HoldScope() {
+            --HoldDepth();
+        }
+        HoldScope(const HoldScope&) = delete;
+        HoldScope& operator=(const HoldScope&) = delete;
+    };
+    void FlushHeld() {
+        auto& held = Held();
+        if (held.empty() || HoldDepth()) {
+            return;
+        }
+        std::vector<InterruptId> batch;
+        batch.swap(held);
+        for (const InterruptId irq : batch) {
+            Signal(irq);
+        }
     }
 
     /// gow3 18 Oct 2026: Signal on the interrupt delivery thread, in the order queued. The
@@ -121,6 +154,15 @@ struct IrqController {
     }
 
 private:
+    static u32& HoldDepth() {
+        thread_local u32 depth = 0;
+        return depth;
+    }
+    static std::vector<InterruptId>& Held() {
+        thread_local std::vector<InterruptId> held;
+        return held;
+    }
+
     void Deliver(InterruptId irq) {
         auto& ctx = irq_contexts[static_cast<u32>(irq)];
         std::unique_lock lock{ctx.m_lock};

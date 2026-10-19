@@ -6,11 +6,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 #include <boost/container/small_vector.hpp>
 #include "gow3_toggles.h"
 #include "common/assert.h"
+#include "core/platform.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
 #include "common/error.h"
@@ -153,6 +155,12 @@ struct PageManager::Impl {
         const auto is_gpu_thread = rasterizer->IsGpuSideThread();
         if (is_gpu_thread) {
             Gow3Stats::gpu_signal_faults.fetch_add(1, std::memory_order_relaxed);
+        }
+        // Interrupts of fences landed here wait for this thread's next safe point (it may hold
+        // cache locks the interrupt handlers take: IrqController::HoldScope).
+        std::optional<Platform::IrqController::HoldScope> hold_interrupts;
+        if (is_gpu_thread) {
+            hold_interrupts.emplace();
         }
         // gow3 18 Oct 2026: an instruction that keeps faulting on one page never gets past it
         // (Uncharted 3 rooftops: a read-modify-write into a page a readback still protected, the
