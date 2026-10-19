@@ -10,8 +10,9 @@ stay `gow3` (`gow3-probe.exe`, `GOW3_*` variables, `gow3_*` files) — that is n
 unless it sits behind the game-hooks gate (below).
 
 **Locations.**
-- The repo lives in `C:\Users\marce\Downloads\Projetos\Uncharted-PC-Port`. `C:\dev\uncharted` is a junction to it; build through that path, because the CMake cache in `gow3_pc/out/gpu` was generated there.
-- The playable port is in `Downloads\Jogos_e_Mods\Jogos\Uncharted-PC-Port`: `Uncharted\` is the extracted package, `Jogo\CUSA02344\` the game.
+- The repo is `C:\dev\uncharted` (a real folder since 19 Oct; the old `Downloads\Projetos\Uncharted-PC-Port` copy and junction are gone). The CMake cache in `gow3_pc/out/gpu` was generated at this path.
+- The playable port is in `Downloads\Jogos_e_Mods\Jogos\Uncharted-PC-Port`: `Uncharted\` is the extracted package (the player opens `Uncharted Launcher.exe` there), `Jogo\CUSA02344\` the game (version 1.00 without update 1.02: patches written for 1.02 are skipped), `Versoes-antigas\` earlier installs.
+- Scripts outside the repo, in `C:\dev`: `update_port.sh` installs `dist/Uncharted-windows.zip` as the player's `Uncharted\` (old one to `Versoes-antigas`, `analysis/uncharted-user` with saves carried over; then copy the player's `nvngx_dlss.dll` from the old `gow3_pc/out` if missing). `pkgclean.sh` boots U3 from the zip extracted into an empty folder. `bench/` holds the benchmark and frame-pacing scripts (`bench.sh <u1|u2|u3> <name>`, `pace.sh`, `timeline.py`). Close the player's launcher/game before `update_port.sh`.
 - Remotes:
   - `origin` is the fork, `espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port`, and the work is on branch `claude/dlss-uncharted`.
   - `upstream` is BilalReloaded's repo. Its 0.3.0 is merged into the branch; the merge choices are listed under "Fork (espindoIa) notes" in `analysis/STATUS.md`.
@@ -58,6 +59,13 @@ The toolchain is MSYS2 CLANG64. From Git Bash, wrap commands like this:
 - Upscalers live in `shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp` (FSR 3.1, FSR 4, TAA, DLSS). DLSS goes through the optional MIT bridge `gpu/dlss_bridge` (`gow3_dlss.dll`), loaded at run time next to `nvngx_dlss.dll`.
 - A new setting usually touches four places: `gow3_settings.h`/`.cpp` (parse in `Set`, write in `Current`), the menu, the launcher, and possibly `probe_uncharted.py`.
 
+**GPU pipeline and flips.** The GPU command thread parses PM4 packets, a draw recording thread (DrawPipe) prepares draws, and a recorder thread writes Vulkan commands. Flips go `VideoOutDriver::SubmitFlipInternal` → `PrepareFrame` → present thread (frame limiter) → swap thread (`vk_swapchain.cpp`); the guest-visible flip waits for its fences separately (`shadps4/core/libraries/videoout/driver.cpp`).
+
+**Runtime toggles and diagnostics.**
+- `analysis/uncharted-user/disabled-optimizations.txt` (`GOW3_TOGGLE_FILE`) is read live: "<first> <second>" bit masks, bit set = optimization off. The bits are the enums in `gpu/shim/gow3_toggles.h` (`Disabled()` / `Disabled2()`); new performance work goes behind a new bit so it can be A/B'd in one run.
+- `GOW3_FRAME_LOG=<file>` logs flip events (S/P/Q/C, steady-clock ms); `GOW3_DISPLAY_LOG=<file>` logs on-screen times via VK_KHR_present_wait plus `<file>.gpu` GPU completion; `GOW3_GPU_PROFILE`, `GOW3_FRAME_TIMES`, `GOW3_FRAME_STATS=1` add more.
+- `tools/play.py` drives a game from scripted input (replays, `--burst`, `--marks`) for closed-loop tests.
+
 **Analysis material.**
 - `analysis/<game>/boot-linked.bin` holds the linked guest images for disassembly. At run time the guest base is `0xb400000`.
 - `analysis/STATUS.md` is the detailed engineering log: measurements, causes ruled out, open issues. `analysis/PLAN.md` is the plan and test list.
@@ -68,3 +76,4 @@ The toolchain is MSYS2 CLANG64. From Git Bash, wrap commands like this:
 - Code comments explain the why with dated evidence (e.g. "17 Oct profile: …"); match that density and style.
 - Never commit `gow3_pc/stat-multipliers-test.ini` or the dirty submodule `gow3_pc/gpu/third_party/fsr-vulkan`. Stage files by name. `.claude/ship.md` has these ship rules.
 - No game files, dumps, saves or logs in commits (`export_github.sh` refuses them too).
+- Game test runs: short by default (tens of seconds); long runs only for stability soaks or bug hunting. Only one game instance at a time (the player may be playing too); performance claims need an A/B at the player's settings (4K, 120 FPS cap, DLAA, multithreading on) that beats run-to-run noise.
