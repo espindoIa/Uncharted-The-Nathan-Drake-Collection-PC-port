@@ -94,6 +94,9 @@ enum : std::uint64_t {
     /// wrote the page before the GPU command thread fetches it (19 Oct: ~140 a second in U3 at
     /// 4K, ~1.4 ms each of the command thread's time waiting for the GPU).
     FaultPrewait = 1,
+    /// A compute queue INDIRECT_BUFFER packet does not drain the draw pipe (its packets pass the
+    /// drain check one by one, as on the graphics queue). U3 at 4K DLAA M: +2% FPS, p99 -3 ms.
+    ComputeNestedNoDrain = 4,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

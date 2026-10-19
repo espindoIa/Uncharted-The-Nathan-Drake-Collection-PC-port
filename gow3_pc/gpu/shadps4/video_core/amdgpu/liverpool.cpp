@@ -2218,11 +2218,15 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         // check one by one) and memory waits (they drain only while unmet, as on the graphics
         // queue): compute drains were up to 35% of the command thread in Uncharted 3 on a Ryzen
         // laptop. Off by default (see the graphics WaitRegMem).
-        // 19 Oct 2026: skipping the drain for nested buffers alone (their packets drain one by
-        // one) was measured in Uncharted 3 at 4K: 55.5 vs 55.3 FPS, p99 no better (the waits
-        // moved to the packets inside). Not kept.
-        const bool pipelined_wait = FewerDrains() && (opcode == PM4ItOpcode::IndirectBuffer ||
-                                                      opcode == PM4ItOpcode::WaitRegMem);
+        // 19 Oct 2026: nested buffers never drain (toggle second word, ComputeNestedNoDrain): the
+        // packet touches no cache and every packet inside it passes this check. Uncharted 3 at
+        // 4K DLAA model M, alternating 15 s windows in one session, two rounds: 55.5/56.4 FPS
+        // against 54.8/54.9, p99 24.5/23.7 against 28.8/25.2 ms. Merging the written ranges of
+        // pipelined dispatches as well (fewer SRT-walk drains) gave no more (55.8/55.5).
+        const bool pipelined_wait =
+            (opcode == PM4ItOpcode::IndirectBuffer &&
+             (FewerDrains() || !Gow3Toggle::Disabled2(Gow3Toggle::ComputeNestedNoDrain))) ||
+            (FewerDrains() && opcode == PM4ItOpcode::WaitRegMem);
         if (rasterizer && opcode != PM4ItOpcode::Nop && opcode != PM4ItOpcode::SetShReg &&
             opcode != PM4ItOpcode::SetQueueReg && opcode != PM4ItOpcode::DispatchDirect &&
             opcode != PM4ItOpcode::DispatchIndirect && opcode != PM4ItOpcode::ReleaseMem &&

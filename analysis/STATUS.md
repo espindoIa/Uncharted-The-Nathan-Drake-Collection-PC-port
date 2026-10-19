@@ -1532,6 +1532,10 @@ Merge choices (details in the sections below and in CHANGELOG.md):
   from ~4,000 to ~1,250, but FPS stayed (base 61.4/61.2, merge 60.8/60.5, nested 61.4/60.1, both
   62.2/58.7; p99 within 20.6-23.4 ms everywhere): stage B (draw recording) is then ~90% busy and
   stage A waits for it instead. Not kept; useful again once stage B is faster.
+  Measured again at the player's DLAA model M (GPU-limited, same protocol): base 54.8/54.9 FPS
+  (p99 28.8/25.2), merge 56.1/54.6, nested 55.5/56.4 (p99 24.5/23.7), both 55.8/55.5. The nested
+  no-drain is kept (default on, toggle second word bit 4 = off); the merge adds nothing over it
+  and stays out.
 - Settings, same scene, current build: DLSS evaluate (DLAA 4K) model M 7.8 ms, model K 2.2 ms.
   DLAA K: 60.8 FPS, p50 15.9, p99 23.6 ms, GPU 64% (CPU-bound); DLSS Quality M (2560x1440):
   60.5 FPS, GPU 70%. Before/after at the player's settings (same protocol, 0.3.0 package copy vs

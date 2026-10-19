@@ -24,7 +24,9 @@ adds the work below on top of 0.3.0. Where both did the same thing, one was kept
 - **Faster when the game writes into memory the GPU just wrote** (Uncharted 3: ~30 times a
   second): the game's own thread now waits for that GPU work, not the thread that feeds the GPU.
   Uncharted 3, chapter 3 street, 4K, DLAA model M, alternating 15 s windows in one session:
-  55-56 FPS against 49-50 without it (p50 17.4 against 19.6 ms).
+  55-56 FPS against 49-50 without it (p50 17.4 against 19.6 ms). Nested compute command
+  buffers no longer wait for the draw recording thread either: +2% there (two rounds: 55.5 and
+  56.4 FPS against 54.8 and 54.9), p99 ~27 -> ~24 ms.
 - **Where the frame time goes at 4K with DLAA.** At 4K DLAA all three games are limited by the
   GPU, and much of it is DLSS itself: model M costs 7.8 ms a frame there, model K 2.2 ms
   (Uncharted 3: 54 FPS with M, 61 with K). Drake's Fortune and Uncharted 2 run the same as before
