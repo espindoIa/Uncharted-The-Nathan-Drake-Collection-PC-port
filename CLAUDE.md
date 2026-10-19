@@ -11,7 +11,7 @@ unless it sits behind the game-hooks gate (below).
 
 **Locations.**
 - The repo is `C:\dev\uncharted` (a real folder since 19 Oct; the old `Downloads\Projetos\Uncharted-PC-Port` copy and junction are gone). The CMake cache in `gow3_pc/out/gpu` was generated at this path.
-- The playable port is in `Downloads\Jogos_e_Mods\Jogos\Uncharted-PC-Port`: `Uncharted\` is the extracted package (the player opens `Uncharted Launcher.exe` there), `Jogo\CUSA02320\` the game (US) with `Jogo\CUSA02320-patch\` its update 1.02 (since 19 Oct; earlier Europe's CUSA02344 1.00), `Versoes-antigas\` earlier installs.
+- The playable port is in `Downloads\Jogos_e_Mods\Jogos\Uncharted-PC-Port`: `Uncharted\` is the extracted package (the player opens `Uncharted Launcher.exe` there), `Jogo\CUSA02320\` the game (US) with `Jogo\CUSA02320-patch\` its update 1.02 (since 19 Oct; earlier Europe's CUSA02344 1.00). Keep only this one Uncharted folder (the user asked, 19 Oct): no old installs, test copies or game PKGs elsewhere.
 - Scripts outside the repo, in `C:\dev`: `update_port.sh` installs `dist/Uncharted-windows.zip` as the player's `Uncharted\` (replaces the old one; `analysis/uncharted-user` with saves and the player's `nvngx_dlss.dll` carried over). `pkgclean.sh` boots U3 from the zip extracted into an empty folder (delete that folder afterwards). `bench/` holds the benchmark and frame-pacing scripts (`bench.sh <u1|u2|u3> <name>`, `pace.sh`, `timeline.py`). Close the player's launcher/game before `update_port.sh`.
 - Remotes:
   - `origin` is the fork, `espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port`, and the work is on `main` (the former `claude/dlss-uncharted` branch was merged into it and removed, 19 Oct).
