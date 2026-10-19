@@ -4,7 +4,7 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
-## 19 October 2026 (fork, after 0.3.0, unreleased)
+## 19 October 2026 (fork 0.4.0, Expedition Edition)
 
 This fork ([espindoIa](https://github.com/espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port))
 adds the work below on top of 0.3.0, and has 0.3.1 (next section) merged in. Where both did the
