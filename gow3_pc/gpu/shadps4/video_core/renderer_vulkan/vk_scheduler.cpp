@@ -22,6 +22,7 @@
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_submit_log.h"
 #include "gow3_threads.h"
 
 namespace Vulkan {
@@ -483,6 +484,10 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 
     current_cmdbuf = command_pool.Commit();
     Check(current_cmdbuf.begin(begin_info));
+    if (log_id >= 0) {
+        log_slot = SubmitLog::Begin(instance, current_cmdbuf);
+        log_slot_tick = CurrentTick();
+    }
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
     dynamic_state.Invalidate();
@@ -498,7 +503,11 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
+    const bool log = log_id >= 0 && SubmitLog::Enabled();
+    SubmitLog::SubmitTimes times{};
+    times.start = log ? SubmitLog::NowMs() : 0.0;
     std::scoped_lock lk{submit_mutex};
+    times.locked = log ? SubmitLog::NowMs() : 0.0;
     const u64 signal_value = work_semaphore.NextTick();
 
 #if TRACY_GPU_ENABLED
@@ -519,8 +528,10 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         profiler->Mark(0x5B317ull, [] { return std::string{"(between submissions: GPU idle)"}; });
     }
     SyncRecording();
+    times.recorded = log ? SubmitLog::NowMs() : 0.0;
     // Guest memory copies into staging read by this submission (copy threads).
     WaitHostCopies();
+    times.copied = log ? SubmitLog::NowMs() : 0.0;
     if (host_read_barrier) {
 #pragma push_macro("MemoryBarrier")
 #undef MemoryBarrier
@@ -531,6 +542,10 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         current_cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
                                        vk::PipelineStageFlagBits::eHost, {}, to_host, {}, {});
 #pragma pop_macro("MemoryBarrier")
+    }
+    const u32 submitted_slot = log ? log_slot : ~0u;
+    if (log) {
+        SubmitLog::End(current_cmdbuf, submitted_slot);
     }
     Check(current_cmdbuf.end());
 
@@ -579,6 +594,11 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     }
     if (submit_result==vk::Result::eErrorDeviceLost) { ReportCheckpoints(); DumpDeviceFault(instance); }
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
+    if (log) {
+        times.submitted = SubmitLog::NowMs();
+        SubmitLog::Submitted(log_id, &work_semaphore, signal_value, log_slot_tick, submitted_slot,
+                             info.num_wait_semas, times);
+    }
 
     work_semaphore.Refresh();
     AllocateWorkerCommandBuffers();

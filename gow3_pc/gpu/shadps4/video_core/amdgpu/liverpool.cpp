@@ -36,6 +36,8 @@
 #include "gow3_write_log.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderdoc.h"
+#include "core/libraries/videoout/video_out.h"
+#include "video_core/renderer_vulkan/vk_submit_log.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 namespace AmdGpu {
@@ -854,10 +856,21 @@ bool BehindHeldFence(Vulkan::Rasterizer& rasterizer, Fn&& fn, VAddr label = 0, u
 
 void SignalFlip(Vulkan::Rasterizer& rasterizer, const u8*) {
     rasterizer.WaitDeferredSignals();
-    const auto signal = [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip); };
+    const auto signal = [] {
+        Vulkan::SubmitLog::Event("J");
+        Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
+    };
+    // A flip held behind a ray-cast fence: its frame is prepared and presented now, in stream
+    // order (VideoOutDriver::PrepareNextEopFlip, toggle second word 16).
+    if (rasterizer.GetBufferCache().HasDeferredSignals() &&
+        !Gow3Toggle::Disabled(Gow3Toggle::OrderedGuestWrites)) {
+        Libraries::VideoOut::PrepareEopFlipAtPacket();
+    }
     if (BehindHeldFence(rasterizer, signal)) {
+        Vulkan::SubmitLog::Event("I", "1");
         return;
     }
+    Vulkan::SubmitLog::Event("I", "0");
     NoteOvertake(rasterizer, "flip interrupt", 0);
     signal();
 }
@@ -1480,6 +1493,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     // gow3: after the writes before it (the buffer label: WriteData, which
                     // may still be queued on the draw recording thread).
                     if (rasterizer) {
+                        Vulkan::SubmitLog::Event("N");
                         rasterizer->RunInOrder(&SignalFlip, header, sizeof(u32),
                                                Gow3Toggle::PipelinedMemoryWrites);
                     } else {

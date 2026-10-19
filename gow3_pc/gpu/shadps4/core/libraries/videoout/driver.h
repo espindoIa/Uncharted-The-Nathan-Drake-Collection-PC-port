@@ -95,6 +95,12 @@ public:
 
     bool SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
 
+    /// gow3: an end-of-pipe flip the guest submitted (sceVideoOutSubmitEopFlip), in order.
+    void RegisterEopFlip(VideoOutPort* port, s32 index, s64 flip_arg);
+    /// gow3: prepares and presents the next registered end-of-pipe flip's frame now (its flip
+    /// packet was reached); its interrupt later completes the flip without preparing it again.
+    void PrepareNextEopFlip();
+
 private:
     struct Request {
         Vulkan::Frame* frame;
@@ -147,6 +153,18 @@ private:
     std::queue<Request> presents;
     u64 early_presented = 0;
     u64 early_completed = 0;
+
+    /// gow3: registered end-of-pipe flips whose interrupt has not come yet; the first
+    /// `eop_prepared` of them have their frame prepared (PrepareNextEopFlip).
+    struct EopFlip {
+        VideoOutPort* port;
+        s32 index;
+        s64 flip_arg;
+        Vulkan::Frame* frame = nullptr;
+    };
+    std::mutex eop_mutex;
+    std::deque<EopFlip> eop_flips;
+    size_t eop_prepared = 0;
 };
 
 } // namespace Libraries::VideoOut

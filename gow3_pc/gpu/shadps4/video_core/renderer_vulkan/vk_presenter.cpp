@@ -45,6 +45,7 @@
 #include <thread>
 #include <vector>
 #include <vk_mem_alloc.h>
+#include "video_core/renderer_vulkan/vk_submit_log.h"
 #ifdef MemoryBarrier
 #undef MemoryBarrier // gow3: winnt.h macro (through fmt), clashes with vk::MemoryBarrier
 #endif
@@ -144,6 +145,9 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
       texture_cache{rasterizer->GetTextureCache()} {
     const u32 num_images = swapchain.GetImageCount();
     const vk::Device device = instance.GetDevice();
+    draw_scheduler.SetLogId(0);
+    present_scheduler.SetLogId(1);
+    flip_scheduler.SetLogId(2);
 
     // Create presentation frames.
     present_frames.resize(num_images);
@@ -620,7 +624,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         texture_cache.UpdateImage(image_id);
     }
 
+    SubmitLog::Event("F0", "%llx", static_cast<unsigned long long>(cpu_address));
     Frame* frame = GetRenderFrame();
+    SubmitLog::Event("F1", "%u", frame->id);
 
     const auto frame_subresources = vk::ImageSubresourceRange{
         .aspectMask = vk::ImageAspectFlagBits::eColor,
@@ -844,6 +850,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     SubmitInfo info{};
     draw_scheduler.Flush(info);
     WatchGpuDone(draw_scheduler.GetWorkSemaphore(), frame->ready_tick);
+    SubmitLog::Event("F2", "%u %llu", frame->id, static_cast<unsigned long long>(frame->ready_tick));
 
     // gow3: the GPU command thread runs at most GOW3_FRAMES_AHEAD (default 1) guest frames
     // ahead of the GPU: it waits here for the frame that many flips back. When the GPU is the
@@ -883,6 +890,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                     buffer_cache.PollReadbacksNow();
                 }
                 draw_scheduler.Wait(tick);
+                SubmitLog::Event("F3", "%u %llu", frame->id, static_cast<unsigned long long>(tick));
             }
         }
     }
@@ -1132,12 +1140,16 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     }
 
     // Recreate the swapchain if the window was resized.
+    SubmitLog::Event("A0", "%u %llu %d", frame->id, static_cast<unsigned long long>(frame->ready_tick),
+                     int(is_game_frame));
     swapchain.UpdateVsync();
     if (window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight()) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
 
-    if (!swapchain.AcquireNextImage()) {
+    const bool acquired = swapchain.AcquireNextImage();
+    SubmitLog::Event("A1", "%u", frame->id);
+    if (!acquired) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
         if (!swapchain.AcquireNextImage()) {
             // User resizes the window too fast and GPU can't keep up. Skip this frame.
@@ -1271,6 +1283,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
     scheduler.Flush(info);
+    SubmitLog::Event("A2", "%u", frame->id);
     if (is_game_frame && !is_reusing_frame && !instance.HasPresentWait()) {
         WatchDisplay(instance.GetDevice(), frame->present_done);
     }
@@ -1282,6 +1295,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
     }
+    SubmitLog::Event("A3", "%u", frame->id);
 
     free_frame();
     if (!is_reusing_frame && is_game_frame) {

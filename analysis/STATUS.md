@@ -1585,7 +1585,29 @@ Merge choices (details in the sections below and in CHANGELOG.md):
     4% -> 7.6-8.4%).
   - Left: about every fifth frame the GPU finishes two frames within ~1 ms (.gpu log), although
     each frame's last batch was submitted ~15 ms apart; ~14% of U2's on-screen intervals are still
-    over 25 ms. Not explained yet (the frames-ahead wait in PrepareFrame sees the same late tick).
+    over 25 ms. Explained and fixed below (fix 2).
+  - Cause (GOW3_SUBMIT_LOG=<file>, new: every draw/present/flip submission with its CPU phases,
+    GPU start/end timestamps and done time; PrepareFrame F0-F3, Present A0-A3, flip packet N,
+    SignalFlip I (1 = held), deferred interrupt J, SubmitFlip S; C:\devench\subpace.py). The
+    late frames are end-of-pipe flips held behind a ray-cast fence: the flip packet reaches the
+    recording thread (I 1), its interrupt fires 3-18 ms later when the readback lands (J), and only
+    then did PrepareFrame submit the frame's last batch (post-process; its ready tick). By then the
+    next frame's largest submission (~9.5 ms of GPU work, submitted by the GPU command thread right
+    after its flip packet) was queued ahead of it, so the ready tick finished 0.1 ms before the
+    next frame's: e.g. tick 12567 GPU -0.6..8.9 ms, then ticks 12568 (frame N) and 12569 (N+1) done
+    at 9.2/9.3 ms. Ruled out by the same log: GetRenderFrame never waited (p99 0.0 ms), host-copy
+    waits in submissions p99 0.0 ms, recording syncs p99 0.1 ms, 2 of 18684 submissions took
+    another tick than the one at their start, GPU idle between submissions p50 0.
+  - Fix 2 (toggle second word 16): an end-of-pipe flip's frame is prepared and presented when its
+    flip packet is reached in stream order (SignalFlip -> VideoOutDriver::PrepareNextEopFlip, the
+    flips registered in order at sceVideoOutSubmitEopFlip); the interrupt then only completes the
+    flip (status, events, labels), still after the readbacks. One U2 session, 7 s windows, three
+    each: on screen >25 ms 0.2/0.4/0.6% vs off 17.8/20.3/17.5%, p99 24.1/19.9/19.6 vs
+    31.3/31.6/31.3 ms, frames per window 463/465/468 vs 433/439/429 (~66.5 vs ~62 FPS). U3, one
+    session, 5 s windows (scene heavier as it ran, both states): >25 ms off/on 2.3/4.2, 4.9/5.6,
+    14.2/14.7, 78.6/51.3%, frames 258/260, 247/252, 226/225, 126/158: no change beyond noise.
+    Image checked at the U2 bench view. Not checked: U1 (single-threaded rendering by default, so
+    the flip is not run from the draw pipe there).
 
 
 ## 18 October 2026: performance pass (GPU command thread), multithreaded-rendering hang

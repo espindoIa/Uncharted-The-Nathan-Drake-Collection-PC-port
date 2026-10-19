@@ -4,6 +4,7 @@
 #include "video_core/amdgpu/pm4_cmds.h"
 #include <cstring>
 #include <functional>
+#include "video_core/renderer_vulkan/vk_submit_log.h"
 #include "video_core/renderer_vulkan/vk_draw_pipe.h"
 #include <algorithm>
 #include <cmath>
@@ -708,6 +709,7 @@ void VideoOutDriver::DrawLastFrame() {
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
                                 bool is_eop /*= false*/) {
     LogFrameEvent('S');
+    Vulkan::SubmitLog::Event("S", "%d %d", index, int(is_eop));
     {
         std::unique_lock lock{port->port_mutex};
         if (index != -1 && port->flip_status.flip_pending_num > 16) {
@@ -756,6 +758,64 @@ static void QueueFlipInOrder(Vulkan::Rasterizer& rasterizer, const u8* data) {
     }
 }
 
+void VideoOutDriver::RegisterEopFlip(VideoOutPort* port, s32 index, s64 flip_arg) {
+    std::scoped_lock lock{eop_mutex};
+    eop_flips.push_back({.port = port, .index = index, .flip_arg = flip_arg});
+}
+
+// gow3 19 Oct 2026: an end-of-pipe flip's interrupt waits for the ray-cast readbacks queued
+// before it (SignalFlip), and the frame used to be prepared only then. Uncharted 2 at 4K DLAA
+// (GOW3_SUBMIT_LOG): the flip packet reached the recording thread, the interrupt came 3-18 ms
+// later, and by then the next frame's largest submission (~9.5 ms of GPU work) was queued:
+// the frame's last submission (post-process, its ready tick) ran after it, so every few frames
+// two frames finished on the GPU 0.1 ms apart and one stayed on screen 30+ ms. The frame is now
+// prepared and presented when its flip packet is reached, in stream order; the interrupt (flip
+// status, events, labels) still waits for the readbacks. Toggle second word 16: off.
+void VideoOutDriver::PrepareNextEopFlip() {
+    if (Gow3Toggle::Disabled2(Gow3Toggle::PrepareAtFlipPacket) ||
+        Gow3Toggle::Disabled2(Gow3Toggle::PresentBeforeFlip)) {
+        return;
+    }
+    EopFlip flip;
+    {
+        std::scoped_lock lock{eop_mutex};
+        // The prepared ones wait for their interrupts; the next one is this packet's flip.
+        if (eop_prepared >= eop_flips.size()) {
+            return;
+        }
+        flip = eop_flips[eop_prepared];
+    }
+    if (flip.index < 0) {
+        return;
+    }
+    const auto& buffer = flip.port->buffer_slots[flip.index];
+    if (buffer.group_index < 0) {
+        return;
+    }
+    Vulkan::SubmitLog::Event("E", "%d", flip.index);
+    Vulkan::Frame* frame = presenter->PrepareFrame(flip.port->groups[buffer.group_index],
+                                                   buffer.address_left);
+    {
+        // Interrupts of earlier flips may have removed entries meanwhile: this flip is the
+        // first unprepared one still.
+        std::scoped_lock lock{eop_mutex};
+        eop_flips[eop_prepared].frame = frame;
+        ++eop_prepared;
+    }
+    {
+        std::scoped_lock lock{mutex};
+        presents.push({
+            .frame = frame,
+            .port = flip.port,
+            .flip_arg = flip.flip_arg,
+            .index = flip.index,
+            .eop = true,
+            .present_only = true,
+        });
+    }
+    request_cv.notify_one();
+}
+
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
     // gow3 diagnostics (GOW3_FINISH_AT_FLIP=1): the GPU finishes all work before each flip, so the
     // GPU work of consecutive frames never overlaps (Uncharted 3's cloth flicker shows only above
@@ -768,8 +828,27 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
         presenter->GetRasterizer().Finish();
     }
     AmdGpu::g_gow3_flips.fetch_add(1, std::memory_order_relaxed);
-    Vulkan::Frame* frame;
-    if (index == -1) {
+    // gow3: an end-of-pipe flip whose frame was prepared at its flip packet (PrepareNextEopFlip).
+    Vulkan::Frame* frame = nullptr;
+    if (is_eop) {
+        std::scoped_lock lock{eop_mutex};
+        if (!eop_flips.empty()) {
+            const EopFlip flip = eop_flips.front();
+            eop_flips.pop_front();
+            if (eop_prepared) {
+                --eop_prepared;
+                if (flip.port == port && flip.index == index) {
+                    frame = flip.frame;
+                } else {
+                    LOG_ERROR(Lib_VideoOut, "Flip prepared for buffer {} but buffer {} flipped",
+                              flip.index, index);
+                }
+            }
+        }
+    }
+    const bool prepared = frame != nullptr;
+    if (prepared) {
+    } else if (index == -1) {
         frame = presenter->PrepareBlankFrame(false);
     } else {
         const auto& buffer = port->buffer_slots[index];
@@ -783,8 +862,9 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
     // The flips waited behind ray-cast readbacks before reaching the screen: in Uncharted 2 at 4K
     // the guest submitted them evenly (p99 20 ms at p50 15) but they were presented in bursts
     // (38 ms, then two 0.1 ms apart: p99 39 ms, 1% low 26 FPS). Toggle second word 8: off.
-    const bool present_early = !Gow3Toggle::Disabled2(Gow3Toggle::PresentBeforeFlip);
-    if (present_early) {
+    // A frame prepared at its flip packet was presented then.
+    const bool present_early = prepared || !Gow3Toggle::Disabled2(Gow3Toggle::PresentBeforeFlip);
+    if (present_early && !prepared) {
         {
             std::scoped_lock lock{mutex};
             presents.push({

@@ -140,6 +140,9 @@ s32 PS4_SYSV_ABI sceVideoOutAdjustColor(s32 handle, const SceVideoOutColorSettin
 
 // Internal system functions
 s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, void** unk);
+/// gow3: the GPU reached an end-of-pipe flip packet: prepare and present its frame now
+/// (VideoOutDriver::PrepareNextEopFlip).
+void PrepareEopFlipAtPacket();
 
 void RegisterLib(Core::Loader::SymbolsResolver* sym);
 

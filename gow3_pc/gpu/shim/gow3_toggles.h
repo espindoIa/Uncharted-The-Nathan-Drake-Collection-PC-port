@@ -100,6 +100,10 @@ enum : std::uint64_t {
     /// A flip's frame is presented as soon as it is prepared; the guest-visible flip still waits
     /// for the fences queued before it (VideoOutDriver::SubmitFlipInternal).
     PresentBeforeFlip = 8,
+    /// An end-of-pipe flip's frame is prepared when its flip packet is reached in stream order,
+    /// not when its interrupt fires (that waits for the ray-cast readbacks before it, and by then
+    /// the next frame's work was queued ahead of the frame's last submission).
+    PrepareAtFlipPacket = 16,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

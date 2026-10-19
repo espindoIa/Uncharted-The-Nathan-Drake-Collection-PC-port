@@ -906,6 +906,12 @@ public:
 
     static std::mutex submit_mutex;
 
+    /// gow3 diagnostics (GOW3_SUBMIT_LOG): this scheduler's number in the log (draw 0,
+    /// present 1, flip 2); unset: not logged.
+    void SetLogId(int id) {
+        log_id = id;
+    }
+
 private:
     void AllocateWorkerCommandBuffers();
 
@@ -963,6 +969,9 @@ private:
     bool recording_threaded{false};
     std::jthread recorder_thread;
     tracy::VkCtxScope* profiler_scope{};
+    int log_id = -1;          ///< gow3: GOW3_SUBMIT_LOG
+    u32 log_slot = ~0u;       ///< timestamp queries of the current command buffer
+    u64 log_slot_tick = 0;    ///< CurrentTick() when the command buffer began
 };
 
 } // namespace Vulkan

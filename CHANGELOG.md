@@ -9,6 +9,11 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 This fork ([espindoIa](https://github.com/espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port))
 adds the work below on top of 0.3.0. Where both did the same thing, one was kept:
 
+- **Uncharted 2: no more regular stutter at the GPU's limit.** About every fifth frame was
+  finished together with the next one and stayed on screen 30+ ms: a frame waiting for GPU
+  results of earlier work was prepared only once they were back, behind the next frame's work.
+  It is now prepared as soon as the game flips it. 4K DLAA, VSync on: on-screen intervals over
+  25 ms 18% -> 0.4%, worst 1% 31 -> 21 ms, and ~62 -> ~66 FPS. Uncharted 3 unchanged.
 - **Smoother frame pacing.** The game made its frames evenly, but the port held each one until
   GPU results for earlier work were back before showing it, so frames reached the screen in
   bursts: a 38 ms gap, then two at once. Frames now go to the screen as soon as they are drawn
