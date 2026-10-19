@@ -102,6 +102,10 @@ private:
         s64 flip_arg;
         s32 index;
         bool eop;
+        /// gow3: presented already (presents queue); this request only completes the flip.
+        bool presented = false;
+        /// gow3: from the presents queue: present the frame, the flip completes later.
+        bool present_only = false;
 
         operator bool() const noexcept {
             return frame != nullptr;
@@ -109,6 +113,12 @@ private:
     };
 
     void Flip(const Request& req);
+    /// gow3: the guest-visible part of a flip (flip status, flip events, buffer labels).
+    void CompleteFlip(const Request& req);
+    /// gow3: completes queued flips whose frames were presented ahead of them.
+    void CompletePresentedFlips();
+    /// gow3: a present or a flip the present thread can take now (`mutex` held).
+    bool HasFlipWork() const;
     void DrawBlankFrame(); // Video port out not open
     void DrawLastFrame();  // Used when there is no flip request
     void SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
@@ -132,6 +142,11 @@ private:
     VideoOutPort main_port{};
     std::jthread present_thread;
     std::queue<Request> requests;
+    /// gow3 19 Oct 2026: frames presented as soon as they are prepared, ahead of their flips
+    /// (which wait for the fences before them); the counters pair each with its flip in order.
+    std::queue<Request> presents;
+    u64 early_presented = 0;
+    u64 early_completed = 0;
 };
 
 } // namespace Libraries::VideoOut

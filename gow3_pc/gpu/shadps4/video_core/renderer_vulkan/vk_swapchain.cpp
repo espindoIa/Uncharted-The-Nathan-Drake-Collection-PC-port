@@ -3,8 +3,14 @@
 
 #include <chrono>
 #include <algorithm>
+#include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
+#include <deque>
 #include <limits>
+#include <mutex>
+#include <thread>
+#include <utility>
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
@@ -141,8 +147,64 @@ bool Swapchain::AcquireNextImage() {
     return !needs_recreation;
 }
 
+// gow3 diagnostics (GOW3_DISPLAY_LOG with VK_KHR_present_wait): a thread waits for each present to
+// reach the screen and writes "<interval ms> <steady clock ms>" per frame: display pacing without
+// PresentMon. Without present wait vk_presenter writes the frames' present fence times instead.
+static void WatchPresent(vk::Device device, vk::SwapchainKHR swapchain, u64 id) {
+    static FILE* file = [] {
+        const char* path = std::getenv("GOW3_DISPLAY_LOG");
+        return path && path[0] ? std::fopen(path, "w") : nullptr;
+    }();
+    if (!file) {
+        return;
+    }
+    static std::mutex mutex;
+    static std::condition_variable cv;
+    static std::deque<std::pair<vk::SwapchainKHR, u64>> presents;
+    static std::once_flag started;
+    std::call_once(started, [device] {
+        std::thread([device] {
+            auto last = std::chrono::steady_clock::now();
+            u32 lines = 0;
+            for (;;) {
+                std::pair<vk::SwapchainKHR, u64> next;
+                {
+                    std::unique_lock lock{mutex};
+                    cv.wait(lock, [] { return !presents.empty(); });
+                    next = presents.front();
+                    presents.pop_front();
+                }
+                if (device.waitForPresentKHR(next.first, next.second, 1'000'000'000) !=
+                    vk::Result::eSuccess) {
+                    continue;
+                }
+                const auto now = std::chrono::steady_clock::now();
+                std::fprintf(file, "%.3f %.3f\n",
+                             std::chrono::duration<double, std::milli>(now - last).count(),
+                             std::chrono::duration<double, std::milli>(now.time_since_epoch()).count());
+                last = now;
+                if (++lines % 64 == 0) {
+                    std::fflush(file);
+                }
+            }
+        }).detach();
+    });
+    {
+        std::scoped_lock lock{mutex};
+        presents.emplace_back(swapchain, id);
+    }
+    cv.notify_one();
+}
+
 bool Swapchain::Present() {
+    static u64 next_present_id = 0;
+    const u64 present_id = ++next_present_id;
+    const vk::PresentIdKHR present_id_info = {
+        .swapchainCount = 1,
+        .pPresentIds = &present_id,
+    };
     const vk::PresentInfoKHR present_info = {
+        .pNext = instance.HasPresentWait() ? &present_id_info : nullptr,
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &present_ready[image_index],
         .swapchainCount = 1,
@@ -156,6 +218,9 @@ bool Swapchain::Present() {
     } else {
         ASSERT_MSG(result == vk::Result::eSuccess, "Swapchain presentation failed: {}",
                    vk::to_string(result));
+        if (instance.HasPresentWait()) {
+            WatchPresent(instance.GetDevice(), swapchain, present_id);
+        }
     }
 
     frame_index = (frame_index + 1) % image_count;

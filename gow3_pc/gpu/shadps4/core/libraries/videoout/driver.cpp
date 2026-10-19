@@ -307,9 +307,10 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
     return 0;
 }
 
-// gow3: GOW3_FRAME_LOG=<file>: one line per event, "<kind> <ms since start> <ms since the last
-// of that kind>": kind S = the guest submitted a flip (its frame is recorded), P = the flip was
-// presented (our pacing). For frame pacing analysis (1% lows).
+// gow3: GOW3_FRAME_LOG=<file>: one line per event, "<kind> <steady clock ms> <ms since the last
+// of that kind>" (the clock GOW3_DISPLAY_LOG uses too): kind S = the guest submitted a flip (its frame is recorded), P = the flip was
+// presented (our pacing), Q = a flip was queued after the fences before it, C = the guest saw
+// the flip complete. For frame pacing analysis (1% lows).
 static void LogFrameEvent(char kind) {
     static FILE* file = [] {
         const char* path = std::getenv("GOW3_FRAME_LOG");
@@ -321,11 +322,12 @@ static void LogFrameEvent(char kind) {
     using Clock = std::chrono::steady_clock;
     static const Clock::time_point start = Clock::now();
     static std::mutex mutex;
-    static Clock::time_point last[2] = {start, start};
+    static Clock::time_point last[4] = {start, start, start, start};
     const auto now = Clock::now();
     std::scoped_lock lock{mutex};
-    auto& previous = last[kind == 'P'];
-    std::fprintf(file, "%c %.3f %.3f\n", kind, std::chrono::duration<double, std::milli>(now - start).count(),
+    auto& previous = last[kind == 'P' ? 1 : kind == 'Q' ? 2 : kind == 'C' ? 3 : 0];
+    std::fprintf(file, "%c %.3f %.3f\n", kind,
+                 std::chrono::duration<double, std::milli>(now.time_since_epoch()).count(),
                  std::chrono::duration<double, std::milli>(now - previous).count());
     previous = now;
     static u32 lines = 0;
@@ -618,6 +620,38 @@ void VideoOutDriver::Flip(const Request& req) {
         }
     }
 
+    if (req.present_only) {
+        ++early_presented;
+        CompletePresentedFlips();
+        return;
+    }
+    CompleteFlip(req);
+}
+
+bool VideoOutDriver::HasFlipWork() const {
+    return !presents.empty() ||
+           (!requests.empty() && (!requests.front().presented || early_completed < early_presented));
+}
+
+void VideoOutDriver::CompletePresentedFlips() {
+    for (;;) {
+        Request req;
+        {
+            std::scoped_lock lk{mutex};
+            if (requests.empty() || !requests.front().presented ||
+                early_completed >= early_presented) {
+                return;
+            }
+            req = requests.front();
+            requests.pop();
+        }
+        ++early_completed;
+        CompleteFlip(req);
+    }
+}
+
+void VideoOutDriver::CompleteFlip(const Request& req) {
+    LogFrameEvent('C');
     // Update flip status.
     auto* port = req.port;
     {
@@ -744,7 +778,28 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
         frame = presenter->PrepareFrame(group, buffer.address_left);
     }
 
-    const auto queue_flip = [this, frame, port, flip_arg, index, is_eop] {
+    // gow3 19 Oct 2026: the frame goes to the present thread now; only the guest-visible flip
+    // (CompleteFlip) waits for the fences queued before it, and never comes before its present.
+    // The flips waited behind ray-cast readbacks before reaching the screen: in Uncharted 2 at 4K
+    // the guest submitted them evenly (p99 20 ms at p50 15) but they were presented in bursts
+    // (38 ms, then two 0.1 ms apart: p99 39 ms, 1% low 26 FPS). Toggle second word 8: off.
+    const bool present_early = !Gow3Toggle::Disabled2(Gow3Toggle::PresentBeforeFlip);
+    if (present_early) {
+        {
+            std::scoped_lock lock{mutex};
+            presents.push({
+                .frame = frame,
+                .port = port,
+                .flip_arg = flip_arg,
+                .index = index,
+                .eop = is_eop,
+                .present_only = true,
+            });
+        }
+        request_cv.notify_one();
+    }
+    const auto queue_flip = [this, frame, port, flip_arg, index, is_eop, present_early] {
+        LogFrameEvent('Q');
         {
             std::scoped_lock lock{mutex};
             requests.push({
@@ -753,6 +808,7 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
                 .flip_arg = flip_arg,
                 .index = index,
                 .eop = is_eop,
+                .presented = present_early,
             });
         }
         request_cv.notify_one();
@@ -846,9 +902,16 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     std::printf("VideoOut: vblank %u Hz, frame limit %u FPS\n",
                 EmulatorSettings.GetVblankFrequency(), frame_limit);
 
+    // gow3: a frame to present: one presented ahead of its flip, else a whole flip. Flips whose
+    // frames went ahead complete in CompletePresentedFlips, outside the frame limit.
     const auto receive_request = [this] -> Request {
         std::scoped_lock lk{mutex};
-        if (!requests.empty()) {
+        if (!presents.empty()) {
+            const auto request = presents.front();
+            presents.pop();
+            return request;
+        }
+        if (!requests.empty() && !requests.front().presented) {
             const auto request = requests.front();
             requests.pop();
             return request;
@@ -935,6 +998,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             continue;
         }
 
+        CompletePresentedFlips();
         // Check if it's time to take a request.
         auto& vblank_status = main_port.vblank_status;
         const auto now = std::chrono::steady_clock::now();
@@ -1001,9 +1065,16 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         while (!token.stop_requested()) {
             {
                 std::unique_lock lk{mutex};
-                if (!request_cv.wait_until(lk, tick_deadline,
-                                           [&] { return !requests.empty(); })) {
+                if (!request_cv.wait_until(lk, tick_deadline, [&] { return HasFlipWork(); })) {
                     break; // next vblank
+                }
+            }
+            // Flips whose frames went ahead complete at once (their present kept the limit).
+            CompletePresentedFlips();
+            {
+                std::scoped_lock lk{mutex};
+                if (presents.empty() && (requests.empty() || requests.front().presented)) {
+                    continue;
                 }
             }
             if (std::chrono::steady_clock::now() < next_flip) {

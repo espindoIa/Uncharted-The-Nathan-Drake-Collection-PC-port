@@ -105,6 +105,11 @@ public:
         return present_queue;
     }
 
+    /// gow3 diagnostics: VK_KHR_present_id and VK_KHR_present_wait are on (GOW3_DISPLAY_LOG).
+    bool HasPresentWait() const {
+        return present_wait;
+    }
+
     TracyVkCtx GetProfilerContext() const {
         return profiler_context;
     }
@@ -549,6 +554,7 @@ private:
     vk::Queue present_queue;
     vk::Queue graphics_queue;
     vk::Queue copy_queue;
+    bool present_wait{};
     std::vector<vk::PhysicalDevice> physical_devices;
     std::vector<std::string> available_extensions;
     std::unordered_map<vk::Format, vk::FormatProperties3> format_properties;

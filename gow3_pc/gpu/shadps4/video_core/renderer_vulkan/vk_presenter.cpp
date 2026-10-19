@@ -27,15 +27,19 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <csetjmp>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <span>
+#include <string>
 #include <sstream>
 #include <system_error>
 #include <thread>
@@ -596,6 +600,8 @@ void CaptureLiveView(const Instance& instance, Scheduler& scheduler, vk::Command
 }
 } // namespace
 
+static void WatchGpuDone(Semaphore* semaphore, u64 tick);
+
 Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                                VAddr cpu_address) {
     // gow3: GOW3_FRAME_DUMP_TRIGGER=<file>: when the file exists it is removed and this frame's
@@ -837,6 +843,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     frame->ready_tick = draw_scheduler.CurrentTick();
     SubmitInfo info{};
     draw_scheduler.Flush(info);
+    WatchGpuDone(draw_scheduler.GetWorkSemaphore(), frame->ready_tick);
 
     // gow3: the GPU command thread runs at most GOW3_FRAMES_AHEAD (default 1) guest frames
     // ahead of the GPU: it waits here for the frame that many flips back. When the GPU is the
@@ -880,6 +887,101 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         }
     }
     return frame;
+}
+
+// gow3 diagnostics (GOW3_DISPLAY_LOG=<file>): when each game frame's present submission finished
+// on the GPU (from then on it can be shown), "<interval ms> <steady clock ms>" per line: display
+// pacing without PresentMon. A thread waits on the frames' present fences in order (a frame's fence is reset only
+// when it is reused, a whole frame pool later).
+static void WatchDisplay(vk::Device device, vk::Fence fence) {
+    static FILE* file = [] {
+        const char* path = std::getenv("GOW3_DISPLAY_LOG");
+        return path && path[0] ? std::fopen(path, "w") : nullptr;
+    }();
+    if (!file) {
+        return;
+    }
+    static std::mutex mutex;
+    static std::condition_variable cv;
+    static std::deque<vk::Fence> fences;
+    static std::once_flag started;
+    std::call_once(started, [device] {
+        std::thread([device] {
+            auto last = std::chrono::steady_clock::now();
+            u32 lines = 0;
+            for (;;) {
+                vk::Fence next;
+                {
+                    std::unique_lock lock{mutex};
+                    cv.wait(lock, [] { return !fences.empty(); });
+                    next = fences.front();
+                    fences.pop_front();
+                }
+                if (device.waitForFences(next, true, 1'000'000'000) != vk::Result::eSuccess) {
+                    continue;
+                }
+                const auto now = std::chrono::steady_clock::now();
+                std::fprintf(file, "%.3f %.3f\n",
+                             std::chrono::duration<double, std::milli>(now - last).count(),
+                             std::chrono::duration<double, std::milli>(now.time_since_epoch()).count());
+                last = now;
+                if (++lines % 64 == 0) {
+                    std::fflush(file);
+                }
+            }
+        }).detach();
+    });
+    {
+        std::scoped_lock lock{mutex};
+        fences.push_back(fence);
+    }
+    cv.notify_one();
+}
+
+// gow3 diagnostics (GOW3_DISPLAY_LOG=<file>): <file>.gpu gets the time the GPU finished each
+// flipped frame (its ready tick), in the same format.
+static void WatchGpuDone(Semaphore* semaphore, u64 tick) {
+    static FILE* file = [] {
+        const char* path = std::getenv("GOW3_DISPLAY_LOG");
+        return path && path[0] ? std::fopen((std::string{path} + ".gpu").c_str(), "w") : nullptr;
+    }();
+    if (!file) {
+        return;
+    }
+    static std::mutex mutex;
+    static std::condition_variable cv;
+    static std::deque<u64> ticks;
+    static std::once_flag started;
+    std::call_once(started, [semaphore] {
+        std::thread([semaphore] {
+            auto last = std::chrono::steady_clock::now();
+            u32 lines = 0;
+            for (;;) {
+                u64 next;
+                {
+                    std::unique_lock lock{mutex};
+                    cv.wait(lock, [] { return !ticks.empty(); });
+                    next = ticks.front();
+                    ticks.pop_front();
+                }
+                while (!semaphore->WaitFor(next, 1'000'000'000)) {
+                }
+                const auto now = std::chrono::steady_clock::now();
+                std::fprintf(file, "%.3f %.3f\n",
+                             std::chrono::duration<double, std::milli>(now - last).count(),
+                             std::chrono::duration<double, std::milli>(now.time_since_epoch()).count());
+                last = now;
+                if (++lines % 64 == 0) {
+                    std::fflush(file);
+                }
+            }
+        }).detach();
+    });
+    {
+        std::scoped_lock lock{mutex};
+        ticks.push_back(tick);
+    }
+    cv.notify_one();
 }
 
 Frame* Presenter::PrepareBlankFrame(bool present_thread) {
@@ -1169,6 +1271,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
     scheduler.Flush(info);
+    if (is_game_frame && !is_reusing_frame && !instance.HasPresentWait()) {
+        WatchDisplay(instance.GetDevice(), frame->present_done);
+    }
 
     // Present to swapchain.
     {

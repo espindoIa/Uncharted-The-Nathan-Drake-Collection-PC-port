@@ -1561,6 +1561,31 @@ Merge choices (details in the sections below and in CHANGELOG.md):
   fence held for a ray-cast readback, which on the PS4 is an end-of-pipe write that completes after
   the CP has already executed later DMA_DATA packets; holding the DMA instead would feed later
   draws stale data (its destinations are read by the following GPU work).
+- Frame pacing (user: "o frame pacing parece bem ruim"), Uncharted 2 at the player's settings
+  (VSync on = FIFO, 164 Hz display, ~65 FPS, GPU-bound). New diagnostics: GOW3_FRAME_LOG kinds Q
+  (flip queued after the fences before it) and C (guest saw it complete), steady-clock times;
+  GOW3_DISPLAY_LOG=<file>: on-screen times from VK_KHR_present_wait (enabled only then), and
+  <file>.gpu: when the GPU finished each flipped frame (its ready tick). C:\dev\bench\timeline.py
+  merges them. Findings:
+  - The guest submits flips evenly (S p50 14.7, p99 ~26 ms); the port held each flip behind the
+    ray-cast readback fences before presenting it (QueueFlipInOrder), so presents came in bursts:
+    38 ms, then two 0.1 ms apart (port flip intervals p99 39 ms, 1% low 25 FPS). GOW3_FRAMES_AHEAD
+    0/1/2 changed nothing.
+  - Fix 1 (toggle second word 8): the frame goes to the present thread right after PrepareFrame;
+    only the guest-visible flip (CompleteFlip: status, events, labels) waits for those fences, and
+    never before its present (the frame limit keeps holding the guest).
+  - One session, 12-15 s windows, two each: port intervals p99 39.0/38.8 -> 24.0/23.7 ms, 1% low
+    25 -> 40 FPS, FPS unchanged (65.8 vs 65.6). On screen (present wait): off p99 30.5/29.8 ms,
+    sd 7.4/6.9, 5.8% of frames reported on screen under 5 ms after the previous one (less than
+    one 164 Hz refresh); fix 1: p99 29.6, sd 6.8, 0.5%. Uncharted 3 (same protocol): FPS 54.8 vs
+    54.9, port p99 29.2 -> 25.5 ms, on screen unchanged (p99 26, sd 2.7, already even).
+  - Tried and dropped: presenting on a third queue of the graphics family (the blit then waits
+    for its own frame only, not for the next frame's work on the main queue). U2 on screen sd
+    6.8 -> 6.0/5.9, but U3 worse in all three windows (sd 2.7 -> 3.2-3.4, intervals over 25 ms
+    4% -> 7.6-8.4%).
+  - Left: about every fifth frame the GPU finishes two frames within ~1 ms (.gpu log), although
+    each frame's last batch was submitted ~15 ms apart; ~14% of U2's on-screen intervals are still
+    over 25 ms. Not explained yet (the frames-ahead wait in PrepareFrame sees the same late tick).
 
 
 ## 18 October 2026: performance pass (GPU command thread), multithreaded-rendering hang

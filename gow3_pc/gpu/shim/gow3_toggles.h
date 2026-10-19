@@ -97,6 +97,9 @@ enum : std::uint64_t {
     /// A compute queue INDIRECT_BUFFER packet does not drain the draw pipe (its packets pass the
     /// drain check one by one, as on the graphics queue). U3 at 4K DLAA M: +2% FPS, p99 -3 ms.
     ComputeNestedNoDrain = 4,
+    /// A flip's frame is presented as soon as it is prepared; the guest-visible flip still waits
+    /// for the fences queued before it (VideoOutDriver::SubmitFlipInternal).
+    PresentBeforeFlip = 8,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

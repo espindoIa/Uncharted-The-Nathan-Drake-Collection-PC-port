@@ -437,6 +437,12 @@ bool Instance::CreateDevice() {
         address_binding_report=add_extension(VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);
         std::printf("GPU device fault reports enabled: %d\n",int(device_fault));
     }
+    // gow3 diagnostics (GOW3_DISPLAY_LOG): when each frame reached the screen (vk_swapchain).
+    if (const char* log = std::getenv("GOW3_DISPLAY_LOG"); log && log[0]) {
+        present_wait = add_extension(VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
+                       add_extension(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+        std::printf("Display log: present wait %s\n", present_wait ? "on" : "unavailable");
+    }
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
     pipeline_binaries = PipelineBinaryCacheRequested() && maintenance_5 &&
         feature_chain.get<vk::PhysicalDeviceMaintenance5FeaturesKHR>().maintenance5 &&
@@ -754,6 +760,12 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceAddressBindingReportFeaturesEXT{
             .reportAddressBinding = true,
         },
+        vk::PhysicalDevicePresentIdFeaturesKHR{
+            .presentId = true,
+        },
+        vk::PhysicalDevicePresentWaitFeaturesKHR{
+            .presentWait = true,
+        },
     };
 
     if (!custom_border_color) {
@@ -819,6 +831,10 @@ bool Instance::CreateDevice() {
     }
     if (!address_binding_report) {
         device_chain.unlink<vk::PhysicalDeviceAddressBindingReportFeaturesEXT>();
+    }
+    if (!present_wait) {
+        device_chain.unlink<vk::PhysicalDevicePresentIdFeaturesKHR>();
+        device_chain.unlink<vk::PhysicalDevicePresentWaitFeaturesKHR>();
     }
 
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());

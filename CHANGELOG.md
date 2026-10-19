@@ -9,6 +9,13 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 This fork ([espindoIa](https://github.com/espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port))
 adds the work below on top of 0.3.0. Where both did the same thing, one was kept:
 
+- **Smoother frame pacing.** The game made its frames evenly, but the port held each one until
+  GPU results for earlier work were back before showing it, so frames reached the screen in
+  bursts: a 38 ms gap, then two at once. Frames now go to the screen as soon as they are drawn
+  (the game still sees each flip in the old order). Uncharted 2 at 4K DLAA, VSync on, same 65 FPS:
+  worst 1% of the port's frame intervals 39 -> 24 ms (1% low 25 -> 40 FPS); on screen (as the
+  driver reports it), frames arriving less than 5 ms after the previous one 5.8% -> 0.5%.
+  Uncharted 3: same FPS, port intervals p99 29 -> 25 ms, on screen unchanged (already even).
 - **Uncharted 3 no longer freezes or crashes seconds into gameplay with multithreaded
   rendering** (reported at 4K, 120 FPS, DLAA). Fence labels, `WRITE_DATA` writes and the flip
   interrupt could reach the game before an earlier end-of-frame fence that waits for GPU ray-cast
