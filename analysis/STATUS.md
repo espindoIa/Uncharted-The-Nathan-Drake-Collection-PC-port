@@ -1888,3 +1888,18 @@ sample (its UAC prompt was not accepted twice): no Nsight trace was taken.
     GOW3_EXEC_WATCH_FILE takes up to 4 addresses, r: prefix for read/write watches;
     GOW3_EXEC_WATCH_UNIQUE=1 logs each instruction once and prints per-instruction counts when the
     watches move; GOW3_AUTO_CHOICE=1 accepts the save dialog's default (unattended new-game tests).
+
+## 19 October 2026: cutscenes at ~10 FPS at 4K (Lanczos movie scale)
+- User: U3's first cutscene at ~10 FPS (package 0.4.0, US 1.02, 4K, DLAA, MT on, RTX 5070, 12
+  threads). Log: movie frames 75-113 ms (9.5-15.9 FPS), GPU thread idle 97%, "Movie: 1920x1080 ->
+  3840x2160 scaled with Lanczos, 17.3 ms a frame". Reproduced with play.py (title, no input, the
+  attract cutscene): 9.2-9.4 FPS. GOW3_MOVIE_SCALER=bicubic in the same build: 6.4 ms a frame, ~60
+  FPS. Cause: a914707 (18 Oct) made the 4K scale Lanczos + SWS_ACCURATE_RND on the decoder thread.
+- Fix: videodec2 WriteMovieCopy uses sws_alloc_context + sws_scale_frame (swscale 10 dynamic mode)
+  with threads = 4; same filter. After: Lanczos 6.4 ms a frame, cutscene at the 120 FPS cap, picture
+  checked (shot). Not verified: U1/U2 cutscenes, other render sizes (ultrawide bars path), CPUs with
+  fewer cores. tests/test_videodec2 does not build (core/memory.h not on its include path); it did
+  not build before this change either.
+- Gameplay in the same session: 73-76 FPS at 4K DLAA, GPU-bound (the GPU command thread waits for
+  GPU ticks 54% of the time); the user's display is 2560x1440, so a 1440p render or DLSS Quality is
+  the lever there, not a code change.

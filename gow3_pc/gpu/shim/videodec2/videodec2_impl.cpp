@@ -392,12 +392,19 @@ bool VdecDecoder::WriteMovieCopy(const AVFrame& frame, u64 base) {
         const char* env = std::getenv("GOW3_MOVIE_SCALER");
         return env && std::strcmp(env, "bicubic") == 0 ? SWS_BICUBIC : SWS_LANCZOS | SWS_ACCURATE_RND;
     }();
+    // Split over threads: on one thread the 4K Lanczos scale took 17.8 ms a frame and U3's first
+    // cutscene played at ~9 FPS (19 Oct, RTX 5070 / 12 threads; bicubic 6.4 ms, ~60 FPS).
+    // sws_scale_frame takes the sizes and formats from the frames and re-plans when they change.
+    if (!m_scale_context) {
+        m_scale_context = sws_alloc_context();
+        if (!m_scale_context) {
+            return false;
+        }
+        m_scale_context->flags = (unsigned)filter;
+        m_scale_context->threads = 4;
+    }
     const auto start = std::chrono::steady_clock::now();
-    m_scale_context = sws_getCachedContext(m_scale_context, frame.width, frame.height, AV_PIX_FMT_NV12,
-                                           (int)fit_width, (int)fit_height, AV_PIX_FMT_NV12, filter,
-                                           nullptr, nullptr, nullptr);
-    if (!m_scale_context || sws_scale(m_scale_context, frame.data, frame.linesize, 0, frame.height,
-                                      m_scaled->data, m_scaled->linesize) < 0) {
+    if (sws_scale_frame(m_scale_context, m_scaled, &frame) < 0) {
         return false;
     }
     // The cost per frame, once (a movie runs at 30 frames a second on the decoder's thread).

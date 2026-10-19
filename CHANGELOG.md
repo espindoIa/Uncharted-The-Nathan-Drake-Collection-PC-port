@@ -4,6 +4,13 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## Unreleased (fork)
+
+- **Cutscenes at full speed again at 4K.** Since 0.4.0's sharper cutscenes, a 4K render played the
+  movies at about 10 FPS (Uncharted 3's first cutscene): the sharper scale ran on one CPU thread
+  and took 18 ms a frame. It now runs on four threads (6 ms), and the cutscene plays at the frame
+  limit with the same sharpness.
+
 ## 19 October 2026 (fork 0.4.0, Expedition Edition)
 
 This fork ([espindoIa](https://github.com/espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port))
