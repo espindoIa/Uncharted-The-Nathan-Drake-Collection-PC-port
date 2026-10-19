@@ -22,7 +22,17 @@ enum Upscaler : int { UpscalerOff = 0, UpscalerFsr3 = 1, UpscalerFsr4 = 2, Upsca
 inline bool IsFsr4(int upscaler) {
     return upscaler == UpscalerFsr4 || upscaler == UpscalerFsr411;
 }
-enum Preset : int { NativeAA = 0, Quality, Balanced, Performance, UltraPerformance, PresetCount };
+/// UltraQuality (render 1/1.4 of the output) came last (19 Oct) so saved preset numbers keep
+/// their meaning; the menus list it after NativeAA.
+enum Preset : int {
+    NativeAA = 0,
+    Quality,
+    Balanced,
+    Performance,
+    UltraPerformance,
+    UltraQuality,
+    PresetCount
+};
 enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugViewCount };
 /// DLSS models J, K, L, M (NVSDK_NGX_DLSS_Hint_Render_Preset 10-13).
 inline constexpr int DlssModelCount = 4;

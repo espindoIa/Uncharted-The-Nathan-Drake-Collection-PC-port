@@ -156,10 +156,13 @@ INI_DEFAULTS = {
 # FSR/DLSS quality modes (the runtime's preset key, also in the in-game menu): 0 draws the scene at
 # the render resolution (Native AA / DLAA); the others draw it smaller and rebuild it at the render
 # resolution, which is then their output.
-UPSCALE_MODES = [("0", "Native / DLAA"), ("1", "Quality"), ("2", "Balanced"), ("3", "Performance"),
+UPSCALE_MODES = [("0", "Native / DLAA"), ("5", "Ultra Quality"), ("1", "Quality"), ("2", "Balanced"),
+                 ("3", "Performance"),
                  ("4", "Ultra Perf.")]
-# DLSS transformer models (the runtime's dlss_model key, also in the in-game menu): K is the
-# fastest; M is sharper in Performance mode but costs ~0.8 ms more per 4K frame (RTX 5070).
+# DLSS transformer models (the runtime's dlss_model key, also in the in-game menu). NVIDIA's
+# defaults: K for DLAA, Quality and Balanced, M for Performance, L for Ultra Performance. 19 Oct,
+# U3 at 4K on an RTX 5070 (GOW3_GPU_PROFILE): DLAA K 2.2 ms, M 7.9 ms a frame; Performance K
+# 2.0 ms, M 2.9 ms (NVIDIA's programming guide: 2.11 and 2.98 ms).
 DLSS_MODELS = [("j", "Model J"), ("k", "Model K"), ("l", "Model L"), ("m", "Model M")]
 
 
@@ -1843,10 +1846,14 @@ class Launcher:
         self.ini_choice(page, "preset", "Upscaling mode",
                         "FSR and DLSS only. Native / DLAA smooths edges at the render resolution; the other "
                         "modes draw the scene smaller and rebuild it at the render resolution (set it to your "
-                        "screen's): more FPS, a little softer.", UPSCALE_MODES)
+                        "screen's): more FPS, a little softer. Ultra Quality draws 71% of the width and height "
+                        "(DLSS model M at 4K: about 24% more FPS than DLAA), Quality 67% (about 31%).",
+                        UPSCALE_MODES)
         self.ini_choice(page, "dlss_model", "DLSS model",
-                        "NVIDIA's transformer models. K is the fastest; M is sharper in Performance mode but "
-                        "costs a little more.", DLSS_MODELS, recommended="k")
+                        "NVIDIA's transformer models. K is the fastest and NVIDIA's pick for Native / DLAA, "
+                        "Quality and Balanced; M is made for Performance mode. With DLAA at 4K, M costs about "
+                        "5.7 ms more per frame than K (RTX 5070); in Performance mode about 0.9 ms.",
+                        DLSS_MODELS, recommended="k")
         self.ini_choice(page, "display_mode", "Display mode",
                         "A normal window, a borderless window (quick Alt+Tab) or fullscreen.",
                         [("windowed", "Windowed"), ("borderless", "Borderless"), ("fullscreen", "Fullscreen")])

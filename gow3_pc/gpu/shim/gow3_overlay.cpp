@@ -398,18 +398,26 @@ void ImageTab() {
             const bool dlss = chosen == Gow3Settings::UpscalerDlss;
             if (s.upscale_modes_available &&
                 (dlss || chosen == Gow3Settings::UpscalerFsr3 || Gow3Settings::IsFsr4(chosen))) {
-                const char* const modes[] = {dlss ? "DLAA" : "Native AA", "Quality", "Balanced", "Performance",
-                                             "Ultra Performance"};
-                ChoiceRow("Mode", s.preset, modes, nullptr, Gow3Settings::PresetCount,
+                const char* const modes[] = {dlss ? "DLAA" : "Native AA", "Ultra Quality", "Quality",
+                                             "Balanced", "Performance", "Ultra Performance"};
+                static constexpr int mode_values[] = {
+                    Gow3Settings::NativeAA,     Gow3Settings::UltraQuality, Gow3Settings::Quality,
+                    Gow3Settings::Balanced,     Gow3Settings::Performance,
+                    Gow3Settings::UltraPerformance};
+                static_assert(std::size(mode_values) == Gow3Settings::PresetCount);
+                ChoiceRow("Mode", s.preset, modes, mode_values, Gow3Settings::PresetCount,
                           "Native AA / DLAA smooths edges at the render resolution; the other modes draw the "
-                          "scene smaller and rebuild it (more FPS, a little softer).");
+                          "scene smaller and rebuild it (more FPS, a little softer). Ultra Quality draws 71% "
+                          "of the width and height, Quality 67%: with DLSS model M at 4K about 24% and 31% "
+                          "more FPS than DLAA (Uncharted 3).");
             }
             if (dlss) {
                 static const char* const models[] = {"J", "K (recommended)", "L", "M"};
                 static_assert(std::size(models) == Gow3Settings::DlssModelCount);
                 ChoiceRow("DLSS model", s.dlss_model, models, nullptr, Gow3Settings::DlssModelCount,
-                          "NVIDIA's transformer models. K is the fastest; M is sharper in Performance mode "
-                          "but costs about 0.8 ms more per 4K frame.");
+                          "NVIDIA's transformer models. K is the fastest and NVIDIA's pick for Native / "
+                          "DLAA, Quality and Balanced; M is made for Performance mode. With DLAA at 4K, "
+                          "M costs about 5.7 ms more per frame than K; in Performance mode about 0.9 ms.");
             }
             if (!s.dlss_supported) {
                 const char* problem = s.dlss_problem.load();

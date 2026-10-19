@@ -55,6 +55,8 @@ FfxFsr4ModelPreset ModelPreset(int preset) {
         return FFX_FSR4_MODEL_PRESET_BALANCED;
     case 3:
         return FFX_FSR4_MODEL_PRESET_PERFORMANCE;
+    case 5: // Ultra Quality (1.4x): the Quality model
+        return FFX_FSR4_MODEL_PRESET_QUALITY;
     default:
         return FFX_FSR4_MODEL_PRESET_ULTRA_PERFORMANCE;
     }

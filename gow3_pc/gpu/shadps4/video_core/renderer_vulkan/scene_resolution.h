@@ -28,10 +28,23 @@ inline Size Native() {
     }();
     return native;
 }
+/// gow3 19 Oct 2026: Ultra Quality (preset 5, listed after Native AA): 71% of the output per axis.
+/// DLSS model M's cost follows its input size: at 4K output on an RTX 5070 7.9 ms with a 4K input
+/// (DLAA), 6.0 at 1.2x, 5.3 at 1.3x, 2.9 at 2x. U3 bar fight against DLAA, model M (PresentMon,
+/// alternating windows): 1.2x +8.7% FPS, 1.3x +15.9%, 1.4x +24.1%, Quality (1.5x) +30.8%.
+/// GOW3_ULTRA_QUALITY_SCALE=<1.05..1.49> (tests) replaces the scale.
+inline double UltraQualityScale() {
+    static const double scale = [] {
+        const char* env = std::getenv("GOW3_ULTRA_QUALITY_SCALE");
+        const double value = env ? std::atof(env) : 0.0;
+        return value >= 1.05 && value <= 1.49 ? value : 1.4;
+    }();
+    return scale;
+}
 inline Size ForPreset(int preset, Size output = {}) {
     // Even dimensions for half-resolution effects; match the preset labels exactly.
-    constexpr std::array<double, 5> scales{1.0, 1.5, 1.7, 2.0, 3.0};
-    const double scale = scales[std::clamp(preset, 0, 4)];
+    const std::array<double, 6> scales{1.0, 1.5, 1.7, 2.0, 3.0, UltraQualityScale()};
+    const double scale = scales[std::clamp(preset, 0, 5)];
     return {uint32_t(std::max(1l, std::lround(output.width / scale / 2)) * 2),
             uint32_t(std::max(1l, std::lround(output.height / scale / 2)) * 2)};
 }

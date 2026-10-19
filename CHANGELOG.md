@@ -6,6 +6,16 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork 0.5.0 "Expedition")
 
+- **New Ultra Quality upscaling mode, between DLAA and Quality.** The scene is drawn at 71% of
+  the width and height (2742x1542 for 4K), and DLSS or FSR rebuild the full picture. In
+  Uncharted 3 at 4K with DLSS model M: about 24% faster than DLAA (68.6 -> 85.2 FPS in the bar
+  fight); Quality is about 31% faster. Your saved mode is unchanged.
+- **The DLSS model's description now says what model M costs.** It said M costs a little more
+  than K. With DLAA at 4K, M takes 7.9 ms of every frame and K 2.2 ms (RTX 5070), so Uncharted 3
+  runs at about 68 FPS with M and about 100 FPS with K. NVIDIA's own choice is K for DLAA,
+  Quality and Balanced, and M for Performance mode. In Performance mode the two are close (2.9 and
+  2.0 ms).
+
 - **Uncharted 3 runs a little faster with multithreaded rendering.** Every second, the GPU
   thread copied 2.5 GB of the small data blocks the game's GPU jobs read (constants). Half of
   them it had already copied, and almost none of those copies were reused. It now reuses a copy until something

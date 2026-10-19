@@ -2160,6 +2160,30 @@ Constant ring reuse (toggle second word 32 RingPreciseWrites, 64 RingKeepOnComma
   FPS), so its FPS interval is ±10; reuse there was 240-360 MB/s on and 137-291 off.
 - Tests: image-size-test and movie-hook-test pass.
 
+Model M faster (the user wants to keep model M; asked for +20%):
+- NGX's time cannot be cut from the port; it follows the input size. A new mode, Ultra Quality
+  (preset 5, listed second; saved preset numbers keep their meaning), draws 1/1.4 of the output
+  per axis (2742x1542 for 4K). DLSS maps it to NGX's Quality mode, whose input range is 1080p to
+  4K.
+- Measured against DLAA, model M, U3 bar fight. Each row is its own session, 4-5 alternating
+  windows, live preset switch (GOW3_PRESET_FILE, C:\dev\bench\abpreset.sh), PresentMon:
+
+  | Mode (input for 4K) | DLSS M | FPS (DLAA 68.6-69.0) | Median frame time |
+  |---|---|---|---|
+  | 1.2x (3200x1800) | 6.0 ms | 74.9 (+8.7%) | -1.20 ms [-1.22, -1.18] |
+  | 1.3x (2954x1662) | 5.3 ms | 79.5 (+15.9%) | -2.08 ms [-2.10, -2.04] |
+  | 1.4x (2742x1542), Ultra Quality | — | 85.2 (+24.1%) | -2.95 ms [-2.98, -2.92]; p99 -2.6 [-4.2, -1.1] |
+  | Quality, 1.5x (2560x1440) | — | 89.9 (+30.8%) | -3.66 ms [-3.70, -3.63] |
+
+  The first 1.3x session is not used: the fight moved on halfway (both states went up to
+  107-120 FPS).
+- Checked: the default build gives "DLSS 2742x1542 -> 3840x2160, quality 1, preset 13" (85.0
+  FPS); FSR 3.1 in the mode makes a 2742x1542 -> 3840x2160 context (103.9 FPS). Pictures right
+  in both (960-wide live view), no errors in the logs. FSR 4 maps the mode to its Quality model;
+  FSR 4 and TAA in the mode were not run.
+- The launcher's and the menu's DLSS model text said M "costs a little more". It now gives the
+  DLAA and Performance costs and NVIDIA's defaults.
+
 Ruled out (do not reinvestigate without new data):
 - The port's DLSS call: it matches NVIDIA's published cost in Performance mode (above).
 - Removing the submission wait (GOW3_SUBMIT_NO_WAIT=1, measurement only): slower and broken.
