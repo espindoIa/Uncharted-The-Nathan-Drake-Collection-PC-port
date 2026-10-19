@@ -274,7 +274,15 @@ CHEAT_PATCHES = {
         for n, (pattern, at) in enumerate((("488d15caca8200 b101 803a00 75", 12),
                                            ("488d0d79673800 803900 75", 10),
                                            ("488d0d3a5b3800 803900 75", 10),
-                                           ("488d0d0a023800 803900 75", 10)), 1)]},
+                                           ("488d0d0a023800 803900 75", 10)), 1)] + [
+        # 19 Oct (user: "Infinite ammo was not working"): Drake's Fortune's own Infinite Ammo only
+        # spares the reserve when reloading (0x345e40/0x345ec0); each shot still takes a round from
+        # the magazine (0x346440: `dec [inventory + slot*0x30 + 0x440]`, skipped for weapons whose
+        # definition says so). With the cheat on that decrement is gone: the magazine stays full.
+        ("Uncharted 1 infinite ammo (magazine)",
+         [("89f3 4989fe e8???????? 4885c0 741b 83b82801000000 7512 89d8 488d0440 48c1e004 "
+           "41ff8c0640040000 5b415e5dc3", 34, bytes.fromhex("41ff8c0640040000"),
+           bytes.fromhex("0f1f840000000000"))])]},
     "big2-ps4_Shipping.elf": {"ammo": [
         (f"Uncharted 2 infinite ammo (reader {n})", [_ammo_reader(pattern, at)])
         for n, (pattern, at) in enumerate((("488d0dbc8d6f00 80793a00 75", 11),
@@ -874,9 +882,10 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         move = executable != "eboot.bin"
         candidates = [(width, height)] + [size for size in U1_FALLBACK_SIZES if size[0] * size[1] < width * height]
         if abs(width / height - 16 / 9) > 0.01:
-            # Ultrawide: smaller sizes of the same shape (width/8 and height/4 whole).
+            # Ultrawide: smaller sizes of the same shape (width/16 and height/4 whole: Uncharted 3
+            # asserts widths in steps of 16 in its post processing).
             candidates = [(width, height)] + [
-                (int(width * scale) // 8 * 8, int(height * scale) // 4 * 4)
+                (int(width * scale) // 16 * 16, int(height * scale) // 4 * 4)
                 for scale in (0.9, 0.8, 0.75, 2 / 3, 0.6, 0.5)]
         extra_mib = 0
         for candidate in candidates:
@@ -956,7 +965,11 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     # end-of-pipe fence, which waits for it (16 Oct; precise readbacks fixed it too, at ~50 FPS).
     # 17 Oct: Uncharted 3 too (user: Nate's legs flicker a little, NPCs float a bit; the same
     # engine and copy shader). Two 90 s U3 runs at 1440p: stable, 56-58 FPS.
-    if executable in ("big2-ps4_Shipping.elf", "big3-ps4_Shipping.elf"):
+    # 19 Oct: Drake's Fortune too (GitHub #6: from the second shot on, enemy grenade launchers'
+    # grenades exploded right in front of Drake; the shot started from a frame-old copy of what
+    # this shader writes). The user, at the first grenade launcher of chapter 4-5: with it every
+    # shot flies to its target, 60 FPS as without it. (Protected readbacks alone did not help.)
+    if executable in ("eboot.bin", "big2-ps4_Shipping.elf", "big3-ps4_Shipping.elf"):
         env.setdefault("GOW3_COPY64_EOP_READBACK", "1")
     if executable in ("big2-ps4_Shipping.elf", "big3-ps4_Shipping.elf"):
         # Its aim depth of field reads the focus distance from a 1x1 render target the GPU writes;
@@ -1018,6 +1031,36 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     # (gpu/shim/videodec2; else movies come out green and tiled above 1080p).
     if render_size != (1920, 1080):
         env["GOW3_MOVIE_SIZE"] = f"{render_size[0]}x{render_size[1]}"
+    # Output resolution above the render resolution (UNCHARTED_OUTPUT_RES[_U1/_U2/_U3]=WxH): the
+    # game draws at the render size and its finished frame is upscaled to the output size where
+    # it copies the frame back into the display buffer (pixel shader 749bbec9, the same post
+    # processing in all three games): by FSR 3.1, FSR 4 or DLSS, else TAA (at the render size) or
+    # nothing, then FSR 1 when its setting is on or a bilinear stretch. The HUD and menus are
+    # drawn after that at the output size (TemporalUpscaler::OnComposite). Needs the temporal
+    # anti-aliasing's camera tracking.
+    # Fork: upstream 0.4.0's path, kept for the velocity camera only (UNCHARTED_MOTION_SOURCE=
+    # velocity), where TemporalUpscaler::OnComposite runs. The fork's default camera (flat) has
+    # its own quality modes (GOW3_SCENE_SIZE above, HUD at the render size too); GOW3_RENDER_RES
+    # would switch its upscaler to the old compatibility path instead (19 Oct merge).
+    output = (os.environ.get(f"UNCHARTED_OUTPUT_RES_{game_key.upper()}")
+              or os.environ.get("UNCHARTED_OUTPUT_RES", "")).lower()
+    if os.environ.get("UNCHARTED_MOTION_SOURCE", "") != "velocity":
+        output = ""
+    elif "x" not in output and render_size != (width, height):
+        # Drake's Fortune above the size it can render at: that size is upscaled to the one chosen,
+        # with FSR 1 unless a temporal upscaler is chosen (the presets' FSR 1 to the screen before).
+        output = f"{width}x{height}"
+        env.setdefault("GOW3_FSR1", "1")
+    if "x" in output and os.environ.get("UNCHARTED_TEMPORAL_AA", "1") != "0":
+        out_w, out_h = (int(value) for value in output.split("x"))
+        if out_w > render_size[0] or out_h > render_size[1]:
+            env["GOW3_RENDER_RES"] = f"{render_size[0]}x{render_size[1]}"
+            env["GOW3_OUTPUT_RES"] = f"{out_w}x{out_h}"
+            env.setdefault("GOW3_UI_COMPOSITE_PS", "749bbec9")
+            # The tonemap draw finishing the frame: Uncharted 3 draws world-anchored prompts
+            # into its target after it, so the upscale runs at the draw after it.
+            env.setdefault("GOW3_UI_TONEMAP_PS", "484cdbf5")
+            print(f"Upscaling: {render_size[0]}x{render_size[1]} -> {out_w}x{out_h}")
     pad_file=user / "probe-pad.txt"
     pad_file.write_text("",encoding="ascii")
     env["GOW3_PAD_FILE"] = str(pad_file)

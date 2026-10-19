@@ -10,6 +10,19 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   movies at about 10 FPS (Uncharted 3's first cutscene): the sharper scale ran on one CPU thread
   and took 18 ms a frame. It now runs on four threads (6 ms), and the cutscene plays at the frame
   limit with the same sharpness.
+- **BilalReloaded's 0.4.0 merged** (its notes are in the "upstream 0.4.0" section below). What
+  it brings to this fork:
+  - **No more freezes before some cutscenes** (#52).
+  - **Drake's Fortune's enemy grenade launchers no longer blow up on Drake** (#6).
+  - **Drake's Fortune's Infinite ammo keeps the magazine full.**
+  
+  What stays as it was in the fork:
+  - **Upscaling:** the fork's FSR/DLSS quality modes, set in the Anti-aliasing option, already
+    draw the scene smaller and keep the HUD sharp, so the launcher and the in-game menu are
+    unchanged. Upstream's Upscaling option is not taken.
+  - **Multithreaded rendering** stays on for Uncharted 3. The fork fixed its freeze (#51) the
+    same way upstream did, and upstream's switch that turns it off for Uncharted 3 is not taken.
+    Drake's Fortune keeps it on too.
 
 ## 19 October 2026 (fork 0.4.0, Expedition Edition)
 
@@ -99,6 +112,36 @@ same thing, one was kept:
   wait replaces the fork's own fix of the `m_gfxEopTick` assert.
 - **Hook stubs within reach.** The runtime's code patches put their helper code within 2 GB of the
   game code wherever the game is loaded (a packaged Uncharted 3 skipped the cutscene fix before).
+## 19 October 2026 (upstream 0.4.0, BilalReloaded)
+
+- **No more freeze before some cutscenes** (#52): before a cutscene the games remove ~100 small
+  blocks of memory, and for each one the port rebuilt the whole surrounding mapping (about 23 ms
+  each on Windows, far more under Proton): Drake's Fortune froze 1.6 s, the Steam Deck up to 33 s
+  in Uncharted 3's museum. Memory is now mapped in 2 MB pieces, so a removal only touches the
+  pieces around it: the same cutscene went from a 1650 ms frame to ~200 ms.
+- **Uncharted 3 no longer freezes for good with multithreaded rendering** (#51): a fence write on
+  the Vulkan recording thread could fault while the GPU command thread waited for that thread.
+  It now never faults. Multithreaded rendering stays off for Uncharted 3 until players confirm
+  it (`UNCHARTED_U3_MULTITHREADED_TEST=1` keeps the launcher's choice).
+- **Drake's Fortune: enemy grenade launchers no longer blow up on Drake** (#6): from the second
+  shot on, the grenade exploded right in front of him. The shot started from a frame-old copy of
+  data the GPU writes for the game (a copy shader whose results it reads, the cause of
+  Uncharted 2's floating NPCs too); that data now reaches the game before it is used, as in
+  Uncharted 2 and 3. No frame-rate cost measured.
+- **Drake's Fortune: Infinite ammo keeps the magazine full** (Cheats tab): the game's own switch
+  only spared the reserve when reloading; each shot still emptied the magazine.
+
+From kuraeow (Steam Deck), merged:
+
+- **Real upscaling** (#50, asked for in #45): Display -> **Upscaling**: FSR 1, FSR 3.1, FSR 4 or
+  DLSS, with **Quality**, Balanced, Performance or Ultra Performance. The game draws below your
+  resolution and each frame is upscaled to it before the HUD and menus are drawn, which stay
+  sharp. **Native AA / DLAA** (no upscaling) stays as before. Upscaling saves GPU time: it helps
+  at 4K or on weaker graphics cards, much less where the processor limits the frame rate.
+  Moving characters can smear below Quality (the motion vectors come from the camera only).
+  The **Low** preset is now 1080p with FSR 1 Performance (HUD at 1080p). Drake's Fortune above
+  1620p draws at 1620p and is upscaled with the HUD at full size.
+
 ## 19 October 2026 (0.3.1)
 
 - **Choose the game update in the launcher** (#32): Launcher -> Advanced -> GAME UPDATE.

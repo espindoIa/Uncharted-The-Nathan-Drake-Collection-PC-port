@@ -1628,24 +1628,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         scheduler.PopPendingOperations();
     }
     const auto& regs = Regs();
-    // gow3: the pass copying a finished frame to a display buffer; the previous draw's
-    // target is that frame.
-    // Uncharted 2 draws into the display buffer four times a frame (composite, UI, and a copy
-    // back after a pass elsewhere): only the first one after scene drawing starts a frame.
-    // 19 Oct 2026, from Supermedo/uncharted_pc #261 (kj2223), merged with upstream 0.3.1:
-    // Uncharted 1 and 3 draw twice into the same display buffer per frame (484cdbf5, then
-    // 749bbec9; measured 2 frame starts per shown frame): only the first starts a frame. The
-    // second reset the upscaler's history every frame (shimmer on every edge under TAA, FSR and
-    // DLAA) and skipped every other jitter phase. Uncharted 2 keeps the gate above. Toggle
-    // 1 << 61 (OneFrameStart) brings the old behaviour back.
-    if (camera_motion->Enabled() && regs.color_buffers[0] &&
-        FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address()) &&
-        (camera_motion->FlatSource()
-             ? !display_frame_open
-             : (scene_started || regs.color_buffers[0].Address() != frame_display_address ||
-                Gow3Toggle::Disabled(Gow3Toggle::OneFrameStart)))) {
-        display_frame_open = true;
-        frame_display_address = regs.color_buffers[0].Address();
+    const auto frame_start = [&] {
         scene_started = false;
         camera_motion->OnDisplayPass(cb_descs[0].first);
         if (upscaler->OnFrameStart()) {
@@ -1658,6 +1641,29 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         static const char* scene_debug = std::getenv("GOW3_SCENE_DEBUG");
         scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
         scene_targets->debug = scene_debug_frame;
+    };
+    // gow3: the pass copying a finished frame to a display buffer; the previous draw's
+    // target is that frame.
+    // Uncharted 2 draws into the display buffer four times a frame (composite, UI, and a copy
+    // back after a pass elsewhere): only the first one after scene drawing starts a frame.
+    // 19 Oct 2026, from Supermedo/uncharted_pc #261 (kj2223), merged with upstream 0.3.1:
+    // Uncharted 1 and 3 draw twice into the same display buffer per frame (484cdbf5, then
+    // 749bbec9; measured 2 frame starts per shown frame): only the first starts a frame. The
+    // second reset the upscaler's history every frame (shimmer on every edge under TAA, FSR and
+    // DLAA) and skipped every other jitter phase. Uncharted 2 keeps the gate above. Toggle
+    // 1 << 61 (OneFrameStart) brings the old behaviour back.
+    // Upstream 0.4.0: when the game itself draws below the output size (velocity camera,
+    // GOW3_RENDER_RES), frames start at the upscale instead (TemporalUpscaler::OnComposite):
+    // its finished frame, the copy back and the HUD are several draws into the display buffer.
+    if (camera_motion->Enabled() && !upscaler->CompositeFrames() && regs.color_buffers[0] &&
+        FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address()) &&
+        (camera_motion->FlatSource()
+             ? !display_frame_open
+             : (scene_started || regs.color_buffers[0].Address() != frame_display_address ||
+                Gow3Toggle::Disabled(Gow3Toggle::OneFrameStart)))) {
+        display_frame_open = true;
+        frame_display_address = regs.color_buffers[0].Address();
+        frame_start();
     }
     // gow3: without camera motion (Uncharted) the GPU profiler marks frames at the display pass
     // too. Its results are read with a wait four frames later, so everything recorded so far is
@@ -1672,6 +1678,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     motion_geometry = 0;
 
     PrepareRenderState(pipeline);
+    if (upscaler->CompositeFrames() && fragment &&
+        upscaler->OnComposite(fragment->pgm_hash, cb_descs[0].first)) {
+        bind_prepared = nullptr; // as after a draw: later dispatches bind without its sharps
+        frame_start();           // the guest's copy is replaced by the upscale
+        return;
+    }
     if (upscaler->Enabled() && std::popcount(pipeline->GetGraphicsKey().mrt_mask) == 1) {
         const auto& viewport = Regs().viewports[0];
         upscaler->OnDraw(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
@@ -5822,10 +5834,47 @@ void Rasterizer::RegisterMemory(VAddr addr, u64 size) {
     page_manager.OnGpuMap(addr, size);
 }
 
+} // namespace Vulkan
+namespace VideoCore {
+extern std::atomic<u64> g_invalidate_downloads, g_invalidate_download_ns;
+}
+namespace Vulkan {
+
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
+    // gow3 19 Oct 2026: time of each part (U1: ~23 ms per 1 MiB unmap, a 1.8 s hitch before a
+    // cutscene); a line when they took 20 ms or more since the last one (at most every 0.25 s).
+    using Clock = std::chrono::steady_clock;
+    static std::atomic<u64> unmaps{0}, drain_ns{0}, buffer_ns{0}, texture_ns{0};
+    static std::atomic<s64> last_report{0};
+    const auto ns = [](Clock::duration d) {
+        return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(d).count());
+    };
+    const auto t0 = Clock::now();
     DrainDrawPipe();
+    const auto t1 = Clock::now();
     buffer_cache.InvalidateMemory(addr, size);
+    const auto t2 = Clock::now();
     texture_cache.UnmapMemory(addr, size);
+    const auto t3 = Clock::now();
+    unmaps.fetch_add(1, std::memory_order_relaxed);
+    drain_ns.fetch_add(ns(t1 - t0), std::memory_order_relaxed);
+    buffer_ns.fetch_add(ns(t2 - t1), std::memory_order_relaxed);
+    texture_ns.fetch_add(ns(t3 - t2), std::memory_order_relaxed);
+    const s64 now = s64(ns(t3.time_since_epoch()));
+    s64 last = last_report.load(std::memory_order_relaxed);
+    if (now - last >= 250'000'000 &&
+        drain_ns.load(std::memory_order_relaxed) + buffer_ns.load(std::memory_order_relaxed) +
+                texture_ns.load(std::memory_order_relaxed) >= 20'000'000 &&
+        last_report.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+        std::printf("GPU: unmap time: %llu unmaps; draw pipe %.1f ms, buffer cache %.1f ms (%llu "
+                    "downloads of GPU data, %.1f ms), texture cache %.1f ms\n",
+                    (unsigned long long)unmaps.exchange(0), drain_ns.exchange(0) / 1e6,
+                    buffer_ns.exchange(0) / 1e6,
+                    (unsigned long long)VideoCore::g_invalidate_downloads.exchange(0),
+                    VideoCore::g_invalidate_download_ns.exchange(0) / 1e6,
+                    texture_ns.exchange(0) / 1e6);
+        std::fflush(stdout);
+    }
     {
         std::scoped_lock lock{mapped_ranges_mutex};
         mapped_generation.fetch_add(1, std::memory_order_acq_rel);

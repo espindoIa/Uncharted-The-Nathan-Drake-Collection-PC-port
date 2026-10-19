@@ -1485,6 +1485,59 @@ Upstream 0.3.1 merged (19 Oct), choices:
 - Launcher settings version stays 7 (the fork's multithreaded default) with 0.3.1's Wine
   game_dir_unix step; package ships play.py and install_update.py + PkgTool.
 
+Upstream 0.4.0 merged (19 Oct, upstream/main 6318dfb), choices:
+- Taken as is:
+  - runtime_memory.c maps guest ranges as views of at most 2 MiB (#52, GOW3_VIEW_CHUNK_MB=0
+    for one view), plus probe.c's cover_current_stack bounding guest stacks by their mapping.
+    The fork's protection paths already work per region (runtime_memory.c protect loop,
+    carve_host's saved runs), so no fork code assumed one view per mapping.
+  - Map/unmap timing lines ("memory map time", "GPU: unmap time").
+  - GOW3_COPY64_EOP_READBACK for Drake's Fortune (#6), and the U1 magazine cheat patch.
+  - The FSR 1 pass's input_image_size/LastOutput, and fetch_aa_files.sh fetching all FSR 4
+    presets.
+- Labels in compute RELEASE_MEM (#51): both sides wrote them through the backing view. The
+  fork's version and comment are kept.
+- Upscaling (kuraeow, upstream PR 50; 61c3742, 98e9b06):
+  - The code is in. TemporalUpscaler::OnComposite and composite_frames run only with the
+    velocity camera (camera_motion.VelocityMode()) and GOW3_RENDER_RES.
+  - probe_uncharted.py sets UNCHARTED_OUTPUT_RES / GOW3_RENDER_RES / GOW3_UI_COMPOSITE_PS only
+    when UNCHARTED_MOTION_SOURCE=velocity. With the fork's flat camera, GOW3_RENDER_RES would
+    have put the upscaler on its old compatibility path (scaled_session). Without this gate,
+    Drake's Fortune at 4K (render 2880x1620) set it.
+  - The rasterizer's frame start keeps the fork's FlatSource gate (display_frame_open) inside
+    upstream's frame_start lambda and !CompositeFrames() condition.
+  - The launcher, README and overlay text stay the fork's: Anti-aliasing + Mode + DLSS model,
+    the "Upscale with FSR 1" toggle.
+  - Upstream changes to RunScaled that also reach the fork's quality modes:
+    - LdrFormat: 8-bit sRGB inputs are read through UNORM views, and the UI image is UNORM.
+    - TAA resolves at the render size, then FSR 1 or a bilinear blit brings it to the output.
+- Not taken:
+  - upstream's switch turning multithreading off for Uncharted 3 (UNCHARTED_U3_MULTITHREADED_TEST);
+  - its Drake's Fortune MT-off block, which was already dropped at the 0.3.0 merge.
+- Release notes: tools/release-notes/v0.4.0.md stays the fork's. Both repositories now have a
+  0.4.0, so the next fork release needs a version name that cannot be mistaken for upstream's
+  (ROADMAP.md, 0.5).
+- Checked after the merge with tools/play.py: 4K, multithreading on, DLSS model M, Continue
+  into gameplay, 15 s measure. All three images were checked by screenshot.
+
+  | Game | Settings | Result |
+  |---|---|---|
+  | U3 | DLAA | 64.7 FPS, p99 24.5 ms, GPU 95%. DLSS gets HDR input, so LdrFormat is not on this path. |
+  | U3 | DLSS Quality (GOW3_UPSCALE_PRESET=1) | 2560x1440 -> 3840x2160, HDR input, 85.2 FPS, p99 19.5 ms, colours right. |
+  | U1 | DLAA | Renders 2880x1620 as before; no "Upscaling:" line, so the velocity gate holds. 92.4 FPS, GPU 83%. |
+  | U2 | DLAA | 67.6 FPS, GPU 96%. |
+
+  U1's map log: "205 unmaps 6.4 ms" in total, against ~23 ms for each unmap before #52's
+  chunked views. No ASSERTION and no "NOT applied" patch in any game.
+- Not checked:
+  - the grenade launcher scene (#6);
+  - #52's museum cutscene in U3;
+  - the velocity-camera upscaling path (UNCHARTED_MOTION_SOURCE=velocity with
+    UNCHARTED_OUTPUT_RES);
+  - FSR 4 and TAA in the quality modes.
+- Python tests: 4 errors that are not caused by the merge and that touch no file it changed:
+  God of War modules (gow3_vulkan.py, save_backup, upscaler assets) and symlink privilege.
+
 ### U3 multithreaded freeze / "Invalid packet" (FIXED 19 Oct)
 - User: U3 "crashes" seconds into gameplay (port package, 4K, 120 FPS, DLAA model M, MT on). The
   run's log simply stopped, exit code 0: the window thread's _Exit(0) after a close request (the
