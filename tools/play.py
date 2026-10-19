@@ -63,15 +63,28 @@ DETACHED_PROCESS = 0x8
 
 
 def load_state():
-    try:
-        return json.loads(STATE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    # Another play.py may be replacing the file right now: retry before giving up.
+    for _ in range(20):
+        try:
+            return json.loads(STATE.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError):
+            time.sleep(0.05)
+    return {}
 
 
 def save_state(state):
     PLAY.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps(state, indent=1), encoding="utf-8")
+    tmp = STATE.with_name(f"session.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(state, indent=1), encoding="utf-8")
+    for _ in range(20):
+        try:
+            os.replace(tmp, STATE)  # atomic: readers see the old or the new file, never half
+            return
+        except PermissionError:  # Windows: a reader has it open
+            time.sleep(0.05)
+    tmp.unlink(missing_ok=True)
 
 
 def game_running():
