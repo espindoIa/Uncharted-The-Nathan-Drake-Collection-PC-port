@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: BilalReloaded's port (the original)
+    url: https://github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port/issues
+    about: Problems with BilalReloaded's builds go to his repository.

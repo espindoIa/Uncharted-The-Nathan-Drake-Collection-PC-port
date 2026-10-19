@@ -4,7 +4,10 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
-## Unreleased (fork)
+## Unreleased (fork 0.5.0 "Expedition")
+
+- **Bug reports on this fork:** the fork's GitHub page now has Issues, with a form that asks for
+  what the crash needs to be traced (boot.log, game version, graphics card, launcher settings).
 
 - **Fixed: a 15.8 GB texture could crash the game with "Device lost" after a long session**
   (upstream #57, Drake's Fortune after 26 minutes on an 8 GB card). A broken texture description

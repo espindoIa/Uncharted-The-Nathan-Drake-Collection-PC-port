@@ -1,0 +1,79 @@
+name: Bug report (crash, freeze, wrong picture)
+description: Something goes wrong in a game or the launcher of the Expedition Edition.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. A crash or freeze can only be traced with its log: please attach
+        **boot.log** (launcher → **Advanced** → **Open log folder**, right after it happened).
+        This is the Expedition Edition fork. For BilalReloaded's builds, report on
+        [his repository](https://github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port/issues).
+  - type: dropdown
+    id: game
+    attributes:
+      label: Game
+      options:
+        - "Uncharted: Drake's Fortune (U1)"
+        - "Uncharted 2: Among Thieves (U2)"
+        - "Uncharted 3: Drake's Deception (U3)"
+        - Collection menu
+        - Launcher
+    validations:
+      required: true
+  - type: input
+    id: port_version
+    attributes:
+      label: Port version
+      description: The launcher's title bar or Advanced page, for example 0.5.0.
+    validations:
+      required: true
+  - type: dropdown
+    id: game_version
+    attributes:
+      label: Game version
+      description: The launcher's Advanced page shows whether update 1.02 is used.
+      options:
+        - US (CUSA02320) with update 1.02
+        - Europe (CUSA02344) with update 1.02
+        - US (CUSA02320) without the update (1.00)
+        - Europe (CUSA02344) without the update (1.00)
+        - Other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead. For a crash, the launcher's message.
+    validations:
+      required: true
+  - type: textarea
+    id: where
+    attributes:
+      label: Where and how often
+      description: Chapter and place, what you were doing, and whether it happens again at the same spot.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: boot.log (and hang-*.txt for a freeze)
+      description: Drag the files here. For a freeze, also the newest hang-*.txt from the same folder.
+    validations:
+      required: true
+  - type: textarea
+    id: pc
+    attributes:
+      label: PC
+      description: Graphics card and driver version, CPU, RAM, Windows version (or Steam Deck / Linux).
+      placeholder: "RTX 4060 8 GB, driver 617.42; i5-8400; 16 GB; Windows 11"
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: Launcher settings
+      description: Render resolution, anti-aliasing/upscaling (and DLSS model), frame rate limit, frames queued, multithreaded rendering on or off. A screenshot of the pages works too.
+    validations:
+      required: true

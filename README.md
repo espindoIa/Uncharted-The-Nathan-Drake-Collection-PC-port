@@ -126,7 +126,8 @@ controller buttons).
 - Frame rates above 120 are not offered: the games' movement breaks (Drake's Fortune at 160 FPS
   dropped Nate through the world).
 - Uncharted 3 has had less play testing than the other two: please report crashes with the log
-  (launcher **Advanced -> Open log folder**, `boot.log`).
+  (launcher **Advanced -> Open log folder**, `boot.log`) on this fork's
+  [Issues](../../issues/new/choose) page.
 
 ## Playing
 
