@@ -14,7 +14,7 @@ unless it sits behind the game-hooks gate (below).
 - The playable port is in `Downloads\Jogos_e_Mods\Jogos\Uncharted-PC-Port`: `Uncharted\` is the extracted package (the player opens `Uncharted Launcher.exe` there), `Jogo\CUSA02320\` the game (US) with `Jogo\CUSA02320-patch\` its update 1.02 (since 19 Oct; earlier Europe's CUSA02344 1.00), `Versoes-antigas\` earlier installs.
 - Scripts outside the repo, in `C:\dev`: `update_port.sh` installs `dist/Uncharted-windows.zip` as the player's `Uncharted\` (old one to `Versoes-antigas`, `analysis/uncharted-user` with saves carried over; then copy the player's `nvngx_dlss.dll` from the old `gow3_pc/out` if missing). `pkgclean.sh` boots U3 from the zip extracted into an empty folder. `bench/` holds the benchmark and frame-pacing scripts (`bench.sh <u1|u2|u3> <name>`, `pace.sh`, `timeline.py`). Close the player's launcher/game before `update_port.sh`.
 - Remotes:
-  - `origin` is the fork, `espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port`, and the work is on branch `claude/dlss-uncharted`.
+  - `origin` is the fork, `espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port`, and the work is on `main` (the former `claude/dlss-uncharted` branch was merged into it and removed, 19 Oct).
   - `upstream` is BilalReloaded's repo. Its 0.3.0 is merged into the branch; the merge choices are listed under "Fork (espindoIa) notes" in `analysis/STATUS.md`.
 - Both sides patch some of the same game bytes. When taking more upstream work, look for duplicate patch tables in `tools/probe_uncharted.py`: a patch applied first keeps a later one's signature from matching.
 
