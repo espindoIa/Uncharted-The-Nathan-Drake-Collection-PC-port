@@ -16,6 +16,7 @@ see the screen as it is now, in a loop (look, decide, act).
     python tools/play.py replay <route> [--times N]        played back by the game itself
                          [--marks 10,30 --prefix P]        shots at those seconds and at the end
     python tools/play.py measure 20 [--route R] [--tag T]  frame times (port and PresentMon), GPU use
+    python tools/play.py presentmon file.csv   the same PresentMon summary for any capture
     python tools/play.py compare a.png b.png   SSIM and changed pixels of two shots
     python tools/play.py stop
 
@@ -483,6 +484,47 @@ def stats_line(label, times):
             f"1% low {1000 / statistics.fmean(slow):.1f} FPS, worst {ordered[-1]:.1f} ms")
 
 
+def presentmon_lines(tag, csv_path):
+    """Summary of a PresentMon 2.x CSV (--v2_metrics; 1.x MsBetweenPresents files work too).
+
+    FrameTime is the present-to-present interval and DisplayedTime how long each shown frame stayed
+    on screen. GPUBusy is the time in that interval when the GPU ran this process's work (all
+    queues, DLSS included) and GPUWait the gaps between. GPU busy close to the frame time means
+    the GPU is the limit; a large GPU wait means the GPU waited for the CPU side (the port's
+    command, recording or present threads). CPUBusy is not the game's CPU time here: the port
+    presents from its own present thread."""
+    import csv
+    with Path(csv_path).open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        return [f"{tag} PresentMon: no frames"]
+
+    def column(name):
+        return [float(r[name]) for r in rows if r.get(name) not in (None, "", "NA")]
+
+    key = "MsBetweenPresents" if "MsBetweenPresents" in rows[0] else "FrameTime"
+    frame = column(key)
+    lines = [stats_line(f"{tag} PresentMon", frame)]
+    shown = column("DisplayedTime") or column("MsBetweenDisplayChange")
+    if shown:
+        lines.append(stats_line(f"{tag} PresentMon on screen", shown))
+    busy, wait = column("GPUBusy") or column("MsGPUActive"), column("GPUWait")
+    if busy and frame:
+        mean_frame, mean_busy = statistics.fmean(frame), statistics.fmean(busy)
+        text = f"{tag} PresentMon GPU busy {mean_busy:.2f} ms/frame ({100 * mean_busy / mean_frame:.0f}% of the frame)"
+        if wait:
+            text += f", GPU wait {statistics.fmean(wait):.2f} ms/frame"
+        latency = column("GPULatency")
+        if latency:
+            text += f", CPU start to GPU start {statistics.fmean(latency):.2f} ms"
+        lines.append(text)
+    return lines
+
+
+def cmd_presentmon(args):
+    print("\n".join(presentmon_lines(args.tag or Path(args.csv).stem, args.csv)))
+
+
 def cmd_measure(args):
     state = load_state()
     tag = args.tag or "measure"
@@ -490,12 +532,17 @@ def cmd_measure(args):
     out_dir.mkdir(parents=True, exist_ok=True)
     pm = presentmon_exe() if not args.no_presentmon else None
     pm_csv = out_dir / f"{tag}.csv"
+    pm_log = out_dir / f"{tag}.presentmon.txt"
     pm_process = None
     if pm:
         pm_csv.unlink(missing_ok=True)
-        pm_process = subprocess.Popen(
-            [pm, "--process_name", "Uncharted.exe", "--output_file", str(pm_csv), "--timed",
-             str(args.seconds), "--terminate_after_timed", "--no_console_stats", "--v2_metrics"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # 19 Oct: a session left by an interrupted run made every later capture fail silently.
+        with pm_log.open("w", encoding="utf-8") as log:
+            pm_process = subprocess.Popen(
+                [pm, "--process_name", "Uncharted.exe", "--output_file", str(pm_csv), "--timed",
+                 str(args.seconds), "--terminate_after_timed", "--no_console_stats", "--v2_metrics",
+                 "--session_name", "UnchartedPlay", "--stop_existing_session"],
+                stdout=log, stderr=subprocess.STDOUT)
     smi = subprocess.Popen(["nvidia-smi", "--query-gpu=utilization.gpu,power.draw", "--format=csv,noheader,nounits",
                             "-lms", "500"], stdout=subprocess.PIPE, text=True) if shutil.which("nvidia-smi") else None
     before = len(read_frametimes())
@@ -523,23 +570,17 @@ def cmd_measure(args):
     lines = []
     if kept:
         lines.append(stats_line(f"{tag} port", kept))
+        # The window's frame times as they are, for A/B statistics over many windows.
+        (out_dir / f"{tag}.port.txt").write_text("\n".join(f"{v:.3f}" for v in kept) + "\n",
+                                                 encoding="ascii")
     if pm_process:
         pm_process.wait(timeout=30)
         try:
-            import csv
-            with pm_csv.open(newline="") as f:
-                rows = list(csv.DictReader(f))
-            key = "MsBetweenPresents" if rows and "MsBetweenPresents" in rows[0] else "FrameTime"
-            pm_times = [float(r[key]) for r in rows if r.get(key) not in (None, "", "NA")]
-            if pm_times:
-                line = stats_line(f"{tag} PresentMon", pm_times)
-                if rows and "GPUBusy" in rows[0]:
-                    busy = [float(r["GPUBusy"]) for r in rows if r.get("GPUBusy") not in (None, "", "NA")]
-                    if busy:
-                        line += f", GPU busy {statistics.fmean(busy):.2f} ms/frame"
-                lines.append(line)
+            lines.extend(presentmon_lines(tag, pm_csv))
         except OSError:
-            lines.append(f"{tag} PresentMon: no capture (needs the Performance Log Users group or admin)")
+            detail = pm_log.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+            lines.append(f"{tag} PresentMon: no capture ({detail[-1] if detail else 'no output'}; "
+                         "needs the Performance Log Users group or admin)")
     if smi and samples:
         util = statistics.fmean(float(s[0]) for s in samples)
         watts = statistics.fmean(float(s[1]) for s in samples)
@@ -665,6 +706,10 @@ def main():
     p.add_argument("--tag")
     p.add_argument("--no-presentmon", action="store_true")
     p.set_defaults(func=cmd_measure)
+    p = sub.add_parser("presentmon")
+    p.add_argument("csv")
+    p.add_argument("--tag")
+    p.set_defaults(func=cmd_presentmon)
     p = sub.add_parser("compare")
     p.add_argument("a")
     p.add_argument("b")
