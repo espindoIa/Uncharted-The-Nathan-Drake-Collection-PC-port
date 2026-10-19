@@ -28,6 +28,9 @@
 #include <time.h>
 #include <SDL3/SDL.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #define ERR_INVALID_ARG ((int32_t)0x80920001)
 #define ERR_INVALID_HANDLE ((int32_t)0x80920003)
@@ -577,6 +580,8 @@ static void sample_host(PadData *d) {
 static struct { uint32_t buttons; int stick[4]; float mouse[2]; int kbm, pad; } injected={0,{-1,-1,-1,-1},{0,0},0,0};
 static int replay_armed;      /* 1 while a GOW3_PAD_REPLAY recording plays, 2 once it ended */
 static uint64_t replay_start; /* 0: (re)start at the next sample */
+static int replay_loaded;     /* 0: (re)load the recording at the next start */
+static char replay_path[512]; /* from the token replay=<file>; else GOW3_PAD_REPLAY */
 static void read_inject(void) {
     static const char *path; static int checked; static uint64_t last_check; static struct timespec mtime;
     if (!checked) { path=getenv("GOW3_PAD_FILE"); checked=1; }
@@ -584,13 +589,17 @@ static void read_inject(void) {
     uint64_t now=now_us();
     if (now-last_check<20000) return;
     last_check=now;
+#ifdef _WIN32
+    /* stat() has whole-second mtimes on Windows: two edits of the same size within a second
+     * (scripted play: "lx=128" then "lx=255") looked unchanged. The 100 ns write time does not. */
+    WIN32_FILE_ATTRIBUTE_DATA attr;
+    if (!GetFileAttributesExA(path,GetFileExInfoStandard,&attr)) return;
+    const long long written=((long long)attr.ftLastWriteTime.dwHighDateTime<<32)|attr.ftLastWriteTime.dwLowDateTime;
+    if (written==mtime.tv_sec && (long)attr.nFileSizeLow==mtime.tv_nsec) return;
+    mtime=(struct timespec){(time_t)written,(long)attr.nFileSizeLow};
+#else
     struct stat st;
     if (stat(path,&st)!=0) return;
-#ifdef _WIN32
-    /* Whole-second mtimes: the size tells two edits within a second apart. */
-    if (st.st_mtime==mtime.tv_sec && st.st_size==mtime.tv_nsec) return;
-    mtime=(struct timespec){st.st_mtime,(long)st.st_size};
-#else
     if (st.st_mtim.tv_sec==mtime.tv_sec && st.st_mtim.tv_nsec==mtime.tv_nsec) return;
     mtime=st.st_mtim;
 #endif
@@ -604,6 +613,10 @@ static void read_inject(void) {
     char token[64];
     while (fscanf(f,"%63s",token)==1) {
         if (!strcmp(token,"replay") && replay_armed!=1) { replay_armed=1; replay_start=0; } /* GOW3_PAD_REPLAY */
+        if (!strncmp(token,"replay=",7) && replay_armed!=1) { /* that recording instead (tools/play.py) */
+            snprintf(replay_path,sizeof(replay_path),"%s",token+7);
+            replay_loaded=0; replay_armed=1; replay_start=0;
+        }
         for (size_t i=0;i<sizeof(ps_names)/sizeof(*ps_names);++i) if (!strcmp(token,ps_names[i].name)) injected.buttons|=ps_names[i].ps;
         for (int i=0;i<4;++i) if (!strncmp(token,sticks[i],3)) { int v=atoi(token+3); injected.stick[i]=v<0 ? 0 : v>255 ? 255 : v; }
         if (!strncmp(token,"mx=",3)) injected.mouse[0]=(float)atof(token+3);
@@ -654,12 +667,12 @@ static PadSample *replay; static size_t replay_count, replay_next;
 static void replay_sample(PadData *d) {
     if (!replay_armed) return;
     if (!replay_start) {
-        static int loaded;
-        if (!loaded) {
-            loaded=1;
-            const char *path=getenv("GOW3_PAD_REPLAY");
+        if (!replay_loaded) {
+            replay_loaded=1;
+            const char *path=replay_path[0] ? replay_path : getenv("GOW3_PAD_REPLAY");
             FILE *f=path ? fopen(path,"r") : NULL;
             PadSample s; unsigned v[8]; size_t cap=0;
+            free(replay); replay=NULL; replay_count=0;
             while (f && fscanf(f,"%u %u %u %u %u %u %u %u",&v[0],&v[1],&v[2],&v[3],&v[4],&v[5],&v[6],&v[7])==8) {
                 s=(PadSample){v[0],v[1],{(uint8_t)v[2],(uint8_t)v[3],(uint8_t)v[4],(uint8_t)v[5]},(uint8_t)v[6],(uint8_t)v[7]};
                 if (replay_count==cap && !(replay=realloc(replay,(cap=cap ? cap*2 : 1024)*sizeof(*replay)))) break;

@@ -38,6 +38,7 @@
 #include <span>
 #include <sstream>
 #include <system_error>
+#include <thread>
 #include <vector>
 #include <vk_mem_alloc.h>
 #ifdef MemoryBarrier
@@ -390,6 +391,211 @@ static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandB
     });
 }
 
+// gow3: GOW3_LIVE_VIEW=<dir>: every GOW3_LIVE_VIEW_MS (default 200) the presented image, scaled to
+// GOW3_LIVE_VIEW_WIDTH (default 960) pixels wide, goes to <dir>/live.bmp (written to a temporary
+// file and renamed, so a reader never sees half a frame), and <dir>/live.txt says "frame <n> ms <t>
+// <w>x<h>" (n counts presented frames, t is milliseconds since the first capture). Scripted play
+// (tools/play.py) watches the game this way; the window needs no focus and may be covered.
+namespace {
+struct LiveView {
+    std::string dir;
+    u32 interval_ms = 200;
+    u32 width = 960;
+    bool failed = false;
+    std::chrono::steady_clock::time_point last{}, start{};
+    std::atomic<bool> busy{false};
+    vk::Image image{};
+    VmaAllocation image_allocation{};
+    VkBuffer buffer{};
+    VmaAllocation buffer_allocation{};
+    VmaAllocationInfo buffer_info{};
+    u32 w = 0, h = 0, src_w = 0, src_h = 0;
+    vk::Format format{};
+};
+
+LiveView* LiveViewConfig() {
+    static LiveView* view = [] () -> LiveView* {
+        const char* dir = std::getenv("GOW3_LIVE_VIEW");
+        if (!dir || !*dir) return nullptr;
+        auto* v = new LiveView{};
+        v->dir = dir;
+        if (const char* ms = std::getenv("GOW3_LIVE_VIEW_MS")) v->interval_ms = std::max(20, std::atoi(ms));
+        if (const char* w = std::getenv("GOW3_LIVE_VIEW_WIDTH")) v->width = std::clamp(std::atoi(w), 64, 3840);
+        std::error_code ec;
+        std::filesystem::create_directories(v->dir, ec);
+        std::printf("Live view: %s every %u ms, %u pixels wide\n", v->dir.c_str(), v->interval_ms, v->width);
+        return v;
+    }();
+    return view;
+}
+
+// 24-bit bottom-up BMP from the captured pixels (8-bit BGRA/RGBA or 10-bit packed).
+void WriteLiveView(LiveView* v, std::vector<u8> pixels, u32 w, u32 h, vk::Format format, u64 frame,
+                   long long ms) {
+    const u32 row = (w * 3 + 3) & ~3u;
+    std::vector<u8> bmp(54 + size_t(row) * h, 0);
+    auto put32 = [&](size_t at, u32 value) { std::memcpy(&bmp[at], &value, 4); };
+    bmp[0] = 'B';
+    bmp[1] = 'M';
+    put32(2, u32(bmp.size()));
+    put32(10, 54);
+    put32(14, 40);
+    put32(18, w);
+    put32(22, h);
+    bmp[26] = 1;
+    bmp[28] = 24;
+    put32(34, u32(row) * h);
+    const bool bgra = format == vk::Format::eB8G8R8A8Unorm || format == vk::Format::eB8G8R8A8Srgb;
+    const bool abgr10 = format == vk::Format::eA2B10G10R10UnormPack32;
+    const bool argb10 = format == vk::Format::eA2R10G10B10UnormPack32;
+    for (u32 y = 0; y < h; ++y) {
+        const u8* src = pixels.data() + size_t(y) * w * 4;
+        u8* dst = bmp.data() + 54 + size_t(h - 1 - y) * row;
+        for (u32 x = 0; x < w; ++x, src += 4, dst += 3) {
+            u8 r, g, b;
+            if (abgr10 || argb10) {
+                u32 p;
+                std::memcpy(&p, src, 4);
+                const u8 lo = u8((p >> 2) & 0xff), mid = u8((p >> 12) & 0xff), hi = u8((p >> 22) & 0xff);
+                r = abgr10 ? lo : hi;
+                g = mid;
+                b = abgr10 ? hi : lo;
+            } else if (bgra) {
+                b = src[0], g = src[1], r = src[2];
+            } else {
+                r = src[0], g = src[1], b = src[2];
+            }
+            dst[0] = b, dst[1] = g, dst[2] = r;
+        }
+    }
+    const auto bmp_path = std::filesystem::path(v->dir) / "live.bmp";
+    const auto tmp_path = std::filesystem::path(v->dir) / "live.bmp.tmp";
+    if (FILE* f = std::fopen(tmp_path.string().c_str(), "wb")) {
+        std::fwrite(bmp.data(), 1, bmp.size(), f);
+        std::fclose(f);
+        std::error_code ec;
+        std::filesystem::rename(tmp_path, bmp_path, ec);
+        const auto txt = std::filesystem::path(v->dir) / "live.txt";
+        const auto txt_tmp = std::filesystem::path(v->dir) / "live.txt.tmp";
+        if (FILE* t = std::fopen(txt_tmp.string().c_str(), "w")) {
+            std::fprintf(t, "frame %llu ms %lld %ux%u\n", static_cast<unsigned long long>(frame), ms, w, h);
+            std::fclose(t);
+            std::filesystem::rename(txt_tmp, txt, ec);
+        }
+    }
+}
+
+// Records the scaled copy of the presented image (General layout after the post process pass).
+void CaptureLiveView(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer cmdbuf,
+                     vk::Image src, u32 src_w, u32 src_h, vk::Format format) {
+    static std::atomic<u64> presented{0};
+    const u64 frame = ++presented;
+    LiveView* v = LiveViewConfig();
+    if (!v || v->failed || !src_w || !src_h) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - v->last < std::chrono::milliseconds(v->interval_ms) || v->busy.load()) return;
+    if (v->start == std::chrono::steady_clock::time_point{}) v->start = now;
+    v->last = now;
+    const u32 w = std::min(v->width, src_w);
+    const u32 h = std::max(1u, u32(u64(src_h) * w / src_w));
+    if (v->image && (v->w != w || v->h != h || v->format != format)) {
+        vmaDestroyImage(instance.GetAllocator(), VkImage(v->image), v->image_allocation);
+        vmaDestroyBuffer(instance.GetAllocator(), v->buffer, v->buffer_allocation);
+        v->image = vk::Image{};
+    }
+    if (!v->image) {
+        const auto props = instance.GetPhysicalDevice().getFormatProperties(format);
+        const auto need = vk::FormatFeatureFlagBits::eBlitSrc | vk::FormatFeatureFlagBits::eBlitDst |
+                          vk::FormatFeatureFlagBits::eSampledImageFilterLinear;
+        if ((props.optimalTilingFeatures & need) != need) {
+            std::printf("Live view: off (%s cannot be scaled by a blit)\n", vk::to_string(format).c_str());
+            v->failed = true;
+            return;
+        }
+        const VkImageCreateInfo image_ci{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = VkFormat(format),
+            .extent = {w, h, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+        const VmaAllocationCreateInfo image_alloc{.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        VkImage image{};
+        if (vmaCreateImage(instance.GetAllocator(), &image_ci, &image_alloc, &image,
+                           &v->image_allocation, nullptr) != VK_SUCCESS) {
+            v->failed = true;
+            return;
+        }
+        const VkBufferCreateInfo buffer_ci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                           .size = VkDeviceSize(w) * h * 4,
+                                           .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        const VmaAllocationCreateInfo buffer_alloc{
+            .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+            .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST};
+        if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &buffer_alloc, &v->buffer,
+                            &v->buffer_allocation, &v->buffer_info) != VK_SUCCESS) {
+            vmaDestroyImage(instance.GetAllocator(), image, v->image_allocation);
+            v->failed = true;
+            return;
+        }
+        v->image = vk::Image{image};
+        v->w = w, v->h = h, v->format = format;
+    }
+    const vk::ImageSubresourceRange color{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+    const vk::MemoryBarrier2 written{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                                     .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                                     .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                                     .dstAccessMask = vk::AccessFlagBits2::eTransferRead};
+    const vk::ImageMemoryBarrier2 to_dst{.srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                                         .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+                                         .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                                         .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                                         .oldLayout = vk::ImageLayout::eUndefined,
+                                         .newLayout = vk::ImageLayout::eTransferDstOptimal,
+                                         .image = v->image,
+                                         .subresourceRange = color};
+    cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1,
+                             .pMemoryBarriers = &written,
+                             .imageMemoryBarrierCount = 1,
+                             .pImageMemoryBarriers = &to_dst});
+    const vk::ImageBlit region{
+        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+        .srcOffsets = std::array{vk::Offset3D{0, 0, 0}, vk::Offset3D{int(src_w), int(src_h), 1}},
+        .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+        .dstOffsets = std::array{vk::Offset3D{0, 0, 0}, vk::Offset3D{int(w), int(h), 1}},
+    };
+    cmdbuf.blitImage(src, vk::ImageLayout::eGeneral, v->image, vk::ImageLayout::eTransferDstOptimal,
+                     region, vk::Filter::eLinear);
+    const vk::ImageMemoryBarrier2 to_src{.srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                                         .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                                         .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                                         .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+                                         .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+                                         .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+                                         .image = v->image,
+                                         .subresourceRange = color};
+    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_src});
+    cmdbuf.copyImageToBuffer(v->image, vk::ImageLayout::eTransferSrcOptimal, v->buffer,
+                             vk::BufferImageCopy{.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                                 .imageExtent = {w, h, 1}});
+    v->busy = true;
+    const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - v->start).count();
+    scheduler.DeferPriorityOperation([v, allocator = instance.GetAllocator(), w, h, format, frame, ms] {
+        vmaInvalidateAllocation(allocator, v->buffer_allocation, 0, VK_WHOLE_SIZE);
+        const u8* mapped = static_cast<const u8*>(v->buffer_info.pMappedData);
+        std::vector<u8> pixels(mapped, mapped + size_t(w) * h * 4);
+        // The file write runs off the GPU threads; the next capture waits for it (busy).
+        std::thread([v, pixels = std::move(pixels), w, h, format, frame, ms]() mutable {
+            WriteLiveView(v, std::move(pixels), w, h, format, frame, ms);
+            v->busy = false;
+        }).detach();
+    });
+}
+} // namespace
+
 Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                                VAddr cpu_address) {
     // gow3: GOW3_FRAME_DUMP_TRIGGER=<file>: when the file exists it is removed and this frame's
@@ -623,6 +829,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                 frame->width, frame->height, "output", frame_dump_index);
         ++frame_dump_index;
     }
+    CaptureLiveView(instance, draw_scheduler, cmdbuf, frame->image, frame->width, frame->height,
+                    swapchain.GetSurfaceFormat().format);
 
     // Flush frame creation commands.
     frame->ready_semaphore = draw_scheduler.GetWorkSemaphore()->Handle();
