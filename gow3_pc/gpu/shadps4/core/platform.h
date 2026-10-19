@@ -72,21 +72,25 @@ struct IrqController {
     void Signal(InterruptId irq) {
         ASSERT_MSG(static_cast<u32>(irq) <= static_cast<u32>(InterruptId::InterruptIdMax),
                    "Unexpected IRQ signaled");
-        auto& ctx = irq_contexts[static_cast<u32>(irq)];
-        std::unique_lock lock{ctx.m_lock};
-
-        LOG_TRACE(Core, "IRQ signaled: {}", magic_enum::enum_name(irq));
-
-        for (auto& [uid, h] : ctx.persistent_handlers) {
-            h(irq);
+        // gow3 19 Oct 2026: a handler can raise an interrupt itself. The end-of-pipe flip
+        // handler presents (Presenter::PrepareFrame), whose wait for the GPU lands fences held
+        // for ray-cast readbacks, and one of those signalled GfxEop again on this thread: the
+        // second lock of the same mutex froze Uncharted 3 on the title screen. An interrupt
+        // raised inside a handler is delivered right after that handler, on the same thread
+        // and in the order raised.
+        thread_local u32 depth = 0;
+        thread_local std::vector<InterruptId> raised_inside;
+        if (depth) {
+            raised_inside.push_back(irq);
+            return;
         }
-
-        if (!ctx.one_time_subscribers.empty()) {
-            const auto& h = ctx.one_time_subscribers.front();
-            h(irq);
-
-            ctx.one_time_subscribers.pop();
+        ++depth;
+        Deliver(irq);
+        for (size_t i = 0; i < raised_inside.size(); ++i) {
+            Deliver(raised_inside[i]);
         }
+        raised_inside.clear();
+        --depth;
     }
 
     /// gow3 18 Oct 2026: Signal on the interrupt delivery thread, in the order queued. The
@@ -117,6 +121,24 @@ struct IrqController {
     }
 
 private:
+    void Deliver(InterruptId irq) {
+        auto& ctx = irq_contexts[static_cast<u32>(irq)];
+        std::unique_lock lock{ctx.m_lock};
+
+        LOG_TRACE(Core, "IRQ signaled: {}", magic_enum::enum_name(irq));
+
+        for (auto& [uid, h] : ctx.persistent_handlers) {
+            h(irq);
+        }
+
+        if (!ctx.one_time_subscribers.empty()) {
+            const auto& h = ctx.one_time_subscribers.front();
+            h(irq);
+
+            ctx.one_time_subscribers.pop();
+        }
+    }
+
     void DeliverAsync() {
         Common::SetCurrentThreadName("gow3:Irq");
         std::vector<InterruptId> batch;

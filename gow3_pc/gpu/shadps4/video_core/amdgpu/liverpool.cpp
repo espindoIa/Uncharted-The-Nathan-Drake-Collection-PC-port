@@ -729,14 +729,24 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
         if (backing) {
             rasterizer.NoteLabelWrite(label, sel == DataSelect::Data32Low ? 4 : 8);
         }
-        rasterizer.SignalAfterHostCopies([packet = release.packet, pipe_id, backing] {
+        // gow3 19 Oct 2026: GPU writes recorded after this release (later in the stream) can
+        // protect the label's page before the Vulkan recording thread writes it. A plain store
+        // then faulted on that thread, and the fault's download waited for the GPU command thread,
+        // which waited for the draw pipe to drain, which (presenting a frame) waited for the
+        // recording thread: Uncharted 3 froze for good right after loading a save at 4K. The page
+        // is checked again when the label is written; GPU data there now came after the release,
+        // so the backing store (no fault) is the right order and needs no bookkeeping here.
+        auto& cache = rasterizer.GetBufferCache();
+        rasterizer.SignalAfterHostCopies([packet = release.packet, pipe_id, backing, &cache] {
             packet.SignalFence(
                 [pipe_id] {
                     Platform::IrqC::Instance()->SignalAsync(static_cast<Platform::InterruptId>(pipe_id));
                 },
                 [](VAddr, u16, u16) {},
-                [backing](void* address, u64 value, u32 num_bytes) {
-                    if (!backing || !Core::Memory::Instance()->TryWriteBacking(address, &value, num_bytes)) {
+                [backing, &cache](void* address, u64 value, u32 num_bytes) {
+                    const VAddr page = reinterpret_cast<VAddr>(address) & ~VAddr{4095};
+                    const bool protectable = backing || cache.MayBeGpuWritten(page, 4096);
+                    if (!protectable || !Core::Memory::Instance()->TryWriteBacking(address, &value, num_bytes)) {
                         std::memcpy(address, &value, num_bytes);
                     }
                 });
