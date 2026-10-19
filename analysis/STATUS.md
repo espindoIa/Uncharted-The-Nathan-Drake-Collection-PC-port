@@ -1464,6 +1464,17 @@ Merge choices (details in the sections below and in CHANGELOG.md):
   default in all three (0.3.0 forced it off in U1 for GitHub #23's grey guns; the user wants it
   on, 19 Oct; the fork's draw-pipe ordering fixes may cover #23, not verified).
 
+US version CUSA02320 + update 1.02 (19 Oct, the fork's own copy now: Jogo\CUSA02320 and
+CUSA02320-patch, no uroot):
+- From source after the 0.3.1 merge, 35-40 s boots of eboot.bin, big2 and big3 (probe_uncharted.py
+  --boot): "Update 01.02" found, no "NOT applied" patch, the runtime hooks installed (movie pacing
+  U1/U2/U3, mouse look), frames at the 120 FPS cap, no files.json / ASSERTION. The player's 0.3.1
+  package also played U3 with it (13:22 run: saves mounted, 46 s, exit 0).
+- So upstream's #29/#43/#48 stop (files.json -> not found, ASSERTION root, ingame-shaders.cpp) does
+  not reproduce with this dump. Not verified: those reporters' dumps (their bin.psarc matched
+  upstream's hashes), long play on US 1.02, and whether the menu path (Collection menu -> game)
+  differs from direct starts.
+
 Upstream 0.3.1 merged (19 Oct), choices:
 - One frame start per frame (Supermedo #261): applies to U1 and U3 only. U2 (FlatSource) keeps the
   fork's display_frame_open gate (four display draws a frame; the first after the scene starts it).

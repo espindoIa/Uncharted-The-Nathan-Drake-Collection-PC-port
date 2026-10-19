@@ -10,6 +10,17 @@ This fork ([espindoIa](https://github.com/espindoIa/Uncharted-The-Nathan-Drake-C
 adds the work below on top of 0.3.0, and has 0.3.1 (next section) merged in. Where both did the
 same thing, one was kept:
 
+- **US version (CUSA02320) with update 1.02 tested:** all three games start and play with it, and
+  every fix of the fork applies (each patch and hook found its bytes: the 1.02 executables are the
+  same as Europe's CUSA02344). The upstream 0.3.1 notes list this version as stopping at start
+  (#29, #43, #48); that stop did not happen with this copy, so its cause there is still unknown.
+  The launcher and `probe_uncharted.py` look for `game\CUSA02320` first, then `game\CUSA02344`.
+- **The launcher has its own look, "Expedition Edition":** night-blue panels with a signal-flare
+  orange, the game's art as a two-tone chart with a map grid and a marked route, Bahnschrift
+  headings, a compass icon (`tools/make_launcher_icon.py`) and the fork's name in the launcher and
+  game window titles. The header links to this fork; the credits on the Advanced page name
+  BilalReloaded's port it builds on. Launcher updates come from this fork's releases now (none
+  yet), no longer the upstream port's, whose packages would replace the fork's work.
 - **Uncharted 2: no more regular stutter at the GPU's limit.** About every fifth frame was
   finished together with the next one and stayed on screen 30+ ms: a frame waiting for GPU
   results of earlier work was prepared only once they were back, behind the next frame's work.

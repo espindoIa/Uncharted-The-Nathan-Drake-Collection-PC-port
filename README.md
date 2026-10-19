@@ -1,16 +1,18 @@
-# Uncharted: The Nathan Drake Collection — PC port
+# Uncharted: The Nathan Drake Collection — PC port, Expedition Edition
 
-Run the PS4 **Uncharted: The Nathan Drake Collection** (CUSA02344: *Drake's Fortune*, *Among
+Run the PS4 **Uncharted: The Nathan Drake Collection** (US CUSA02320 or Europe CUSA02344, update 1.02: *Drake's Fortune*, *Among
 Thieves* and *Drake's Deception*) natively on Windows. The game's own x86-64 code runs directly
 on the PC; a runtime supplies the PS4 system libraries, and a Vulkan renderer executes the PS4 GPU
 work.
 
-By **BilalReloaded** ([YouTube](https://www.youtube.com/@BilalReloaded/videos),
-[GitHub](https://github.com/bc160201983)), October 2026. What changed and when:
-[CHANGELOG.md](CHANGELOG.md).
+This is the **Expedition Edition** fork by [espindoIa](https://github.com/espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port):
+DLSS/DLAA in all three games, multithreaded rendering, smoother frame pacing and freeze fixes, a
+launcher of its own, and the US version (CUSA02320) with update 1.02 tested. It builds on the port
+by **BilalReloaded** ([GitHub](https://github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port)),
+whose releases up to 0.3.1 are merged in. What changed and when: [CHANGELOG.md](CHANGELOG.md).
 
 > **No game files are in this repository or its builds.** You need your own copy of the game
-> (the dumped CUSA02344 folder). This project is not affiliated with Sony, Naughty Dog or
+> (the dumped CUSA02320 or CUSA02344 folder). This project is not affiliated with Sony, Naughty Dog or
 > Bluepoint Games.
 
 ## Status
@@ -131,9 +133,9 @@ controller buttons).
    [Actions](../../actions/workflows/build-windows.yml) tab, latest successful run → Artifacts),
    or build it yourself (below). Extract it anywhere.
 2. Start **Uncharted Launcher.exe**. On the first Play, select your game folder: the dumped
-   `CUSA02344` folder (the one holding `eboot.bin` and `sce_sys`, often called `uroot`).
+   `CUSA02320` (US) or `CUSA02344` (Europe) folder (the one holding `eboot.bin` and `sce_sys`, often called `uroot`).
 3. **Recommended: update 1.02** (Bluepoint's stability, movie, audio and gameplay fixes). Extract
-   the update next to the game folder, named like it plus `-patch` (for example `CUSA02344-patch`,
+   the update next to the game folder, named like it plus `-patch` (for example `CUSA02320-patch`,
    with or without its `uroot` folder). The launcher's Advanced tab shows the version in use.
 4. Pick a game and a preset, press **PLAY**. The first start of each game prepares files and
    compiles shaders: expect a slow first load and some stutter until the cache has filled.

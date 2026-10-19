@@ -24,7 +24,8 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-REPOSITORY = "bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port"
+# The fork's own releases: the upstream port's packages would install over the fork's work.
+REPOSITORY = "espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port"
 RELEASES_PAGE = f"https://github.com/{REPOSITORY}/releases"
 API = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=20"
 ASSET = "Uncharted-windows.zip"

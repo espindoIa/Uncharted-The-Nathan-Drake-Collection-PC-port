@@ -22,15 +22,20 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
-from tkinter import messagebox
+from tkinter import font as tkfont, messagebox
 
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageDraw, ImageOps, ImageTk
 
 import updater  # launcher/updater.py: updates from the GitHub releases
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "launcher" / "assets"
-DEFAULT_GAME_DIR = ROOT / "game" / "CUSA02344" / "uroot"
+# The Collection's regions the port is tested with: US (CUSA02320, the fork's own copy, with update
+# 1.02) and Europe (CUSA02344). Their 1.02 executables are the same; every patch finds its bytes in both.
+GAME_IDS = ("CUSA02320", "CUSA02344")
+DEFAULT_GAME_DIR = next((ROOT / "game" / title / sub for title in GAME_IDS for sub in ("uroot", "")
+                         if (ROOT / "game" / title / sub / "eboot.bin").is_file()),
+                        ROOT / "game" / GAME_IDS[0])
 STARTER_EXE = ROOT / "Uncharted Launcher.exe"  # the packaged build's starter (tools/package_windows.py)
 USER_DIR = ROOT / "analysis" / "uncharted-user"
 INI_FILE = USER_DIR / "probe.ini"
@@ -96,14 +101,16 @@ def shared_config_file():
 CONFIG_FILE = (WINE and shared_config_file()) or PREFIX_CONFIG_FILE
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 APP_TITLE = "Uncharted: The Nathan Drake Collection"
-# Credits shown on the Advanced page: the anti-aliasing technologies.
-CREDITS = ("Credits: DLSS and DLAA use NVIDIA DLSS technology. NVIDIA, RTX and DLSS are trademarks of NVIDIA "
-           "Corporation. AMD FidelityFX Super Resolution (FSR 3.1, FSR 4) by AMD. Uncharted camera "
-           "motion for anti-aliasing after SuperMedo's Uncharted port.")
-# The author's links in the launcher header: label, address, color, hover color.
-LINKS = (("Patreon", "https://www.patreon.com/c/bilalreloaded", "#f96854", "#ff7f6e"),
-         ("YouTube", "https://www.youtube.com/@BilalReloaded/videos", "#d6302a", "#ef4038"),
-         ("GitHub", "https://github.com/bc160201983", "#24292f", "#3a4048"))
+# The fork's name in the window title and the hero.
+EDITION = "Expedition Edition"
+FORK_URL = "https://github.com/espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port"
+# Credits shown on the Advanced page: the port this fork builds on and the anti-aliasing technologies.
+CREDITS = ("Credits: based on BilalReloaded's Uncharted PC port (github.com/bc160201983), GPL. DLSS and DLAA "
+           "use NVIDIA DLSS technology. NVIDIA, RTX and DLSS are trademarks of NVIDIA Corporation. AMD "
+           "FidelityFX Super Resolution (FSR 3.1, FSR 4) by AMD. Uncharted camera motion for anti-aliasing "
+           "after SuperMedo's Uncharted port.")
+# Links in the launcher header: label, address, color, hover color.
+LINKS = (("GitHub", FORK_URL, "#18262f", "#22343f"),)
 
 GAMES = [
     {"key": "u1", "number": "1", "title": "DRAKE'S FORTUNE", "name": "Uncharted: Drake's Fortune", "subtitle": "Uncharted 1  •  double-click to play",
@@ -114,18 +121,25 @@ GAMES = [
      "exe": "big3-ps4_Shipping.elf", "log": "big3-ps4_Shipping"},
 ]
 
-# Palette: the Collection's parchment and gold over a dark leather brown.
-BG = "#120e0a"
-PANEL = "#1b1510"
-PANEL_HI = "#251d16"
-LINE = "#3a2e22"
-TEXT = "#f1e6cf"
-MUTED = "#a8977a"
-DIM = "#6f604b"
-GOLD = "#d4a24c"
-GOLD_HI = "#e9bc66"
-INK = "#2a1c0e"
-STOP_RED = "#b5533c"
+# Palette (the fork's own, "expedition at night"): night blue and slate panels, a signal-flare
+# orange for what is selected or pressed. tools/make_launcher_icon.py draws the icon in the same
+# colours.
+BG = "#0b1116"
+PANEL = "#111b22"
+PANEL_HI = "#18262f"
+LINE = "#22343f"
+HOVER_LINE = "#3a5562"
+TEXT = "#e6eeec"
+MUTED = "#8ea3a6"
+DIM = "#566b70"
+ACCENT = "#ff8a3d"
+ACCENT_HI = "#ffa45f"
+INK = "#1c0d02"
+STOP_RED = "#d9534f"
+# The hero's art in two tones (shadows, highlights) and its map grid.
+HERO_DARK = "#071016"
+HERO_LIGHT = "#6f9ea2"
+HERO_GRID = "#1d3440"
 
 # At most 120: faster, the game's movement timing breaks (Drake's Fortune at 140-160 FPS: running
 # slows, Nate fell through the world). The runtime caps older, faster settings at 120 too.
@@ -616,7 +630,7 @@ def binding_label(binding):
 
 
 def is_game_dir(folder):
-    """The Collection's game folder (CUSA02344): eboot.bin and sce_sys/param.sfo."""
+    """The Collection's game folder (CUSA02320, CUSA02344): eboot.bin and sce_sys/param.sfo."""
     return bool(folder) and (Path(folder) / "eboot.bin").is_file() and \
         (Path(folder) / "sce_sys" / "param.sfo").is_file()
 
@@ -1105,7 +1119,7 @@ class Toggle(tk.Canvas):
     def draw(self):
         self.delete("all")
         pad = max(1, int(2 * self.s))
-        track = GOLD if self.value else LINE
+        track = ACCENT if self.value else LINE
         round_rect(self, 1, 1, self.w - 1, self.h - 1, self.h // 2, fill=track, outline=track)
         d = self.h - 2 * pad - 2
         x = self.w - pad - d - 1 if self.value else pad + 1
@@ -1146,7 +1160,7 @@ class Segmented(tk.Frame):
     def restyle(self):
         for option, item in self.labels.items():
             selected = option == self.value
-            item.config(bg=GOLD if selected else PANEL, fg=INK if selected else TEXT)
+            item.config(bg=ACCENT if selected else PANEL, fg=INK if selected else TEXT)
 
 
 class Dropdown(tk.Label):
@@ -1169,7 +1183,7 @@ class Dropdown(tk.Label):
             self.command(value)
 
     def open(self):
-        menu = tk.Menu(self, tearoff=0, bg=PANEL, fg=TEXT, activebackground=GOLD, activeforeground=INK,
+        menu = tk.Menu(self, tearoff=0, bg=PANEL, fg=TEXT, activebackground=ACCENT, activeforeground=INK,
                        font=self.font, bd=0)
         for option, label in self.options:
             menu.add_command(label=("\u2713  " if option == self.value else "     ") + label,
@@ -1251,7 +1265,7 @@ class Launcher:
         self.gpu_name = self.config.get("gpu")
         self.recommended = gpu_tier(self.gpu_name)
         self.fonts()
-        root.title(f"{APP_TITLE} - Launcher by BilalReloaded")
+        root.title(f"{APP_TITLE} - {EDITION}")
         root.configure(bg=BG)
         root.resizable(True, True)
         self.width = self.px(1180)
@@ -1328,15 +1342,20 @@ class Launcher:
         return int(value * self.s)
 
     def fonts(self):
-        self.f_title = ("Georgia", 40, "bold")
+        # Headings in Bahnschrift (Windows 10 and later: the condensed lettering of maps and road
+        # signs); Segoe UI where it is missing (Wine/Proton without it).
+        families = set(tkfont.families(self.root))
+        head = "Bahnschrift SemiBold" if "Bahnschrift SemiBold" in families else "Segoe UI Semibold"
+        self.f_title = (head, 40)
         self.f_subtitle = ("Segoe UI Semibold", 11)
-        self.f_card_number = ("Georgia", 30, "bold")
-        self.f_card_title = ("Georgia", 14, "bold")
+        self.f_edition = (head, 9)
+        self.f_card_number = (head, 30)
+        self.f_card_title = (head, 14)
         self.f_body = ("Segoe UI", 10)
         self.f_body_bold = ("Segoe UI Semibold", 10)
         self.f_small = ("Segoe UI", 9)
         self.f_tab = ("Segoe UI Semibold", 10)
-        self.f_play = ("Georgia", 17, "bold")
+        self.f_play = (head, 17)
 
     # -- layout -----------------------------------------------------------------------------
 
@@ -1357,61 +1376,77 @@ class Launcher:
                 art = Image.open(self.game_dir() / "sce_sys" / name).convert("RGB")
                 break
         if art is None:
-            art = Image.new("RGB", (1920, 1080), "#d9c9a6")
-        # Fill the width; keep Drake (right) and the top of the parchment in view.
+            art = Image.new("RGB", (1920, 1080), HERO_LIGHT)
+        # Fill the width; keep Drake (right) in view.
         scale = w / art.width
         art = art.resize((w, int(art.height * scale)), Image.LANCZOS)
         top = int(art.height * 0.02)
         art = art.crop((0, top, w, top + h))
-        # Fade into the dark panel below.
+        # The art in two tones, night blue to a faded teal: the game's picture as a chart at night.
+        art = ImageOps.colorize(ImageOps.autocontrast(art.convert("L"), cutoff=1), HERO_DARK, HERO_LIGHT)
+        # Darker on the left, where the title sits.
+        shade = Image.linear_gradient("L").rotate(90).resize((w, h))
+        art = Image.composite(art, Image.new("RGB", (w, h), HERO_DARK), shade.point(lambda v: 90 + v * 165 // 255))
+        # A map grid over it, then the fade into the dark panel below.
+        draw = ImageDraw.Draw(art)
+        step = self.px(34)
+        for gx in range(step // 2, w, step):
+            draw.line([(gx, 0), (gx, h)], fill=HERO_GRID)
+        for gy in range(step // 2, h, step):
+            draw.line([(0, gy), (w, gy)], fill=HERO_GRID)
         fade = Image.new("L", (w, h), 0)
-        draw = ImageDraw.Draw(fade)
-        start = int(h * 0.62)
+        fade_draw = ImageDraw.Draw(fade)
+        start = int(h * 0.55)
         for y in range(start, h):
-            draw.line([(0, y), (w, y)], fill=int(255 * ((y - start) / (h - start)) ** 1.6))
-        dark = Image.new("RGB", (w, h), BG)
-        art = Image.composite(dark, art, fade)
+            fade_draw.line([(0, y), (w, y)], fill=int(255 * ((y - start) / (h - start)) ** 1.4))
+        art = Image.composite(Image.new("RGB", (w, h), BG), art, fade)
         photo = ImageTk.PhotoImage(art)
         self.images.append(photo)
         canvas = tk.Canvas(self.root, width=w, height=h, bg=BG, highlightthickness=0)
         canvas.pack(side="top")
         canvas.create_image(0, 0, image=photo, anchor="nw")
-        x, y = self.px(48), self.px(52)
-        canvas.create_text(x, y, text="UNCHARTED", font=self.f_title, fill="#3b2914", anchor="w")
-        canvas.create_text(x + self.px(3), y + self.px(44), text="T H E   N A T H A N   D R A K E   C O L L E C T I O N",
-                           font=self.f_subtitle, fill="#8a6326", anchor="w")
-        canvas.create_line(x + self.px(3), y + self.px(66), x + self.px(330), y + self.px(66), fill="#b98d45", width=2)
+        x, y = self.px(48), self.px(50)
+        # A route marked across the chart: dashes from the title towards an X.
+        route = [x + self.px(360), y + self.px(70), x + self.px(430), y + self.px(40), x + self.px(500),
+                 y + self.px(62), x + self.px(560), y + self.px(22)]
+        canvas.create_line(*route, fill=ACCENT, width=2, dash=(6, 5), smooth=True)
+        cx, cy, r = route[-2], route[-1], self.px(7)
+        canvas.create_line(cx - r, cy - r, cx + r, cy + r, fill=ACCENT, width=3)
+        canvas.create_line(cx - r, cy + r, cx + r, cy - r, fill=ACCENT, width=3)
+        canvas.create_text(x, y, text="UNCHARTED", font=self.f_title, fill=TEXT, anchor="w")
+        canvas.create_text(x + self.px(3), y + self.px(42), text="T H E   N A T H A N   D R A K E   C O L L E C T I O N",
+                           font=self.f_subtitle, fill=MUTED, anchor="w")
+        # The fork's edition as a flare-orange tag under the subtitle.
+        tag = canvas.create_text(0, 0, text=EDITION.upper(), font=self.f_edition, fill=INK, anchor="w")
+        x1, y1, x2, y2 = canvas.bbox(tag)
+        left, top_y = x + self.px(3), y + self.px(62)
+        canvas.coords(tag, left + self.px(10), top_y + self.px(11))
+        badge = round_rect(canvas, left, top_y, left + (x2 - x1) + self.px(20), top_y + self.px(22), self.px(4),
+                           fill=ACCENT, outline=ACCENT)
+        canvas.tag_lower(badge, tag)
         self.draw_links(canvas, w)
 
     def draw_links(self, canvas, width):
-        """The author's Patreon, YouTube channel and GitHub as badges in the top right of the hero."""
+        """The fork's GitHub as a badge in the top right of the hero."""
         right, top, height = width - self.px(22), self.px(18), self.px(30)
         for label, url, color, hover in reversed(LINKS):
             tag = f"link-{label}"
-            text = canvas.create_text(0, 0, text=label, font=self.f_body_bold, fill="white", anchor="w", tags=tag)
+            text = canvas.create_text(0, 0, text=label, font=self.f_body_bold, fill=TEXT, anchor="w", tags=tag)
             x1, _, x2, _ = canvas.bbox(text)
             badge_w = (x2 - x1) + self.px(46)
             left = right - badge_w
             mid = top + height // 2
             canvas.coords(text, left + self.px(34), mid)
-            badge = round_rect(canvas, left, top, right, top + height, height // 2, fill=color, outline=color, tags=tag)
+            badge = round_rect(canvas, left, top, right, top + height, height // 2, fill=color, outline=HOVER_LINE,
+                               tags=tag)
             canvas.tag_lower(badge, text)
-            # Icon: YouTube's play triangle on white, a heart for Patreon, GitHub's code brackets.
+            # Icon: GitHub's code brackets in the flare orange.
             icon_x = left + self.px(12)
-            if label == "Patreon":
-                canvas.create_text(icon_x + self.px(8), mid, text="♥", font=self.f_body_bold, fill="white",
-                                   tags=tag)
-            elif label == "YouTube":
-                round_rect(canvas, icon_x, mid - self.px(7), icon_x + self.px(16), mid + self.px(7), self.px(4),
-                           fill="white", outline="white", tags=tag)
-                canvas.create_polygon(icon_x + self.px(6), mid - self.px(4), icon_x + self.px(6), mid + self.px(4),
-                                      icon_x + self.px(12), mid, fill=color, outline=color, tags=tag)
-            else:
-                canvas.create_text(icon_x + self.px(8), mid, text="</>", font=self.f_small, fill="white", tags=tag)
+            canvas.create_text(icon_x + self.px(8), mid, text="</>", font=self.f_small, fill=ACCENT, tags=tag)
             canvas.tag_bind(tag, "<Button-1>", lambda e, u=url: webbrowser.open(u))
-            canvas.tag_bind(tag, "<Enter>", lambda e, b=badge, c=hover: (canvas.itemconfig(b, fill=c, outline=c),
+            canvas.tag_bind(tag, "<Enter>", lambda e, b=badge, c=hover: (canvas.itemconfig(b, fill=c, outline=ACCENT),
                                                                        canvas.config(cursor="hand2")))
-            canvas.tag_bind(tag, "<Leave>", lambda e, b=badge, c=color: (canvas.itemconfig(b, fill=c, outline=c),
+            canvas.tag_bind(tag, "<Leave>", lambda e, b=badge, c=color: (canvas.itemconfig(b, fill=c, outline=HOVER_LINE),
                                                                        canvas.config(cursor="")))
             right = left - self.px(10)
 
@@ -1436,17 +1471,17 @@ class Launcher:
         selected = key == self.config.get("game")
         canvas.delete("all")
         fill = PANEL_HI if selected or hover else PANEL
-        outline = GOLD if selected else ("#5a4733" if hover else LINE)
+        outline = ACCENT if selected else (HOVER_LINE if hover else LINE)
         round_rect(canvas, 2, 2, w - 2, h - 2, self.px(10), fill=fill, outline=outline, width=2 if selected else 1)
         canvas.create_text(self.px(22), h // 2, text=game["number"], font=self.f_card_number,
-                           fill=GOLD if selected else DIM, anchor="w")
+                           fill=ACCENT if selected else DIM, anchor="w")
         canvas.create_text(self.px(66), h // 2 - self.px(10), text=game["title"], font=self.f_card_title,
                            fill=TEXT, anchor="w")
         canvas.create_text(self.px(67), h // 2 + self.px(13), text=game["subtitle"], font=self.f_small,
                            fill=MUTED, anchor="w")
         if selected:
             canvas.create_text(w - self.px(18), self.px(16), text="SELECTED", font=("Segoe UI Semibold", 7),
-                               fill=GOLD, anchor="e")
+                               fill=ACCENT, anchor="e")
 
     def select_game(self, key, save=True):
         if key not in self.cards:
@@ -1541,7 +1576,7 @@ class Launcher:
             return False
         if not is_game_dir(folder):
             messagebox.showerror(APP_TITLE, "That folder has no eboot.bin and sce_sys/param.sfo.\n\n"
-                                            "Choose the game's root folder (CUSA02344).")
+                                            "Choose the game's root folder (CUSA02320 or CUSA02344).")
             return False
         self.config["game_dir"] = folder
         if WINE:
@@ -1619,7 +1654,7 @@ class Launcher:
             write_config(self.config)
         for tab, (text, bar) in self.tab_buttons.items():
             text.config(fg=TEXT if tab == name else MUTED)
-            bar.config(bg=GOLD if tab == name else BG)
+            bar.config(bg=ACCENT if tab == name else BG)
         for tab, page in self.pages.items():
             holder = getattr(page, "holder", page)
             if tab == name:
@@ -1728,9 +1763,9 @@ class Launcher:
         selected = self.game_settings().get("preset") == name
         canvas.delete("all")
         round_rect(canvas, 2, 2, w - 2, h - 2, self.px(10), fill=PANEL_HI if selected or hover else PANEL,
-                   outline=GOLD if selected else ("#5a4733" if hover else LINE), width=2 if selected else 1)
+                   outline=ACCENT if selected else (HOVER_LINE if hover else LINE), width=2 if selected else 1)
         canvas.create_text(self.px(20), self.px(26), text=preset["title"], font=self.f_card_title,
-                           fill=GOLD if selected else TEXT, anchor="w")
+                           fill=ACCENT if selected else TEXT, anchor="w")
         canvas.create_text(self.px(20), self.px(50), text=preset["summary"], font=self.f_body_bold,
                            fill=TEXT, anchor="w")
         canvas.create_text(self.px(20), self.px(70), text=preset["detail"], font=self.f_small, fill=MUTED,
@@ -1740,7 +1775,7 @@ class Launcher:
                                        fill=INK, anchor="e")
             x1, y1, x2, y2 = canvas.bbox(badge)
             pill = round_rect(canvas, x1 - self.px(8), y1 - self.px(3), x2 + self.px(8), y2 + self.px(3), self.px(8),
-                              fill=GOLD, outline=GOLD)
+                              fill=ACCENT, outline=ACCENT)
             canvas.tag_lower(pill, badge)
 
     def redraw_presets(self):
@@ -1798,7 +1833,7 @@ class Launcher:
             "For ultrawide monitors (21:9, 32:9), with Borderless or Fullscreen: the games show more at "
             "the sides and the same view top to bottom as on a 16:9 screen. 16:10 (Steam Deck: 800p is "
             "1280x800) fills the screen and shows more at the top and bottom.", aspect)
-        self.render_size_note = tk.Label(page, text="", font=self.f_small, bg=BG, fg=GOLD, anchor="w")
+        self.render_size_note = tk.Label(page, text="", font=self.f_small, bg=BG, fg=ACCENT, anchor="w")
         self.render_size_note.pack(side="top", fill="x", pady=(0, self.px(10)))
         self.refresh_render_size()
         self.ini_choice(page, "upscaler", "Anti-aliasing",
@@ -1911,7 +1946,7 @@ class Launcher:
                  "Sleep: the game's helper threads rest while they wait, which keeps 4-6 core CPUs fast "
                  "and saves power. Spin keeps their cores busy, as on the PS4.", job_threads)
 
-        self.fps_note = tk.Label(page, text="", font=self.f_small, bg=BG, fg=GOLD, anchor="w")
+        self.fps_note = tk.Label(page, text="", font=self.f_small, bg=BG, fg=ACCENT, anchor="w")
         self.fps_note.pack(side="top", fill="x")
         self.update_fps_note()
         return page
@@ -1983,7 +2018,7 @@ class Launcher:
         columns[1].grid(row=0, column=1, sticky="n")
         for index, (group, actions) in enumerate(CONTROL_GROUPS):
             column = columns[0 if index < 2 else 1]
-            tk.Label(column, text=group, font=self.f_small, bg=BG, fg=GOLD, anchor="w").pack(
+            tk.Label(column, text=group, font=self.f_small, bg=BG, fg=ACCENT, anchor="w").pack(
                 side="top", fill="x", pady=(self.px(6 if index % 2 else 2), self.px(2)))
             for action, label in actions:
                 row = tk.Frame(column, bg=BG)
@@ -2032,7 +2067,7 @@ class Launcher:
         height = self.px(22)
         for action, cell in getattr(self, "pad_slots", {}).items():
             if self.pad_capture == action:
-                cell.config(image="", text="Press a button…", fg=GOLD, bg=PANEL_HI, width=14, height=1)
+                cell.config(image="", text="Press a button…", fg=ACCENT, bg=PANEL_HI, width=14, height=1)
                 continue
             button = controls.get(action) if action in PAD_DEFAULTS else PAD_FIXED.get(action)
             if not button:
@@ -2106,7 +2141,7 @@ class Launcher:
             bindings = controls.get(action, [])
             capturing = self.capturing == (action, slot)
             cell.config(text="Press a key…" if capturing else binding_label(bindings[slot] if slot < len(bindings) else None),
-                        bg=PANEL_HI if capturing else PANEL, fg=GOLD if capturing else TEXT)
+                        bg=PANEL_HI if capturing else PANEL, fg=ACCENT if capturing else TEXT)
 
     def start_capture(self, action, slot):
         self.stop_capture()
@@ -2251,7 +2286,7 @@ class Launcher:
                  "The launcher asks before it installs anything.", check_updates)
 
         def section(title, actions, note=""):
-            tk.Label(page, text=title, font=self.f_small, bg=BG, fg=GOLD, anchor="w").pack(
+            tk.Label(page, text=title, font=self.f_small, bg=BG, fg=ACCENT, anchor="w").pack(
                 side="top", fill="x", pady=(self.px(10), self.px(4)))
             line = tk.Frame(page, bg=BG)
             line.pack(side="top", fill="x")
@@ -2314,9 +2349,9 @@ class Launcher:
         self.play_button.bind("<Enter>", lambda e: self.draw_play(hover=True))
         self.play_button.bind("<Leave>", lambda e: self.draw_play())
         self.draw_play()
-        self.update_button = tk.Label(inner, text="UPDATE", font=self.f_body_bold, bg=PANEL_HI, fg=GOLD,
+        self.update_button = tk.Label(inner, text="UPDATE", font=self.f_body_bold, bg=PANEL_HI, fg=ACCENT,
                                       padx=self.px(16), pady=self.px(10), cursor="hand2",
-                                      highlightthickness=1, highlightbackground=GOLD)
+                                      highlightthickness=1, highlightbackground=ACCENT)
         self.update_button.bind("<Button-1>", lambda e: self.install_update())
         self.set_status(f"Ready to play {self.current_game()['name']}." if self.config.get("game") else "Ready.")
 
@@ -2325,7 +2360,7 @@ class Launcher:
         w, h = int(canvas["width"]), int(canvas["height"])
         canvas.delete("all")
         running = self.process is not None
-        fill = (STOP_RED if running else (GOLD_HI if hover else GOLD))
+        fill = (STOP_RED if running else (ACCENT_HI if hover else ACCENT))
         round_rect(canvas, 2, 2, w - 2, h - 2, self.px(8), fill=fill, outline=fill)
         canvas.create_text(w // 2, h // 2, text="STOP" if running else "PLAY", font=self.f_play,
                            fill=TEXT if running else INK)
@@ -2496,7 +2531,7 @@ class Launcher:
             return
         if not is_game_dir(self.game_dir()):
             messagebox.showinfo(APP_TITLE, "Select your Uncharted: The Nathan Drake Collection game folder "
-                                           "(CUSA02344, the folder with eboot.bin and sce_sys).")
+                                           "(CUSA02320 or CUSA02344, the folder with eboot.bin and sce_sys).")
             if not self.choose_game_dir():
                 return
         if not self.confirm_without_update() or not self.confirm_update_files():
@@ -2876,7 +2911,7 @@ def main():
     # Its own taskbar identity: without it the launcher's window is grouped under Python
     # (pythonw.exe) and the taskbar shows Python's icon instead of Uncharted's.
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("BilalReloaded.Uncharted.Launcher")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("espindoIa.Uncharted.Expedition")
     except Exception:
         pass
     # --play u1|u2|u3 (or 1/2/3): start that game directly (desktop game shortcuts, GitHub #25).

@@ -1231,7 +1231,11 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--game", type=Path, default=ROOT / "game/CUSA02344/uroot")
+    # The US copy (CUSA02320) first, then Europe's (CUSA02344), each with or without uroot.
+    default_game = next((ROOT / "game" / title / sub for title in ("CUSA02320", "CUSA02344")
+                         for sub in ("uroot", "") if (ROOT / "game" / title / sub / "eboot.bin").is_file()),
+                        ROOT / "game/CUSA02320")
+    parser.add_argument("--game", type=Path, default=default_game)
     parser.add_argument("--boot", action="store_true", help="Execute guest code after preparation")
     parser.add_argument("--executable", choices=EXECUTABLES, default="eboot.bin")
     parser.add_argument("--guest-arg", action="append", default=None,
