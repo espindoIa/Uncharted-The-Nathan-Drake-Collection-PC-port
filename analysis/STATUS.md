@@ -1903,3 +1903,16 @@ sample (its UAC prompt was not accepted twice): no Nsight trace was taken.
 - Gameplay in the same session: 73-76 FPS at 4K DLAA, GPU-bound (the GPU command thread waits for
   GPU ticks 54% of the time); the user's display is 2560x1440, so a 1440p render or DLSS Quality is
   the lever there, not a code change.
+- Cutscene paths in all three games (user question, same day):
+  - All three executables import only libSceVideodec2 (analysis.json): every movie goes through
+    gpu/shim/videodec2 and WriteMovieCopy, with the same filter and the same GOW3_MOVIE_SIZE
+    condition (render size not 1920x1080). src/runtime_videodec.c (libSceVideodec v1) and
+    shadPS4's AvPlayer are not imported by any of them.
+  - Movies in the US dump (.bsf, 1080p): u1data/build/main/movie1 40, u2data 48, u3data 38, plus
+    shareddata/movies/sce-ndi-logos.bsf.
+  - Some scenes are drawn by the engine instead (U2's train opening: no MovieDecodeThread, scene
+    draws): those go through the anti-aliasing/upscaler like gameplay.
+  - Checked with play.py at 4K, MT on: U1 opening movie "1920x1080 -> 2880x1620 scaled with
+    Lanczos, 4.0 ms a frame" (U1 renders at most 1620p), 120 FPS, picture right; U3 attract movie
+    6.4 ms, 120 FPS. U2: no movie reached (title has no attract movie; the opening is in-engine);
+    its movies use the same code path.
