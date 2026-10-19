@@ -1588,7 +1588,7 @@ Merge choices (details in the sections below and in CHANGELOG.md):
     over 25 ms. Explained and fixed below (fix 2).
   - Cause (GOW3_SUBMIT_LOG=<file>, new: every draw/present/flip submission with its CPU phases,
     GPU start/end timestamps and done time; PrepareFrame F0-F3, Present A0-A3, flip packet N,
-    SignalFlip I (1 = held), deferred interrupt J, SubmitFlip S; C:\devench\subpace.py). The
+    SignalFlip I (1 = held), deferred interrupt J, SubmitFlip S; C:\dev\bench\subpace.py). The
     late frames are end-of-pipe flips held behind a ray-cast fence: the flip packet reaches the
     recording thread (I 1), its interrupt fires 3-18 ms later when the readback lands (J), and only
     then did PrepareFrame submit the frame's last batch (post-process; its ready tick). By then the
