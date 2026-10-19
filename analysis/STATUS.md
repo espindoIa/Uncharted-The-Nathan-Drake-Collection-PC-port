@@ -1994,3 +1994,77 @@ sample (its UAC prompt was not accepted twice): no Nsight trace was taken.
     slice count keeps them under 4 GiB for render-size targets.
   - Where the garbage T# comes from: the log names no shader. It was not reproduced; the
     reporter played 26 minutes.
+
+## 19 October 2026: crash triage for 0.5 (upstream issues, the fork's own failures)
+The fork has no issue tracker (issues are disabled on GitHub), so its own failures come from
+the soak runs below and from the player's logs. The upstream reports were filed against
+0.2.x-0.3.1, not the fork. Each conclusion names its source.
+
+Method:
+- `gh` downloaded each issue with its attachments (boot.log, launcher-last-run.log).
+- Signature: the crash block (fault type, guest offset or host module) plus the caller chain.
+- Offsets were read in the 1.02 executables, the same in US and EU, with llvm-objdump of
+  analysis/<game>/eboot.elf. The instruction at each offset starts a decoded instruction, so the
+  reports were on 1.02.
+- Versions come from the issue text, or from the report date against upstream's release times.
+
+| Issue | Game | Port | Signature | State | Source of the conclusion |
+|---|---|---|---|---|---|
+| #57 | U1 | 0.3.1 | Device lost after a 15.8 GB image (garbage T#, 6755 layers) | **Fixed in the fork** (d3b1e13) | log + code (u32 wrap), image-size-test |
+| #59, #60 | U1 | 0.3.1 | read 0 at 0x5f64f3 (`mov (%r13),%r8`, r13=0) in render setup fn 0x5f4ea0; callers 0x56786e <- 0x58adda | **Not reproduced** | see below |
+| #42, #30, #34, #24 (U1 logs 06/09) | U1 | 0.2.3-0.3.0 | call through null at 0x64011f / read at 0x63f61e (material constant setup fn near 0x63f..0x641, called from 0x501ea9) | **Not reproduced; same family as below** | log + disassembly |
+| #24 (U2 logs 07/11) | U2 | 0.2.x | call through null at 0xd667ff / read at 0xd65cfe; same register pattern (rcx=0x3b0) | same family | log |
+| #54, #24 (U3 logs 08/13) | U3 | 0.2.x-0.3.0 | read at 0x12d83fe / 0x12d83b0 (callers 0x12da312 <- 0xe63ef9); same register pattern | same family | log |
+| #58, #48, #43 (#29 likely) | U1, U3 | 0.3.0-0.3.1 | stop at boot: `open(/app0/uNdata/build/main/bin/shaders/src/files.json) -> not found`, ASSERTION root (ingame-shaders.cpp) | **Needs information** | log; does not happen with the fork's US 1.02 dump |
+| #47 (first log) | U3 | 0.3.0 | host C++ exception 0x20474343 on the GPU command thread | **Needs a log from 0.3.1 or later**, which names the error | log + upstream 0.3.1 changelog |
+| #47 (second log) | U3 | 0.3.0 | "Invalid packet ... Unreachable code" with multithreading | **Already fixed in the fork** (liverpool.cpp BehindHeldFence, 19 Oct) | same message as the fork's own repro |
+| #56 | U2 | 0.3.1 (by date) | host fault at Uncharted.exe+0x3050f8 (Radeon 780M), 35 FPS, 492 ms frames | **Needs information**: the exact build to symbolize, or a log from the fork | log |
+| #24 (U2 log 03) | U2 | 0.2.x | ASSERTION m_lookAt NaN (player-base.cpp) | **Already fixed** (0.2.3 focus reset; the fork has it) | upstream changelog |
+| #24 (U1 log 01, U3 log 05) | U1, U3 | 0.2.x | read 0x3f0 at 0x581ade; read 0x34 at 0x849ddc | **Not reproduced**; single reports from 0.2.x | log |
+| #41, #33, #27 | U2, U1 | 0.3.0-0.3.1 | no boot.log attached (#41 boot.json only, #33 upload failed) | **Needs information** | issue text |
+
+Details:
+- #59/#60 (the newest U1 reports, both 0.3.1). #59 says chapter 3 "A Surprising Find" at the
+  plane, crashing even standing still, on an i5-8400 + RTX 4060 at 1440p/1080p; #60 is an MX130
+  at 960x600, 30 FPS.
+  - Reproduction tried here at chapter 3's start, with camera and walking: no crash in any of
+    these runs.
+
+    | Run | Settings | Time |
+    |---|---|---|
+    | 1 | fork build, 1440p, MT on | 3 min |
+    | 2 | MT off, GOW3_COPY64_EOP_READBACK=0 (as 0.3.1: no #6 readback) | 1 min |
+    | 3 | soak, 4K DLAA M, 120 FPS cap, MT on, camera and walking every 20 s; stopped early at the user's request, U2/U3 not run yet | 6 min (16:02-16:08), 95-106 FPS |
+  - The crashing register comes from a local (-0x120(%rbp), saved at -0x150) loaded early in
+    the 7 KB function, which writes PM4 packets.
+  - Both reporters' PCs are far slower than this one (Ryzen 9 / RTX 5070), so a timing race is
+    likely. What would settle it: a fork build's log from those PCs.
+- The 0x64011f / 0xd667ff / 0x12d83fe family is one engine routine in all three games:
+  - It walks a material's parameter table and reads resource pointers.
+  - It calls a setup function per parameter (`callq *%rcx`); a null pointer means the table was
+    overwritten.
+  - That is the "function pointer turned to 0" case that upstream 0.3.0's readback guard was
+    for. #42 (stated 0.3.0) and #54 (0.3.0 by date) still crashed there after it.
+  - The fork adds the held-fence ordering (BehindHeldFence), the flip and readback fixes of
+    19 Oct, and the U1 copy-shader readback (#6). Whether that is enough is not proven: there
+    is no repro, so the soak runs are the check.
+- files.json stop (#58, #48, #43):
+  - The game opens the shader list loose, after its archive lookup fails. That points at the
+    update's data.psarc not being the 1.02 one in the combined view.
+  - All the reporters use repacks (AnkerGames, AUCTOR.TV). #43 matched upstream's bin.psarc
+    hashes but not data.psarc's.
+  - Known-good US 1.02 data.psarc files (this PC, plays):
+
+    | File | Size | SHA-256 |
+    |---|---|---|
+    | CUSA02320-patch/u1data/data.psarc | 12,194,412 | a979389b847c60aae55e4255ec729c71bab3c3cbd6d61ed9e4a5ffa23e63344f |
+    | CUSA02320-patch/u2data/data.psarc | 13,898,047 | 6bcba1c4e4962262be9a8a2334330f1ce052952886c5c7f99efc83ca0ccdd3b2 |
+    | CUSA02320-patch/u3data/data.psarc | 15,818,236 | fee6e5e4e00807d2e01cd0b074373eb4357723c888ac3d9b3c0703ba732b1fad |
+
+    Base 1.00 sizes: 12,169,836 / 13,866,452 / 15,775,188.
+  - What is needed: the reporters' sizes and hashes of those three files, and a listing of
+    analysis/views/game-update-*.
+- Tooling note: in U1's Chapters menu, the "Friend Stats are not available when offline" box
+  ignored `play.py press cross` (12 times). `play.py seq "cross@150" "@1500"` (press, then
+  release) closes it, as a real controller does (the user, 19 Oct). It is not a game or port
+  bug.
