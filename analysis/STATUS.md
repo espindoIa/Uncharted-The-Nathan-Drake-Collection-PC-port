@@ -1969,3 +1969,28 @@ sample (its UAC prompt was not accepted twice): no Nsight trace was taken.
     Lanczos, 4.0 ms a frame" (U1 renders at most 1620p), 120 FPS, picture right; U3 attract movie
     6.4 ms, 120 FPS. U2: no movie reached (title has no attract movie; the opening is in-engine);
     its movies use the same code path.
+
+## 19 October 2026: 15.8 GB texture from a garbage T# (upstream #57, device lost)
+- Report (upstream #57, 0.3.1, U1 1.02 Europe, RTX 4060 8 GB, 1080p DLSS, 100 FPS, MT off):
+  "Device lost during submit" after 26 minutes. The log's last lines:
+  - "Slow image create: ... image 960x540x1 mips 1 layers 6755 R8G8B8A8Unorm, 15832.0 MiB in a
+    dedicated allocation";
+  - texture cache memory pressure "21319 of 6275 MiB";
+  - "GPU wait: 10 seconds", then device lost.
+- Cause, from the log and the code:
+  - Only a T# reaches 6755 layers: its depth field has 13 bits. CB/DB slice counts have 11, so at
+    most 2048.
+  - T#s pass the rasterizer's PlausibleImage check (guest_size < 1 GB, fully mapped).
+  - ImageInfo::UpdateSize multiplied a mip's size by the layers in u32. A 1024x640 macro-tiled
+    RGBA8 slice times 6755 is 16.5 GiB, which wrapped to 0.49 GiB, so the check passed.
+  - The host image (Vulkan's own layout, 2.34 MiB a layer) was then 15.8 GB.
+- Fix: texture_cache/guest_size.h: SaturatingMipSize/SaturatingAdd, used by UpdateSize, keep the
+  size at u32 max instead of wrapping. The T# is then rejected and logged as before ("Ignoring a
+  garbage T# ...").
+  - tests/test_image_size.cpp (image-size-test) checks the arithmetic, including the old wrap of
+    this descriptor (static_asserts).
+- Not covered:
+  - The RT constructors (ColorBuffer/DepthBuffer: slice size times layers, u32). Their 11-bit
+    slice count keeps them under 4 GiB for render-size targets.
+  - Where the garbage T# comes from: the log names no shader. It was not reproduced; the
+    reporter played 26 minutes.

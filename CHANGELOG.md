@@ -6,6 +6,12 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork)
 
+- **Fixed: a 15.8 GB texture could crash the game with "Device lost" after a long session**
+  (upstream #57, Drake's Fortune after 26 minutes on an 8 GB card). A broken texture description
+  (6,755 layers) got through the check for impossible textures, because its size was counted in
+  a number that overflows. The size no longer overflows, so such textures are skipped as the
+  others are.
+
 - **Cutscenes at full speed again at 4K.** Since 0.4.0's sharper cutscenes, a 4K render played the
   movies at about 10 FPS (Uncharted 3's first cutscene): the sharper scale ran on one CPU thread
   and took 18 ms a frame. It now runs on four threads (6 ms), and the cutscene plays at the frame

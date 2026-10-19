@@ -8,6 +8,7 @@
 #include "shader_recompiler/resource.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/texture_cache/host_compatibility.h"
+#include "video_core/texture_cache/guest_size.h"
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/tile.h"
 
@@ -200,9 +201,10 @@ void ImageInfo::UpdateSize() {
             mip_info.pitch = std::max(mip_info.pitch * 4, 32u);
             mip_info.height = std::max(mip_info.height * 4, 32u);
         }
-        mip_info.size *= mip_d * resources.layers;
+        // gow3: saturating, not wrapping (upstream #57, guest_size.h).
+        mip_info.size = SaturatingMipSize(mip_info.size, mip_d, resources.layers);
         mip_info.offset = guest_size;
-        guest_size += mip_info.size;
+        guest_size = SaturatingAdd(guest_size, mip_info.size);
     }
 }
 
