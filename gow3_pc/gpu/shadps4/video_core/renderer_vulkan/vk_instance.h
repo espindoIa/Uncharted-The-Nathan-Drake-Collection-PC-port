@@ -101,6 +101,17 @@ public:
         return graphics_queue;
     }
 
+    /// gow3 (Supermedo/uncharted_pc #94): the queue sparse binds go to; the graphics queue when
+    /// its family supports them (NVIDIA, AMD on Windows), else one of a family that does (RADV).
+    vk::Queue GetSparseQueue() const {
+        return sparse_queue;
+    }
+
+    /// Work groups one dispatch may have along X (Vulkan guarantees 65535).
+    u32 GetMaxComputeWorkGroupCountX() const {
+        return properties.limits.maxComputeWorkGroupCount[0];
+    }
+
     vk::Queue GetPresentQueue() const {
         return present_queue;
     }
@@ -555,6 +566,8 @@ private:
     vk::Queue graphics_queue;
     vk::Queue copy_queue;
     bool present_wait{};
+    vk::Queue sparse_queue;
+    u32 sparse_queue_family_index{0};
     std::vector<vk::PhysicalDevice> physical_devices;
     std::vector<std::string> available_extensions;
     std::unordered_map<vk::Format, vk::FormatProperties3> format_properties;

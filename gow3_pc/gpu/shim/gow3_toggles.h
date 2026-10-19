@@ -83,6 +83,12 @@ enum : std::uint64_t {
     /// Bit set: off. Held recursive locks in a per-thread array (common/recursive_lock.cpp)
     /// instead of a map node allocated and freed per acquisition.
     RecursiveLockArray = 1ull << 60,
+    /// One upscaler frame start per frame (Uncharted draws twice into its display buffer).
+    /// Upstream 0.3.1 has it at bit 59; moved here because the fork uses 59 and 60.
+    OneFrameStart = 1ull << 61,
+    /// Upscaler jitter for the full-screen passes in GOW3_JITTER_PS (the sun shadow pass).
+    /// Upstream 0.3.1: bit 60.
+    FullScreenPassJitter = 1ull << 62,
     // Bits 20-29 are used as raw debug toggles by the camera/object motion and the upscaler.
 };
 inline bool Disabled(std::uint64_t bit) {

@@ -1010,7 +1010,7 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
         }
     }
     const auto it = graphics_pipelines.find(prepared.key);
-    return it != graphics_pipelines.end() ? it->second.get() : nullptr;
+    return it != graphics_pipelines.end() && !it->second->Failed() ? it->second.get() : nullptr;
 }
 
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
@@ -1043,7 +1043,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (AsyncCompilation() && !sel.regs->stage_enable.hs_en && !EmulatorSettings.IsShaderCollect()) {
         const auto found = graphics_pipelines.find(sel.graphics_key);
         if (found != graphics_pipelines.end()) {
-            return found->second.get();
+            return found->second->Failed() ? nullptr : found->second.get();
         }
         if (!pending_graphics.contains(sel.graphics_key) && compiler->HasCapacity()) {
             PhaseTimer capture{g_gow3_snapshot_ns};
@@ -1086,7 +1086,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
             PublishGraphics();
             if (const auto found = graphics_pipelines.find(sel.graphics_key);
                 found != graphics_pipelines.end()) {
-                return found->second.get();
+                return found->second->Failed() ? nullptr : found->second.get();
             }
         }
     }
@@ -1114,7 +1114,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         }
         sel.fetch_shader.reset();
     }
-    return it->second.get();
+    return it->second->Failed() ? nullptr : it->second.get();
 }
 
 const ComputePipeline* PipelineCache::GetComputePipeline() {

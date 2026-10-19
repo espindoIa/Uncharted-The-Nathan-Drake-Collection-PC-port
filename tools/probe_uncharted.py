@@ -645,6 +645,21 @@ def sfo_value(game, key):
         sys.path.pop(0)
 
 
+def game_version(game):
+    """APP_VER of the game folder; 01.02 when its executables are 1.02 although param.sfo says
+    otherwise (dumps with the update merged in that kept the 1.00 param.sfo). The check is Uncharted
+    2's torch code as 1.02 compiled it (TORCH_FORWARD_PATCHES; 1.00 lays it out differently)."""
+    version = sfo_value(game, "APP_VER")
+    if version and version < "01.02":
+        try:
+            code = (game / "big2-ps4_Shipping.elf").read_bytes()
+        except OSError:
+            return version
+        if pattern_regex(TORCH_FORWARD_PATCHES[0][1][0][0]).search(code):
+            return "01.02"
+    return version
+
+
 def game_view(game, update):
     """The game with its update laid over it, as a folder of links (gow3_pc/scripts/game_update.py).
     It is made on the game's drive when possible: file links can't cross drives (else copies)."""
@@ -713,7 +728,7 @@ def run_once(args, executable, guest_args, loadexec):
     base = args.game.resolve()
     update = find_update(base)
     if not update:
-        version = sfo_value(base, "APP_VER")
+        version = game_version(base)
         if version and version < "01.02":
             title = base.parent if base.name.lower() == "uroot" else base
             print(f"Game version {version} without update 1.02: the fixes written for 1.02 are skipped "
@@ -881,7 +896,7 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     env = os.environ.copy()
     wanted = cheat_names(executable)
     if wanted and "GOW3_POKE" not in env:
-        if (sfo_value(game, "APP_VER") or "") >= "01.02":
+        if (game_version(game) or "") >= "01.02":
             pokes = [CHEATS[executable][name] for name in wanted if name in CHEATS.get(executable, {})]
             if pokes:
                 env["GOW3_POKE"] = ",".join(pokes)
@@ -977,6 +992,10 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
             # depth natively in every draw, and resolving its proxy each time cost more than it saved.
             env.setdefault("GOW3_SCENE_HALF_RES", "0")
         env.setdefault("GOW3_UPSCALE_BEFORE_CS", "aec539f0")
+        # Full-screen passes that rebuild positions from the jittered scene depth get the jitter
+        # too: the sun shadow pass, shared by the three games (its shadows flickered under TAA,
+        # FSR and DLAA; Supermedo/uncharted_pc #261).
+        env.setdefault("GOW3_JITTER_PS", "f614041e")
         env["GOW3_SCENE_SIZE"] = f"{render_size[0]}x{render_size[1]}"
         # FSR 4's model files (gow3_pc/tools/fetch_fsr4_assets.sh), when installed; DLSS needs
         # gow3_dlss.dll and nvngx_dlss.dll beside Uncharted.exe.

@@ -3,7 +3,8 @@
 
 Pick a game, set display and performance options (presets for low-end and high-end PCs) and play.
 Runtime options are kept in analysis/uncharted-user/probe.ini, the same file the in-game menu
-(Insert / R3+L2) reads and writes; launcher-only options in %APPDATA%/Uncharted Launcher.
+(Insert / R3+L2) reads and writes; launcher-only options in %APPDATA%/Uncharted Launcher (under
+Wine/Proton in ~/.local/share/uncharted-launcher, the same for every prefix).
 The game is started through tools/probe_uncharted.py (preparation, code patches, Collection game
 switches), with the options below passed as environment variables.
 """
@@ -34,7 +35,65 @@ STARTER_EXE = ROOT / "Uncharted Launcher.exe"  # the packaged build's starter (t
 USER_DIR = ROOT / "analysis" / "uncharted-user"
 INI_FILE = USER_DIR / "probe.ini"
 RUN_SCRIPT = ROOT / "tools" / "probe_uncharted.py"
-CONFIG_FILE = Path(os.environ.get("APPDATA", Path.home())) / "Uncharted Launcher" / "launcher.json"
+PREFIX_CONFIG_FILE = Path(os.environ.get("APPDATA", Path.home())) / "Uncharted Launcher" / "launcher.json"
+
+
+def wine_kernel32():
+    """kernel32 when the launcher runs under Wine (Proton, Lutris, CrossOver), else None."""
+    try:
+        if hasattr(ctypes.windll.ntdll, "wine_get_version"):
+            return ctypes.windll.kernel32
+    except (AttributeError, OSError):
+        pass
+    return None
+
+
+WINE = wine_kernel32()
+
+
+def _wine_string(pointer, wide):
+    """A string Wine returned in memory of the process heap, which is freed."""
+    if not pointer:
+        return None
+    try:
+        return ctypes.wstring_at(pointer) if wide else ctypes.string_at(pointer).decode("utf-8", "replace")
+    finally:
+        WINE.GetProcessHeap.restype = ctypes.c_void_p
+        WINE.HeapFree.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p]
+        WINE.HeapFree(WINE.GetProcessHeap(), 0, pointer)
+
+
+def unix_path(path):
+    """The Linux path of a Windows path under Wine, else None."""
+    if not WINE:
+        return None
+    function = WINE.wine_get_unix_file_name
+    function.argtypes, function.restype = [ctypes.c_wchar_p], ctypes.c_void_p
+    return _wine_string(function(str(path)), wide=False)
+
+
+def windows_path(path):
+    """The Windows path of a Linux path under Wine (in this prefix's drive letters), else None."""
+    if not WINE or not path:
+        return None
+    function = WINE.wine_get_dos_file_name
+    function.argtypes, function.restype = [ctypes.c_char_p], ctypes.c_void_p
+    return _wine_string(function(path.encode("utf-8")), wide=True)
+
+
+def shared_config_file():
+    """Under Wine: launcher.json in the Linux user's data folder. Each Steam shortcut has a prefix
+    (and an %APPDATA%) of its own, so a game started from its shortcut (--play) would not see the
+    launcher's options; this folder is the same for all of them, and outside the port's folder."""
+    home = os.environ.get("HOME", "")
+    data = os.environ.get("XDG_DATA_HOME") or (home + "/.local/share" if home.startswith("/") else "")
+    folder = windows_path(data) if data.startswith("/") else None
+    if not folder and os.environ.get("WINEHOMEDIR", "").startswith("\\??\\"):
+        folder = str(Path(os.environ["WINEHOMEDIR"][4:]) / ".local" / "share")  # set by Wine itself
+    return Path(folder) / "uncharted-launcher" / "launcher.json" if folder else None
+
+
+CONFIG_FILE = (WINE and shared_config_file()) or PREFIX_CONFIG_FILE
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 APP_TITLE = "Uncharted: The Nathan Drake Collection"
 # Credits shown on the Advanced page: the anti-aliasing technologies.
@@ -583,7 +642,8 @@ def game_update_dir(folder):
 
 
 def app_version(folder):
-    """APP_VER of a game folder (sce_sys/param.sfo)."""
+    """APP_VER of a game folder (sce_sys/param.sfo); 01.02 when the executables are 1.02 although
+    param.sfo says otherwise (dumps with the update merged in that kept the 1.00 param.sfo)."""
     try:
         data = (Path(folder) / "sce_sys" / "param.sfo").read_bytes()
         _, _, keys, values, count = struct.unpack_from("<IIIII", data)
@@ -591,10 +651,60 @@ def app_version(folder):
             key_at, _, length, _, value_at = struct.unpack_from("<HHIII", data, 20 + i * 16)
             key = data[keys + key_at:data.index(bytes(1), keys + key_at)].decode()
             if key == "APP_VER":
-                return data[values + value_at:values + value_at + length].rstrip(bytes(1)).decode()
+                version = data[values + value_at:values + value_at + length].rstrip(bytes(1)).decode()
+                return "01.02" if version < "01.02" and has_update_102_code(folder) else version
     except (OSError, ValueError, struct.error):
         pass
     return None
+
+
+# Uncharted 2's torch code as update 1.02 compiled it (tools/probe_uncharted.py
+# TORCH_FORWARD_PATCHES; 1.00 lays this code out differently).
+UPDATE_102_CODE = bytes.fromhex("488d05cc9fd500 8b4850 84c9 7440 8a50".replace(" ", ""))
+_update_102_cache = {}
+
+
+def has_update_102_code(folder):
+    path = Path(folder) / "big2-ps4_Shipping.elf"
+    try:
+        key = (str(path), path.stat().st_mtime_ns)
+    except OSError:
+        return False
+    if key not in _update_102_cache:
+        try:
+            _update_102_cache[key] = UPDATE_102_CODE in path.read_bytes()
+        except OSError:
+            _update_102_cache[key] = False
+    return _update_102_cache[key]
+
+
+def desktop_folder():
+    """The user's Desktop folder. Windows can move it (OneDrive backup, a redirected or renamed
+    Desktop), so it is asked for (SHGetKnownFolderPath) instead of assumed at %USERPROFILE%\\Desktop:
+    shortcuts failed there with "DirectoryNotFound" (#39)."""
+    try:
+        from ctypes import wintypes
+
+        class GUID(ctypes.Structure):
+            _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD), ("Data3", wintypes.WORD),
+                        ("Data4", ctypes.c_ubyte * 8)]
+
+        desktop_id = GUID(0xB4BFCC3A, 0xDB2C, 0x424C,  # FOLDERID_Desktop
+                          (ctypes.c_ubyte * 8)(0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41))
+        found = ctypes.c_void_p()
+        shell32 = ctypes.windll.shell32
+        shell32.SHGetKnownFolderPath.argtypes = [ctypes.POINTER(GUID), wintypes.DWORD, wintypes.HANDLE,
+                                                 ctypes.POINTER(ctypes.c_void_p)]
+        if shell32.SHGetKnownFolderPath(ctypes.byref(desktop_id), 0, None, ctypes.byref(found)) == 0:
+            try:
+                folder = Path(ctypes.wstring_at(found.value))
+            finally:
+                ctypes.windll.ole32.CoTaskMemFree(found)
+            if folder.is_dir():
+                return folder
+    except (AttributeError, OSError, ValueError):
+        pass
+    return Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop"
 
 
 def monitor_refresh_hz():
@@ -623,21 +733,36 @@ def fps_limit_value(value):
 RESOLUTIONS = [("960x540", "540p"), ("1280x720", "720p"), ("1600x900", "900p"), ("1920x1080", "1080p"), ("2560x1440", "1440p"),
                ("2880x1620", "1620p"), ("3840x2160", "4K")]
 # Ultrawide: the render resolution's height at a wider aspect ratio. The games widen their view
-# (more to the sides, nothing stretched); menus and the HUD keep their layout.
-ASPECTS = [("16:9", "16:9"), ("21:9", "21:9"), ("32:9", "32:9")]
-ASPECT_WIDTHS = {"16:9": 16 / 9, "21:9": 64 / 27, "32:9": 32 / 9}
+# (more to the sides, nothing stretched); menus and the HUD keep their layout. 16:10 (Steam Deck,
+# 1280x800): the render resolution's width, taller; the games keep the 16:9 width of view and
+# show more at the top and bottom.
+ASPECTS = [("16:10", "16:10"), ("16:9", "16:9"), ("21:9", "21:9"), ("32:9", "32:9")]
+ASPECT_WIDTHS = {"16:10": 16 / 10, "16:9": 16 / 9, "21:9": 64 / 27, "32:9": 32 / 9}
 
 
 def aspect_resolution(resolution, aspect):
-    """The render resolution at the aspect ratio: 1440p at 21:9 is 3440x1440 (widths in steps of 8)."""
+    """The render resolution at the aspect ratio: 1440p at 21:9 is 3440x1440 (widths in steps of 8),
+    720p at 16:10 is 1280x800 (heights in steps of 4)."""
     width, height = (int(v) for v in resolution.split("x"))
     if aspect not in ASPECT_WIDTHS or aspect == "16:9":
         return resolution
-    if aspect == "21:9" and height in (1080, 1440, 1600):
+    if ASPECT_WIDTHS[aspect] < 16 / 9:
+        height = int(round(width / ASPECT_WIDTHS[aspect] / 4)) * 4
+    elif aspect == "21:9" and height in (1080, 1440, 1600):
         width = {1080: 2560, 1440: 3440, 1600: 3840}[height]  # the common monitor sizes
     else:
         width = int(round(height * ASPECT_WIDTHS[aspect] / 8)) * 8
     return f"{width}x{height}"
+
+
+def resolution_options(aspect):
+    """RESOLUTIONS labelled by the height the game draws at this aspect ratio (720p is 800p at
+    16:10; wider ones keep the height); 2160 lines are 4K, ultrawide included."""
+    options = []
+    for value, _ in RESOLUTIONS:
+        height = int(aspect_resolution(value, aspect).split("x")[1])
+        options.append((value, "4K" if height == 2160 else f"{height}p"))
+    return options
 
 # Quality presets: the game has one detail level (the PS4's); quality here is the resolution the
 # game draws at, how it reaches the screen (FSR 1, sharpening) and the frame rate. Above 1080p the
@@ -848,25 +973,57 @@ def write_ini(game, updates):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def load_config_file(path):
+    """A launcher.json as a dict; {} when missing. One that can't be read (cut off while written)
+    is kept beside it as .bad, and the other copy or the defaults apply."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except OSError:
+        return {}
+    except ValueError:
+        try:
+            shutil.copy2(path, path.with_name(path.name + ".bad"))
+        except OSError:
+            pass
+        return {}
+
+
 def read_config():
     config = dict(LAUNCHER_DEFAULTS)
-    try:
-        config.update(json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
-    except (OSError, ValueError):
-        pass
+    stored = load_config_file(CONFIG_FILE)
+    if CONFIG_FILE != PREFIX_CONFIG_FILE:
+        # Under Wine the shared file wins; what it lacks comes from this prefix's own file (the place
+        # earlier versions used), game by game. That file is left as it is.
+        older = load_config_file(PREFIX_CONFIG_FILE)
+        if older:
+            games = {}
+            for source in (older, stored):
+                for game, entry in (source.get("games") if isinstance(source.get("games"), dict) else {}).items():
+                    if isinstance(entry, dict):
+                        games.setdefault(game, {}).update(entry)
+            stored = {**older, **stored, "games": games}
+    config.update(stored)
     # Version 2: render resolutions above 1080p crash in gameplay; earlier presets chose them.
     if config.get("version", 1) < 2:
         config["resolution"] = "1920x1080"
     # Version 3: preset, resolution and multithreading per game; the shared values start all three.
-    games = config.setdefault("games", {})
+    if not isinstance(config.get("games"), dict):
+        config["games"] = {}
+    games = config["games"]
     resolutions = [r for r, _ in RESOLUTIONS]
     for game in GAME_KEYS:
-        entry = games.setdefault(game, {})
+        if not isinstance(games.get(game), dict):
+            games[game] = {}
+        entry = games[game]
         for name, default in GAME_SETTING_DEFAULTS.items():
             entry.setdefault(name, config.get(name, default))
         entry["preset"] = {"balanced": "medium"}.get(entry["preset"], entry["preset"])
+        # A value that isn't valid (another version, a hand edit) falls back alone.
         if entry["resolution"] not in resolutions:
             entry["resolution"] = "1920x1080"
+        if entry.get("aspect") not in ASPECT_WIDTHS:
+            entry["aspect"] = "16:9"
     # Version 4: the presets draw at 720p / 1080p / 1440p / 4K (all were 1080p before).
     if config.get("version", 1) < 4:
         for game, entry in games.items():
@@ -894,12 +1051,31 @@ def read_config():
     for name in GAME_SETTING_DEFAULTS:
         config.pop(name, None)
     config["version"] = 7
+    # Under Wine the game folder is also kept as a Linux path: another prefix can show the same
+    # folder under another drive letter (Launcher.game_dir).
+    folder = config.get("game_dir")
+    if WINE and folder and not config.get("game_dir_unix") and Path(folder).exists():
+        config["game_dir_unix"] = unix_path(folder)
     return config
 
 
 def write_config(config):
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    # Through a temporary file: a launcher and a game started from a shortcut may write at once, and
+    # a write cut short must not leave half a file.
+    text = json.dumps(config, indent=2)
+    temporary = CONFIG_FILE.with_name(f"{CONFIG_FILE.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(text, encoding="utf-8")
+        os.replace(temporary, CONFIG_FILE)
+    except OSError:
+        # Windows refuses the swap while another process has the file open (a virus scanner, a
+        # second launcher): written in place, as before.
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        CONFIG_FILE.write_text(text, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -941,17 +1117,25 @@ class Segmented(tk.Frame):
 
     def __init__(self, parent, options, value, command, font, recommended=None):
         super().__init__(parent, bg=LINE, padx=1, pady=1)
-        self.command, self.labels, self.value = command, {}, value
+        self.command, self.labels, self.value, self.recommended = command, {}, value, recommended
         for i, (option, label) in enumerate(options):
-            # The recommended choice carries a star.
-            text = f"{label}  ★" if option == recommended else label
-            item = tk.Label(self, text=text, font=font, padx=12, pady=5, cursor="hand2", bd=0)
+            item = tk.Label(self, text=self.text(option, label), font=font, padx=12, pady=5, cursor="hand2", bd=0)
             item.grid(row=0, column=i, padx=(0 if i == 0 else 1, 0))
             item.bind("<Button-1>", lambda e, v=option: self.set(v, notify=True))
             item.bind("<Enter>", lambda e, w=item, v=option: v != self.value and w.config(bg=PANEL_HI))
             item.bind("<Leave>", lambda e: self.restyle())
             self.labels[option] = item
         self.restyle()
+
+    def text(self, option, label):
+        # The recommended choice carries a star.
+        return f"{label}  ★" if option == self.recommended else label
+
+    def relabel(self, options):
+        """New labels for the same choices (the resolutions at another aspect ratio)."""
+        for option, label in options:
+            if option in self.labels:
+                self.labels[option].config(text=self.text(option, label))
 
     def set(self, value, notify=False):
         self.value = value
@@ -1317,6 +1501,7 @@ class Launcher:
         settings = self.game_settings()
         if isinstance(self.widgets.get("resolution"), Segmented):
             self.widgets["resolution"].set(settings["resolution"])
+        self.refresh_render_size()
         if isinstance(self.widgets.get("aspect"), Segmented):
             self.widgets["aspect"].set(settings.get("aspect", "16:9"))
         if isinstance(self.widgets.get("multithreaded"), Toggle):
@@ -1338,7 +1523,14 @@ class Launcher:
 
     def game_dir(self):
         folder = self.config.get("game_dir") or ""
-        return Path(folder) if folder else DEFAULT_GAME_DIR
+        if not folder:
+            return DEFAULT_GAME_DIR
+        if WINE and not Path(folder).exists():
+            # Chosen in another prefix (another Steam shortcut): the same folder by its Linux path.
+            here = windows_path(self.config.get("game_dir_unix"))
+            if here and Path(here).exists():
+                return Path(here)
+        return Path(folder)
 
     def choose_game_dir(self):
         from tkinter import filedialog
@@ -1352,20 +1544,38 @@ class Launcher:
                                             "Choose the game's root folder (CUSA02344).")
             return False
         self.config["game_dir"] = folder
+        if WINE:
+            self.config["game_dir_unix"] = unix_path(folder)
         write_config(self.config)
         if hasattr(self, "game_dir_label"):
             self.game_dir_label.config(text=f"Game files: {folder}")
             self.update_label.config(text=self.update_text())
         return True
 
+    def chosen_update(self):
+        """The update folder chosen in Advanced (Choose update folder), if it is still there."""
+        folder = self.config.get("update_dir") or ""
+        if folder:
+            for candidate in (Path(folder), Path(folder) / "uroot"):
+                if is_game_dir(candidate):
+                    return candidate
+        return None
+
+    def update_dir(self):
+        """The update the games use: the chosen folder, else one next to the game folder."""
+        return self.chosen_update() or game_update_dir(self.game_dir())
+
     def update_text(self):
-        update = game_update_dir(self.game_dir())
+        update = self.update_dir()
         if update:
             return f"Game update {app_version(update) or '?'} is used: {update}"
         folder = self.game_dir()
+        version = app_version(folder)
+        if version and version >= "01.02":
+            return f"Game version {version} (the update is in the game folder)."
         title = folder.parent if folder.name.lower() == "uroot" else folder
-        return (f"Game version {app_version(folder) or '?'}, no update found. For the 1.02 fixes, "
-                f"extract the update next to the game folder as {title.name}-patch.")
+        return (f"Game version {version or '?'}, no update found. For the 1.02 fixes, choose your update 1.02 "
+                f"folder (or its .pkg) under GAME UPDATE.")
 
     def current_game(self):
         return next(g for g in GAMES if g["key"] == self.config.get("game"))
@@ -1553,6 +1763,7 @@ class Launcher:
         settings["resolution"] = PRESETS[name]["resolution"]
         if "resolution" in self.widgets:
             self.widgets["resolution"].set(settings["resolution"])
+        self.refresh_render_size()
         for key, value in preset_values(name).items():
             self.ini[key] = value
             widget = self.widgets.get(key)
@@ -1571,8 +1782,8 @@ class Launcher:
         page = self.page()
 
         def resolution(parent):
-            return Segmented(parent, RESOLUTIONS, self.game_settings()["resolution"],
-                             self.change_resolution, self.f_small)
+            return Segmented(parent, resolution_options(self.game_settings().get("aspect", "16:9")),
+                             self.game_settings()["resolution"], self.change_resolution, self.f_small)
         self.widgets["resolution"] = self.row(
             page, "Render resolution",
             "How sharp the picture is; higher needs a faster graphics card (the PS4 drew 1080p). If a "
@@ -1581,11 +1792,15 @@ class Launcher:
 
         def aspect(parent):
             return Segmented(parent, ASPECTS, self.game_settings().get("aspect", "16:9"),
-                             lambda v: self.change_game_setting("aspect", v), self.f_small)
+                             self.change_aspect, self.f_small)
         self.widgets["aspect"] = self.row(
             page, "Aspect ratio",
             "For ultrawide monitors (21:9, 32:9), with Borderless or Fullscreen: the games show more at "
-            "the sides and the same view top to bottom as on a 16:9 screen.", aspect)
+            "the sides and the same view top to bottom as on a 16:9 screen. 16:10 (Steam Deck: 800p is "
+            "1280x800) fills the screen and shows more at the top and bottom.", aspect)
+        self.render_size_note = tk.Label(page, text="", font=self.f_small, bg=BG, fg=GOLD, anchor="w")
+        self.render_size_note.pack(side="top", fill="x", pady=(0, self.px(10)))
+        self.refresh_render_size()
         self.ini_choice(page, "upscaler", "Anti-aliasing",
                         "Smooths jagged, shimmering edges. TAA is the lightest; FSR and DLSS (NVIDIA RTX "
                         "cards) keep the most detail. Also in the in-game menu, where it changes at once.",
@@ -2058,6 +2273,9 @@ class Launcher:
         self.ini_label = tk.Label(page, text=f"Settings: {ini_file(self.config['game'])}", font=self.f_small,
                                   bg=BG, fg=DIM, anchor="w")
         self.ini_label.pack(side="top", fill="x")
+        section("GAME UPDATE", (("Choose update folder", self.choose_update_folder),
+                                ("Install from .pkg", self.install_game_update)),
+                "Your extracted update 1.02 folder, wherever it is, or the update's .pkg file.")
         section("TROUBLESHOOTING", (("Check for updates", lambda: self.check_updates(manual=True)),
                                     ("Clear shader cache", self.clear_cache), ("Reset all settings", self.reset)))
         # Credits for the anti-aliasing technologies (NVIDIA's DLSS license asks for its attribution).
@@ -2231,6 +2449,21 @@ class Launcher:
         self.game_settings()["preset"] = "custom"
         write_config(self.config)
         self.redraw_presets()
+        self.refresh_render_size()
+
+    def change_aspect(self, value):
+        self.change_game_setting("aspect", value)
+        self.refresh_render_size()
+
+    def refresh_render_size(self):
+        """The resolution labels and the exact render size for the selected game's aspect ratio."""
+        settings = self.game_settings()
+        aspect = settings.get("aspect", "16:9")
+        if isinstance(self.widgets.get("resolution"), Segmented):
+            self.widgets["resolution"].relabel(resolution_options(aspect))
+        if hasattr(self, "render_size_note"):
+            width, height = aspect_resolution(settings["resolution"], aspect).split("x")
+            self.render_size_note.config(text=f"Render size: {width} × {height}")
 
     def change_game_setting(self, key, value):
         self.game_settings()[key] = value
@@ -2266,7 +2499,7 @@ class Launcher:
                                            "(CUSA02344, the folder with eboot.bin and sce_sys).")
             if not self.choose_game_dir():
                 return
-        if not self.confirm_without_update():
+        if not self.confirm_without_update() or not self.confirm_update_files():
             return
         self.follow_ini()  # the in-game menu's last changes, not older values kept here
         self.save_ini({k: self.ini.get(k, v) for k, v in INI_DEFAULTS.items()})
@@ -2278,6 +2511,8 @@ class Launcher:
         env["UNCHARTED_JOB_SLEEP"] = "0" if self.config.get("job_sleep", "auto") == "off" else "1"
         env["UNCHARTED_LANGUAGE"] = str(self.config.get("language", "1"))
         env["UNCHARTED_UNLOCK"] = "1" if self.config.get("unlock", False) else "0"
+        if self.chosen_update():
+            env["UNCHARTED_UPDATE"] = str(self.chosen_update())  # tools/probe_uncharted.py find_update
         env["UNCHARTED_CHEATS"] = ",".join(name for name, *_ in CHEATS if self.config.get("cheat_" + name, False))
         # Every game's own options: the Collection menu starts the others itself, and
         # tools/probe_uncharted.py applies the started game's (its settings file decides the
@@ -2394,12 +2629,29 @@ class Launcher:
                 return "\n".join(context)[-600:]
         return None
 
+    def confirm_update_files(self):
+        """An update folder with missing or damaged files (#43: a bin.psarc the games couldn't read
+        stopped all three at start with "ASSERTION: root") is named before the game starts."""
+        update = self.update_dir()
+        if not update:
+            return True
+        try:
+            problems = self.update_installer().check_update(update)
+        except Exception:  # the check itself must never keep a game from starting
+            return True
+        if not problems:
+            return True
+        return messagebox.askokcancel(
+            APP_TITLE, "Your game update folder has missing or damaged files:\n\n" + "\n".join(problems[:6]) +
+            f"\n\n{update}\n\nThe games will probably stop at start. Extract the update again (or use Install "
+            "from .pkg under Advanced -> GAME UPDATE). Play anyway?")
+
     def confirm_without_update(self):
         """Without update 1.02 most of the port's game fixes (crash fixes among them) are skipped:
         asks once per game folder (a 1.02 copy with the update merged in reports 1.02 itself)."""
         folder = self.game_dir()
         version = app_version(folder)
-        if game_update_dir(folder) or not version or version >= "01.02" or \
+        if self.update_dir() or not version or version >= "01.02" or \
                 self.config.get("warned_no_update") == str(folder):
             return True
         title = folder.parent if folder.name.lower() == "uroot" else folder
@@ -2474,8 +2726,7 @@ class Launcher:
 
     def make_shortcut(self, name, description, play=None):
         """A desktop shortcut to the launcher, or with `play` (u1/u2/u3) to that game directly."""
-        desktop = Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop"
-        link = desktop / f"{name}.lnk"
+        link = desktop_folder() / f"{name}.lnk"
         pythonw = Path(sys.executable).with_name("pythonw.exe")
         target = pythonw if pythonw.exists() else Path(sys.executable)
         arguments = f"\"{Path(__file__).resolve()}\""
@@ -2485,13 +2736,97 @@ class Launcher:
             arguments = f"{arguments} --play {play}".strip()
         def ps(value):  # a PowerShell single-quoted string ("Drake's" doubles the quote)
             return "'" + str(value).replace("'", "''") + "'"
-        script = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut({ps(link)});"
+        # Messages in UTF-8 (a German or Portuguese Windows answers in its own language).
+        script = ("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+                  f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut({ps(link)});"
                   f"$s.TargetPath={ps(target)};$s.Arguments={ps(arguments)};"
                   f"$s.WorkingDirectory={ps(ROOT)};$s.IconLocation={ps(ASSETS / 'uncharted.ico')};"
                   f"$s.Description={ps(description)};$s.Save()")
         result = subprocess.run(["powershell", "-NoProfile", "-Command", script], creationflags=NO_WINDOW,
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, encoding="utf-8", errors="replace")
         return link, result
+
+    def update_installer(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("install_update", ROOT / "tools" / "install_update.py")
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        return installer
+
+    def choose_update_folder(self):
+        """An update the player already extracted, anywhere: checked and remembered (nothing is
+        copied); the games get it as UNCHARTED_UPDATE."""
+        if self.process:
+            messagebox.showwarning(APP_TITLE, "Close the game first.")
+            return
+        game = self.game_dir()
+        if not is_game_dir(game):
+            messagebox.showwarning(APP_TITLE, "Choose the game folder first (Change game folder).")
+            return
+        from tkinter import filedialog
+        folder = filedialog.askdirectory(title="Choose the extracted update 1.02 folder", parent=self.root,
+                                         mustexist=True)
+        if not folder:
+            return
+        installer = self.update_installer()
+        try:
+            update = installer.check_folder(folder, game)
+        except installer.UpdateError as error:
+            messagebox.showerror(APP_TITLE, f"This folder can't be used:\n{error}")
+            return
+        self.config["update_dir"] = str(update)
+        write_config(self.config)
+        self.update_label.config(text=self.update_text())
+        messagebox.showinfo(APP_TITLE, f"Game update {app_version(update) or '?'} is used from now on:\n{update}")
+
+    def install_game_update(self):
+        """The player's own update PKG unpacked next to the game folder (tools/install_update.py;
+        the port ships no game files)."""
+        if self.process:
+            messagebox.showwarning(APP_TITLE, "Close the game first.")
+            return
+        game = self.game_dir()
+        if not is_game_dir(game):
+            messagebox.showwarning(APP_TITLE, "Choose the game folder first (Change game folder).")
+            return
+        from tkinter import filedialog
+        pkg = filedialog.askopenfilename(title="Choose the game update (.pkg)", parent=self.root,
+                                         filetypes=[("PS4 package", "*.pkg"), ("All files", "*.*")])
+        if not pkg:
+            return
+        installer = self.update_installer()
+        existing = installer.existing_update(game)
+        if existing and not messagebox.askyesno(
+                APP_TITLE, f"There is an update folder already:\n{existing}\n\nReplace it with this update?"):
+            return
+        state = {"step": "Checking the update..."}
+
+        def work():
+            try:
+                state["path"] = installer.install(pkg, game, log=lambda text: state.__setitem__("step", text))
+            except installer.UpdateError as error:
+                state["error"] = str(error)
+            except Exception as error:  # a disk or permission problem: shown as it is
+                state["error"] = f"{type(error).__name__}: {error}"
+
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+
+        def poll():
+            if worker.is_alive():
+                self.update_label.config(text=state["step"])
+                self.root.after(200, poll)
+                return
+            if "path" in state:  # the installed one is used, also over a folder chosen before
+                self.config["update_dir"] = str(state["path"])
+                write_config(self.config)
+            self.update_label.config(text=self.update_text())
+            if "error" in state:
+                messagebox.showerror(APP_TITLE, f"The update was not installed:\n{state['error']}")
+            else:
+                messagebox.showinfo(APP_TITLE, f"Update installed:\n{state['path']}\n\nThe games use it from "
+                                               "their next start.")
+        poll()
 
     def desktop_shortcut(self):
         link, result = self.make_shortcut("Uncharted", APP_TITLE)

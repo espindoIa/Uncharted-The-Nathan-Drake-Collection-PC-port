@@ -1464,6 +1464,16 @@ Merge choices (details in the sections below and in CHANGELOG.md):
   default in all three (0.3.0 forced it off in U1 for GitHub #23's grey guns; the user wants it
   on, 19 Oct; the fork's draw-pipe ordering fixes may cover #23, not verified).
 
+Upstream 0.3.1 merged (19 Oct), choices:
+- One frame start per frame (Supermedo #261): applies to U1 and U3 only. U2 (FlatSource) keeps the
+  fork's display_frame_open gate (four display draws a frame; the first after the scene starts it).
+  Not measured after the merge: frame starts per shown frame in U1/U3.
+- Toggle bits: upstream's OneFrameStart (59) and FullScreenPassJitter (60) are 1 << 61 and
+  1 << 62 here; 59/60 stay the fork's IsMappedCache and RecursiveLockArray.
+- Movies: 0.3.1's fitted size (black bars at 16:10/ultrawide) with the fork's Lanczos filter.
+- Launcher settings version stays 7 (the fork's multithreaded default) with 0.3.1's Wine
+  game_dir_unix step; package ships play.py and install_update.py + PkgTool.
+
 ### U3 multithreaded freeze / "Invalid packet" (FIXED 19 Oct)
 - User: U3 "crashes" seconds into gameplay (port package, 4K, 120 FPS, DLAA model M, MT on). The
   run's log simply stopped, exit code 0: the window thread's _Exit(0) after a close request (the
