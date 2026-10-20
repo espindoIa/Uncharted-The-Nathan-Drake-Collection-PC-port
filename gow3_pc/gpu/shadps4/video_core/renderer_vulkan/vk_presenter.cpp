@@ -626,6 +626,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         texture_cache.UpdateImage(image_id);
     }
 
+    // 20 Oct audit: warm-up was pumped only on pipeline lookups (U1: entries waited ~4.8 s); PrepareFrame
+    // runs on the GPU command thread once per flip, like the lookups.
+    rasterizer->GetPipelineCache().PumpWarmUp();
     SubmitLog::Event("F0", "%llx", static_cast<unsigned long long>(cpu_address));
     Frame* frame = GetRenderFrame();
     SubmitLog::Event("F1", "%u", frame->id);
@@ -1222,18 +1225,26 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
                                vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
                                {}, {}, pre_barriers);
-        const vk::ClearColorValue black{std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}};
-        cmdbuf.clearColorImage(swapchain_image, vk::ImageLayout::eTransferDstOptimal, black, color_range);
-        const vk::MemoryBarrier clear_done{
-            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
-            .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
-        };
-        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer,
-                               vk::DependencyFlagBits::eByRegion, clear_done, {}, {});
+        const vk::ImageBlit blit =
+            MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height);
+        // 20 Oct audit: the 4K clear cost GPU time every present; only letterbox bars need it.
+        const bool covers = blit.dstOffsets[0].x == 0 && blit.dstOffsets[0].y == 0 &&
+                            blit.dstOffsets[1].x == s32(extent.width) &&
+                            blit.dstOffsets[1].y == s32(extent.height);
+        if (!covers) {
+            const vk::ClearColorValue black{std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}};
+            cmdbuf.clearColorImage(swapchain_image, vk::ImageLayout::eTransferDstOptimal, black,
+                                   color_range);
+            const vk::MemoryBarrier clear_done{
+                .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+                .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+            };
+            cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                                   vk::PipelineStageFlagBits::eTransfer,
+                                   vk::DependencyFlagBits::eByRegion, clear_done, {}, {});
+        }
         cmdbuf.blitImage(frame->image, vk::ImageLayout::eTransferSrcOptimal, swapchain_image,
-                         vk::ImageLayout::eTransferDstOptimal,
-                         MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height),
-                         vk::Filter::eLinear);
+                         vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
         // gow3: the settings menu / FPS counter over the frame, at display resolution.
         const bool overlay = Gow3Overlay::Visible();
         const std::array post_barriers{

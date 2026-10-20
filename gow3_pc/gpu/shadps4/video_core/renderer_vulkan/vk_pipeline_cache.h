@@ -140,6 +140,9 @@ public:
     /// gow3: the same load on low-priority threads while the game runs; the GPU thread takes
     /// the results a few at a time (PumpWarmUp). False when it cannot (zip archive store).
     bool StartBackgroundWarmUp();
+    /// gow3: GPU thread; returns at once when no warm-up runs. Also called once per frame
+    /// (Presenter::PrepareFrame), not only when the game looks up a pipeline.
+    void PumpWarmUp();
     void StartOnDemand();
     void Sync();
     void ReportCompilerStats();
@@ -217,7 +220,6 @@ private:
     struct WarmStage;
     void ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data);
     bool MergeWarmStage(WarmStage& stage);
-    void PumpWarmUp();
     void StopWarmUp();
     bool AsyncCompilation() const;
     /// gow3: this draw's shaders and pipeline compile at once instead of being skipped while
