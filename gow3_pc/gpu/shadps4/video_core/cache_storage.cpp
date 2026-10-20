@@ -87,6 +87,43 @@ constexpr std::string GetBlobFileExtension(BlobType type) {
     }
 }
 
+// 20 Oct: the cache id became "<serial>-<stem>" and the player's U3 booted cold (stalls of 5.1 s /
+// 474 compiles, 4.1 s / 406, 1.05 s / 124) while the old shared "<serial>" cache sat unused.
+// Seed the new id from the old one once, only when the target does not exist: shader files are
+// <hash>_<perm_idx>.spv with perm_idx = discovery order of a run, so merging into an existing
+// folder could pair a name with a different shader. Copy to a temp sibling, then rename, so a
+// crash never leaves a half folder that looks complete.
+static void SeedFromLegacyCache(const std::filesystem::path& legacy,
+                                const std::filesystem::path& target, bool archived) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (fs::exists(target, ec) || !fs::exists(legacy, ec)) {
+        return;
+    }
+    if (archived ? !fs::is_regular_file(legacy, ec) : !fs::is_directory(legacy, ec)) {
+        return;
+    }
+    auto tmp = target;
+    tmp += ".seeding";
+    fs::remove_all(tmp, ec);
+    if (archived) {
+        fs::copy_file(legacy, tmp, ec);
+    } else {
+        fs::copy(legacy, tmp, fs::copy_options::recursive, ec);
+    }
+    if (!ec) {
+        fs::rename(tmp, target, ec);
+    }
+    if (ec) {
+        LOG_WARNING(Render, "Could not seed pipeline cache {} from {}: {}", target.string(),
+                    legacy.string(), ec.message());
+        std::error_code ignore;
+        fs::remove_all(tmp, ignore);
+        return;
+    }
+    LOG_INFO(Render, "Seeded pipeline cache {} from {}", target.string(), legacy.string());
+}
+
 void DataBase::Open() {
     if (opened) {
         return;
@@ -95,11 +132,19 @@ void DataBase::Open() {
     const auto& game_info = Common::ElfInfo::Instance();
 
     using namespace Common::FS;
+    const std::string serial{game_info.GameSerial()};
+    const bool seed = game_info.CacheId() != serial && !serial.empty();
     if (EmulatorSettings.IsPipelineCacheArchived()) {
         mz_zip_zero_struct(&zip_ar);
 
         cache_path = GetUserPath(PathType::CacheDir) /
                      std::filesystem::path{game_info.CacheId()}.replace_extension(".zip");
+        if (seed) {
+            SeedFromLegacyCache(GetUserPath(PathType::CacheDir) /
+                                    std::filesystem::path{serial}.replace_extension(
+                                        ".zip"),
+                                cache_path, true);
+        }
 
         if (!mz_zip_reader_init_file(&zip_ar, cache_path.string().c_str(),
                                      MZ_ZIP_FLAG_READ_ALLOW_WRITING) ||
@@ -111,6 +156,10 @@ void DataBase::Open() {
         }
     } else {
         cache_path = GetUserPath(PathType::CacheDir) / game_info.CacheId();
+        if (seed) {
+            SeedFromLegacyCache(GetUserPath(PathType::CacheDir) / serial,
+                                cache_path, false);
+        }
         if (!std::filesystem::exists(cache_path)) {
             std::filesystem::create_directories(cache_path);
         }
