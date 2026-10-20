@@ -756,7 +756,15 @@ def run_once(args, executable, guest_args, loadexec):
         except OSError as copy_error:
             print(f"Update files not copied ({copy_error}): starting the game without its update")
             return run_game(args, base, executable, guest_args, loadexec)
+        except ValueError as error:
+            print(f"Update not used ({error}): starting the game without it")
+            return run_game(args, base, executable, guest_args, loadexec)
         return run_game(args, boot, executable, guest_args, loadexec, app0=base, overlays=[update])
+    except ValueError as error:
+        # 20 Oct 2026 audit: an update remembered for another title (US 1.02 kept after switching to
+        # the EU copy) made create_view raise ValueError, a traceback and no game.
+        print(f"Update not used ({error}): starting the game without it")
+        return run_game(args, base, executable, guest_args, loadexec)
     try:
         return run_game(args, view, executable, guest_args, loadexec)
     finally:
