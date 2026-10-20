@@ -10,7 +10,7 @@
 //              [--load N] [--game-images 1] [--quality 0-4] [--dir <out folder>]
 //   --load N: N 4K RGBA16F blits on the graphics queue each frame (with --queue compute they
 //   run alongside DLSS); --game-images 1: colour/depth with the texture cache's flags.
-//   Run it under the CLANG64 PATH (libc++.dll).
+//   Linked statically: it runs from any shell.
 //
 // Prints the median, p10 and p90 of the evaluation time and of the frame (load + DLSS).
 

@@ -2207,7 +2207,8 @@ bridge and nvngx_dlss.dll (310.9.16, the player's) from out/, creates the featur
 RecordDlss (MVLowRes, inverted depth, HDR + auto-exposure, preset by name) and times Evaluate
 with GPU timestamps. One configuration takes 2-9 s instead of a game boot (1-2 min). Options:
 `--in/--out WxH --model jklm --hdr --bias --color rgba16f|r11g11b10|rgba8 --queue compute
---load N --game-images 1 --frames N`. It needs the CLANG64 PATH (libc++.dll). Interleaved
+--load N --game-images 1 --frames N`. It is linked statically and runs from any shell
+(PowerShell: `& gow3_pc\out\gpu\dlss-bench.exe --model m`). Interleaved
 sweeps: run each variant alternately, order flipped every round.
 
 Measurements (RTX 5070, 3840x2160 -> 3840x2160, model M):
