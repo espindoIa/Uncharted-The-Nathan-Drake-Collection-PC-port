@@ -6,11 +6,13 @@
 #include "video_core/renderer_vulkan/ui_composition.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <tuple>
 
 #include <vk_mem_alloc.h>
@@ -311,25 +313,35 @@ bool TemporalUpscaler::OnFrameStart() {
     // gow3: GOW3_PRESET_FILE=<file> holding a preset number, read about once a second: switches
     // the preset like the menu does (scripted tests of live preset changes).
     static const char* preset_file = std::getenv("GOW3_PRESET_FILE");
-    if (preset_file && ++preset_file_frames % 64 == 0) {
-        if (FILE* f = std::fopen(preset_file, "r")) {
-            int value = 0;
-            int output = -1;
-            int provider = -1;
-            const int fields = std::fscanf(f, "%d %d %d", &value, &output, &provider);
-            if (fields >= 1 && value >= 0 &&
-                value < Gow3Settings::PresetCount) {
-                Gow3Settings::Get().preset.store(value);
+    // 20 Oct 2026 audit: the fopen ran on the GPU thread every 64 frames; a thread started on first
+    // use polls the file every 500 ms and applies it to the settings atomics.
+    static const bool preset_thread = preset_file && [] {
+        std::thread([] {
+            for (;; std::this_thread::sleep_for(std::chrono::milliseconds(500))) {
+                FILE* f = std::fopen(preset_file, "r");
+                if (!f) {
+                    continue;
+                }
+                int value = 0;
+                int output = -1;
+                int provider = -1;
+                const int fields = std::fscanf(f, "%d %d %d", &value, &output, &provider);
+                if (fields >= 1 && value >= 0 &&
+                    value < Gow3Settings::PresetCount) {
+                    Gow3Settings::Get().preset.store(value);
+                }
+                if (fields >= 2 && output >= 0 && output < Gow3Settings::OutputCount) {
+                    Gow3Settings::Get().output_res.store(output);
+                }
+                if (fields == 3 && provider >= 0 && provider < Gow3Settings::UpscalerCount) {
+                    Gow3Settings::Get().upscaler.store(provider);
+                }
+                std::fclose(f);
             }
-            if (fields >= 2 && output >= 0 && output < Gow3Settings::OutputCount) {
-                Gow3Settings::Get().output_res.store(output);
-            }
-            if (fields == 3 && provider >= 0 && provider < Gow3Settings::UpscalerCount) {
-                Gow3Settings::Get().upscaler.store(provider);
-            }
-            std::fclose(f);
-        }
-    }
+        }).detach();
+        return true;
+    }();
+    (void)preset_thread;
     const auto& settings = Gow3Settings::Get();
     // The guest's startup resolution patch remains in effect until restart. Keep the FSR
     // model at the applied preset while the menu saves the requested one for run.sh.
@@ -773,13 +785,16 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
                                     : vk::DescriptorType::eStorageImage,
             .pImageInfo = &infos[i]};
     }
+    // 20 Oct 2026 audit: two getenv calls per TAA dispatch; read once.
+    static const u32 taa_diagnostics = [] {
+        const char* env = std::getenv("GOW3_TAA_DIAGNOSTICS");
+        return env ? u32(std::clamp(std::atoi(env), 1, 3)) : 0u;
+    }();
     struct Params {
         std::array<float, 2> jitter;
         u32 reset, pad;
         std::array<std::array<float, 4>, 3> depth;
-    } params{jitter, reset ? 1u : 0u, std::getenv("GOW3_TAA_DIAGNOSTICS") ?
-                 u32(std::clamp(std::atoi(std::getenv("GOW3_TAA_DIAGNOSTICS")),1,3)) : 0u,
-             camera_motion.TaaDepthParameters()};
+    } params{jitter, reset ? 1u : 0u, taa_diagnostics, camera_motion.TaaDepthParameters()};
     // Optional techniques for A/B in one run (GOW3_TOGGLE_FILE bits 51-54): tonemapped blending,
     // YCoCg clipping, variance clipping, 3x3 reconstruction. Measured in game on 2026-10-02
     // (static and panning camera, interleaved captures): none improved stability beyond run

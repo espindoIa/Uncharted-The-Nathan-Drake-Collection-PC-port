@@ -659,7 +659,15 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     if (frame_dump) {
         const char* dir = std::getenv("GOW3_DUMP_DIR");
         const auto request = std::filesystem::path(dir ? dir : "out/dump") / "guest-images.trigger";
-        if (FILE* f = std::fopen(request.string().c_str(), "r")) {
+        // 20 Oct 2026 audit: fopen on every frame while frame_dump is on; poll 4 times a second. The
+        // file holds several lines (Gow3TriggerFiles::Take returns only the first), so no watcher.
+        static std::chrono::steady_clock::time_point checked{};
+        const auto now = std::chrono::steady_clock::now();
+        const bool poll = now - checked > std::chrono::milliseconds(250);
+        if (poll) {
+            checked = now;
+        }
+        if (FILE* f = poll ? std::fopen(request.string().c_str(), "r") : nullptr) {
             std::vector<std::pair<unsigned long long, unsigned long long>> requests;
             char line[256];
             constexpr size_t MaxRequests = 256;

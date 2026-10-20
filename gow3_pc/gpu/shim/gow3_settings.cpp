@@ -348,8 +348,12 @@ void ConfigureDlssSupport(bool available, const char* problem) {
 }
 
 bool FixedRenderSession() {
-    const char* size = std::getenv("GOW3_RENDER_RES");
-    return size && size[0];
+    // 20 Oct 2026 audit: called every frame via RenderPreset; the env cannot change, so read it once.
+    static const bool fixed = [] {
+        const char* size = std::getenv("GOW3_RENDER_RES");
+        return size && size[0];
+    }();
+    return fixed;
 }
 
 int RenderPreset() {

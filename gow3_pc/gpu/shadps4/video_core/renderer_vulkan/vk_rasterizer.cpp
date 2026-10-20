@@ -1601,32 +1601,48 @@ bool SkippedShader(u64 first, u64 second = 0) {
     if (!path || !path[0]) {
         return false;
     }
+    // 20 Oct 2026 audit: the stat + fopen ran on the draw path inside a mutex; a thread started on
+    // first use re-reads the file every 500 ms and swaps the list; the draw path only copies a pointer.
     static std::mutex mutex;
-    static std::vector<u64> hashes;
-    static std::filesystem::file_time_type stamp{};
-    static std::chrono::steady_clock::time_point checked{};
-    std::scoped_lock lock{mutex};
-    const auto now = std::chrono::steady_clock::now();
-    if (now - checked > std::chrono::milliseconds(500)) {
-        checked = now;
-        std::error_code ec;
-        const auto time = std::filesystem::last_write_time(path, ec);
-        if (ec) {
-            hashes.clear();
-        } else if (time != stamp) {
-            stamp = time;
-            hashes.clear();
-            if (FILE* f = std::fopen(path, "r")) {
-                unsigned long long value;
-                while (std::fscanf(f, "%llx", &value) == 1) {
-                    hashes.push_back(value);
+    static std::shared_ptr<const std::vector<u64>> shared = std::make_shared<const std::vector<u64>>();
+    static const bool poller = [] {
+        std::thread([] {
+            std::filesystem::file_time_type stamp{};
+            for (;; std::this_thread::sleep_for(std::chrono::milliseconds(500))) {
+                std::error_code ec;
+                const auto time = std::filesystem::last_write_time(path, ec);
+                std::shared_ptr<const std::vector<u64>> next;
+                if (ec) {
+                    next = std::make_shared<const std::vector<u64>>();
+                    stamp = {};
+                } else if (time != stamp) {
+                    stamp = time;
+                    auto list = std::make_shared<std::vector<u64>>();
+                    if (FILE* f = std::fopen(path, "r")) {
+                        unsigned long long value;
+                        while (std::fscanf(f, "%llx", &value) == 1) {
+                            list->push_back(value);
+                        }
+                        std::fclose(f);
+                    }
+                    std::printf("Skip list: %zu shaders\n", list->size());
+                    next = std::move(list);
+                } else {
+                    continue;
                 }
-                std::fclose(f);
+                std::scoped_lock lock{mutex};
+                shared = std::move(next);
             }
-            std::printf("Skip list: %zu shaders\n", hashes.size());
-        }
+        }).detach();
+        return true;
+    }();
+    (void)poller;
+    std::shared_ptr<const std::vector<u64>> hashes_ptr;
+    {
+        std::scoped_lock lock{mutex};
+        hashes_ptr = shared;
     }
-    for (const u64 h : hashes) {
+    for (const u64 h : *hashes_ptr) {
         if (h == first || (second && h == second)) {
             return true;
         }
@@ -6102,22 +6118,24 @@ vk::Pipeline Rasterizer::SquarePass(const GraphicsPipeline& pipeline) const {
 static int DepthCompareProbe() {
     static const char* path = std::getenv("GOW3_DEPTH_PROBE_FILE");
     if (!path || !path[0]) return 0;
-    static std::mutex mutex;
-    static std::chrono::steady_clock::time_point checked{};
-    static int mode = 0;
-    std::scoped_lock lock{mutex};
-    const auto now = std::chrono::steady_clock::now();
-    if (now - checked > std::chrono::milliseconds(250)) {
-        checked = now;
-        int next = 0;
-        if (FILE* f = std::fopen(path, "r")) {
-            if (std::fscanf(f, "%d", &next) != 1 || next < 0 || next > 2) next = 0;
-            std::fclose(f);
-        }
-        if (mode != next) std::printf("Depth compare probe: %d\n", next);
-        mode = next;
-    }
-    return mode;
+    // 20 Oct 2026 audit: the fopen ran on the draw path every 250 ms; a thread started on first use
+    // polls the file and publishes the mode through an atomic.
+    static std::atomic<int> mode{0};
+    static const bool poller = [] {
+        std::thread([] {
+            for (;; std::this_thread::sleep_for(std::chrono::milliseconds(250))) {
+                int next = 0;
+                if (FILE* f = std::fopen(path, "r")) {
+                    if (std::fscanf(f, "%d", &next) != 1 || next < 0 || next > 2) next = 0;
+                    std::fclose(f);
+                }
+                if (mode.exchange(next) != next) std::printf("Depth compare probe: %d\n", next);
+            }
+        }).detach();
+        return true;
+    }();
+    (void)poller;
+    return mode.load(std::memory_order_relaxed);
 }
 
 void Rasterizer::UpdateDepthStencilState() const {
