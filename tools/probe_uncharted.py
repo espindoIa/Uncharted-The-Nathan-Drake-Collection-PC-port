@@ -1192,6 +1192,7 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     env.setdefault("GOW3_PIPELINE_BINARIES", "1")
     env["GOW3_TOGGLE_FILE"] = str(user / "disabled-optimizations.txt")
     env["GOW3_LOADEXEC_FILE"] = str(loadexec)
+    env["GOW3_RESTART_EXECUTABLE"] = "/app0/" + executable
     if args.capture:
         capture=out / "captures" / str(time.time_ns())
         capture.mkdir(parents=True)

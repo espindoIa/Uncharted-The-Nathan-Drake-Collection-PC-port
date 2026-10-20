@@ -23,7 +23,7 @@
 #include "gow3_graphics.h"
 #include "gow3_perf_stats.h"
 
-extern "C" void runtime_restart(void); // src/probe.c: starts run.py again, ends this process
+extern "C" void runtime_restart(void); // src/probe.c: hands restart to the launcher
 extern "C" int runtime_gamesettings_active(void); // src/runtime_gamesettings.c
 // src/runtime_pad.c: the complete maps (every button listed) the given maps give on the defaults.
 extern "C" void runtime_pad_effective_maps(const char* pad_spec, const char* key_spec, const char* mouse_spec,
@@ -1278,10 +1278,15 @@ void Menu() {
         ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.45f, 1.0f), "%d change%s need%s a restart (unsaved progress is lost).",
                            changes, changes == 1 ? "" : "s", changes == 1 ? "s" : "");
         ImGui::SameLine();
-        ImGui::BeginDisabled(!std::getenv("GOW3_RESTART_COMMAND"));
+#ifdef _WIN32
+        const char* handoff = std::getenv("GOW3_LOADEXEC_FILE");
+        const char* executable = std::getenv("GOW3_RESTART_EXECUTABLE");
+        ImGui::BeginDisabled(!handoff || !*handoff || !executable || !*executable);
+#else
+        ImGui::BeginDisabled(false);
+#endif
         if (ImGui::Button("Apply and restart")) {
-            // The new launch confirms the options once the game shows; run.py restores the
-            // previous ones if it never does (restart_unconfirmed).
+            // The new launch confirms the options once the game shows.
             s.restart_unconfirmed = true;
             Gow3Settings::Save();
             runtime_restart();
@@ -1712,7 +1717,7 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 // After "Apply and restart", the new options are kept once the game has shown about ten
-// seconds of frames after loading (run.py restores the previous ones otherwise).
+// seconds of frames after loading.
 void ConfirmRestart() {
     static u32 frames = 0;
     auto& s = Gow3Settings::Get();

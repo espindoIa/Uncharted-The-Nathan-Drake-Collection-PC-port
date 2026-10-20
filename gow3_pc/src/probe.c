@@ -1042,28 +1042,24 @@ static void apply_patches(const char *path, Segment *segments, uint64_t ns, cons
     fclose(f);
     printf("Patches: %" PRIu64 " writes, %" PRIu64 " bytes applied, %" PRIu64 " pointers rebased\n",count,bytes,rebased);
 }
-/* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
- * applied at start). Descriptors are closed first so the old GPU device and its memory are
- * released before the new process opens its own. */
+static const char **restart_guest_argv;
+static int restart_guest_argc;
+/* A new render resolution is patched at start; Windows reuses the launcher's LoadExec loop. */
 void runtime_restart(void) {
     fflush(NULL);
 #ifdef _WIN32
-    /* run.py sets GOW3_RESTART_COMMAND: the launch command line, started again (new patches). */
-    const char *command=getenv("GOW3_RESTART_COMMAND");
-    puts("Runtime: restarting through run.py");
-    if (!command || !*command) { fputs("runtime_restart: GOW3_RESTART_COMMAND is not set\n",stderr); _exit(1); }
-    char *line=_strdup(command);
-    /* Same output handles: a launcher reading the game's log keeps reading the new launch. */
-    STARTUPINFOA startup={.cb=sizeof(startup),.dwFlags=STARTF_USESTDHANDLES,
-                          .hStdInput=GetStdHandle(STD_INPUT_HANDLE),.hStdOutput=GetStdHandle(STD_OUTPUT_HANDLE),
-                          .hStdError=GetStdHandle(STD_ERROR_HANDLE)};
-    PROCESS_INFORMATION process;
-    if (!line || !CreateProcessA(NULL,line,NULL,NULL,TRUE,0,NULL,NULL,&startup,&process)) {
-        fprintf(stderr,"runtime_restart: CreateProcess failed (%lu)\n",GetLastError()); _exit(1);
-    }
-    CloseHandle(process.hThread); CloseHandle(process.hProcess);
-    /* The new launch waits for this process's GPU device to go away (run.py --after). */
-    TerminateProcess(GetCurrentProcess(),0);
+    const char *handoff=getenv("GOW3_LOADEXEC_FILE");
+    const char *executable=getenv("GOW3_RESTART_EXECUTABLE");
+    FILE *f=handoff && *handoff && executable && *executable ? fopen(handoff,"w") : NULL;
+    if (!f) { fputs("runtime_restart: no launcher handoff\n",stderr); _exit(31); }
+    int failed=fprintf(f,"%s\n",executable)<0;
+    for (int i=0;i<restart_guest_argc;++i)
+        if (fprintf(f,"%s\n",restart_guest_argv[i])<0) failed=1;
+    if (fclose(f)) failed=1;
+    if (failed) { fputs("runtime_restart: cannot write launcher handoff\n",stderr); _exit(31); }
+    puts("Runtime: restart handed to the launcher; exiting");
+    fflush(NULL);
+    _exit(30); /* LOADEXEC_EXIT: no destructors while GPU/audio/guest threads run. */
 #else
     const char *command = getenv("GOW3_RESTART_COMMAND");
     syscall(SYS_close_range, 3u, ~0u, 0u);
@@ -1128,6 +1124,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--check-imports] [--no-game-hooks] [--content-profile file] [--app0 dir] [--app0-overlay dir]... [--user dir] [--patches file] [--timeout seconds] [--guest-path /app0/file] [--guest-arg value]... | --vulkan-only\n", argv[0]);
         return 1;
     }
+    restart_guest_argv=guest_argv;
+    restart_guest_argc=guest_argc;
     /* The guest code needs the PS4's instruction sets (#33, #66); GOW3_CPU_CHECK=0 skips this. */
     const char *cpu_check = getenv("GOW3_CPU_CHECK");
     if (!cpu_check || strcmp(cpu_check, "0")) {
