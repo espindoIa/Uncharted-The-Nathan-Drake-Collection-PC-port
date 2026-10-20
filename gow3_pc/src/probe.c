@@ -348,32 +348,6 @@ static DWORD WINAPI exec_watch_thread(LPVOID unused) {
             CloseHandle(snap);
         }
         if (round==0) SetEvent(exec_watch_ready);
-        /* GOW3_EXEC_WATCH_FILE=<path>: up to 4 hex absolute addresses written there (each
-         * optionally prefixed r: to catch reads too) replace the watches while the game runs
-         * (the file is removed once read). */
-        static const char *retarget_file;
-        if (!retarget_file) { retarget_file=getenv("GOW3_EXEC_WATCH_FILE"); if (!retarget_file) retarget_file=""; }
-        if (*retarget_file && (round%10)==0) {
-            FILE *f=fopen(retarget_file,"r");
-            if (f) {
-                uint64_t watches[4]; int count=0;
-                char word[64];
-                while (count<4 && fscanf(f,"%63s",word)==1) {
-                    const int rw=(word[0]=='r' || word[0]=='R') && word[1]==':';
-                    const unsigned long long target=strtoull(word+(rw ? 2 : 0),NULL,16);
-                    if (target) watches[count++]=target|(1ull<<63)|(rw ? 1ull<<62 : 0);
-                }
-                fclose(f); remove(retarget_file);
-                if (count) {
-                    if (watch_unique>0) watch_summary();
-                    for (int i=0;i<count;++i) exec_watch[i]=watches[i];
-                    exec_watch_count=count;
-                    InterlockedExchange(&exec_watch_armed_count,0);
-                    InterlockedExchange(&watch_hits,0);
-                    printf("Exec watch: %d data watches moved\n",count); fflush(stdout);
-                }
-            }
-        }
         Sleep(round<200 ? 1 : 20);
     }
     printf("Exec watch: done (%ld threads armed)\n",(long)exec_watch_armed_count);
@@ -412,6 +386,7 @@ static void poll_exec_watch_file(void) {
     strcpy(exec_watch_file_text,text);
     uint64_t list[4]={0};
     const int count=parse_exec_watch(text,list);
+    if (watch_unique>0) watch_summary();
     for (int i=0;i<4;++i) exec_watch[i]=list[i];
     exec_watch_count=count;
     InterlockedExchange(&watch_hits,0);
@@ -707,15 +682,20 @@ static int sfo_value(const char *path, const char *key, char *text, size_t text_
     if (n<20 || memcmp(data,"\0PSF",4)) return 0;
     uint32_t keys, values, count;
     memcpy(&keys,data+8,4); memcpy(&values,data+12,4); memcpy(&count,data+16,4);
-    for (uint32_t i=0;i<count && 20+i*16+16<=n;++i) {
+    if ((uint64_t)keys>values || (uint64_t)values>n) return 0;
+    size_t key_length=strlen(key);
+    for (uint64_t i=0;i<count && 20+i*16+16<=(uint64_t)n;++i) {
         const unsigned char *e=data+20+i*16;
         uint16_t key_offset, format; uint32_t length, offset;
         memcpy(&key_offset,e,2); memcpy(&format,e+2,2); memcpy(&length,e+4,4); memcpy(&offset,e+12,4);
-        if (keys+key_offset>=n || values+offset+length>n || strcmp((const char *)data+keys+key_offset,key)) continue;
-        if (format==0x0404 && number && length>=4) { memcpy(number,data+values+offset,4); return 1; }
+        uint64_t key_at=(uint64_t)keys+key_offset, value_at=(uint64_t)values+offset;
+        if (key_at>=values || value_at+(uint64_t)length>(uint64_t)n) continue;
+        const unsigned char *end=memchr(data+key_at,0,(uint64_t)values-key_at);
+        if (!end || (size_t)(end-(data+key_at))!=key_length || memcmp(data+key_at,key,key_length)) continue;
+        if (format==0x0404 && number && length>=4) { memcpy(number,data+value_at,4); return 1; }
         if (text && text_size) {
             size_t copy=length<text_size-1 ? length : text_size-1;
-            memcpy(text,data+values+offset,copy); text[copy]=0;
+            memcpy(text,data+value_at,copy); text[copy]=0;
         }
         return 1;
     }
