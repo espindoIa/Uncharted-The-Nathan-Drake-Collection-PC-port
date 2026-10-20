@@ -987,7 +987,7 @@ def write_ini(game, updates):
     lines += [f"{key}={value}" for key, value in updates.items() if key not in done]
     path = ini_file(game)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_text_safely(path, "\n".join(lines) + "\n")
 
 
 def load_config_file(path):
@@ -1076,15 +1076,14 @@ def read_config():
     return config
 
 
-def write_config(config):
-    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+def write_text_safely(path, text):
     # Through a temporary file: a launcher and a game started from a shortcut may write at once, and
-    # a write cut short must not leave half a file.
-    text = json.dumps(config, indent=2)
-    temporary = CONFIG_FILE.with_name(f"{CONFIG_FILE.name}.{os.getpid()}.tmp")
+    # a write cut short must not leave half a file. (20 Oct 2026 audit: the probe-uN.ini writes
+    # went in place and a kill mid-write reset display mode, FPS limit and upscaler.)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         temporary.write_text(text, encoding="utf-8")
-        os.replace(temporary, CONFIG_FILE)
+        os.replace(temporary, path)
     except OSError:
         # Windows refuses the swap while another process has the file open (a virus scanner, a
         # second launcher): written in place, as before.
@@ -1092,7 +1091,12 @@ def write_config(config):
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
-        CONFIG_FILE.write_text(text, encoding="utf-8")
+        path.write_text(text, encoding="utf-8")
+
+
+def write_config(config):
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    write_text_safely(CONFIG_FILE, json.dumps(config, indent=2))
 
 
 # ---------------------------------------------------------------------------------------------

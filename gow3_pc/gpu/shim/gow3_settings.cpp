@@ -14,6 +14,12 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 namespace Gow3Settings {
 
 namespace {
@@ -475,13 +481,37 @@ void Save() {
             text += key + "=" + value + "\n";
         }
     }
-    FILE* file = std::fopen(Path(), "w");
+    // 20 Oct 2026 audit: fopen "w" truncates first, so a kill mid-write (or the launcher reading
+    // then) saw an empty file and reset the settings. Write a temp file and replace.
+    const std::string tmp = std::string(Path()) + ".tmp";
+    FILE* file = std::fopen(tmp.c_str(), "w");
     if (!file) {
         std::printf("Settings: cannot write %s\n", Path());
         return;
     }
-    std::fputs(text.c_str(), file);
-    std::fclose(file);
+    const bool wrote = std::fputs(text.c_str(), file) >= 0;
+    const bool closed = std::fclose(file) == 0;
+#ifdef _WIN32
+    wchar_t from[1024], to[1024];
+    const bool replaced = wrote && closed &&
+        MultiByteToWideChar(CP_UTF8, 0, tmp.c_str(), -1, from, 1024) &&
+        MultiByteToWideChar(CP_UTF8, 0, Path(), -1, to, 1024) &&
+        MoveFileExW(from, to, MOVEFILE_REPLACE_EXISTING);
+#else
+    const bool replaced = wrote && closed && std::rename(tmp.c_str(), Path()) == 0;
+#endif
+    if (!replaced) {
+        // Same fallback as the launcher's write_config: the target is held open elsewhere.
+        std::remove(tmp.c_str());
+        std::printf("Settings: cannot replace %s; writing in place\n", Path());
+        file = std::fopen(Path(), "w");
+        if (!file) {
+            std::printf("Settings: cannot write %s\n", Path());
+            return;
+        }
+        std::fputs(text.c_str(), file);
+        std::fclose(file);
+    }
     synced = ours;
 }
 

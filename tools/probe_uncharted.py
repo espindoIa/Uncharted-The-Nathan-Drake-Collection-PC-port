@@ -1022,7 +1022,16 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
                 text = config.read_text(encoding="utf-8", errors="replace") if config.exists() else ""
                 if text and not text.endswith("\n"):
                     text += "\n"
-                config.write_text(text + "upscaler=off\n", encoding="utf-8")
+                # Through a temporary file (20 Oct 2026 audit): the in-game menu may save this ini at
+                # the same moment, and a cut-off write must not leave it partial.
+                temporary = config.with_name(f"{config.name}.{os.getpid()}.tmp")
+                try:
+                    temporary.write_text(text + "upscaler=off\n", encoding="utf-8")
+                    os.replace(temporary, config)
+                except OSError:
+                    # Windows refuses the swap while another process holds the file: in place.
+                    temporary.unlink(missing_ok=True)
+                    config.write_text(text + "upscaler=off\n", encoding="utf-8")
             except OSError:
                 env.setdefault("GOW3_UPSCALER", "off")
     if extra_mib:
