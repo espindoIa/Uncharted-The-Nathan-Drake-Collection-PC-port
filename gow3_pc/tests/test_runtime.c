@@ -399,6 +399,59 @@ static void memory_protection(int overflow) {
     assert(GET(Unmap,"cQke9UuBQOk#libkernel")(base,0xc000)==0);
     assert(GET(Release,"MBuItvba6z8#libkernel")(physical,0xc000)==0);
 }
+static void direct_bounds(void) {
+    /* 20 Oct 2026 audit: wrapped and out-of-pool ranges must fail before touching the backing view. */
+    Release release=GET(Release,"MBuItvba6z8#libkernel");
+    typedef uint64_t (ABI *Size)(void);
+    uint64_t pool=GET(Size,"pO96TwzOm5E#libkernel")();
+    assert((uint32_t)release(UINT64_C(0xffffffffffffc000),0)==0x80020016);
+    assert((uint32_t)release(UINT64_C(0xffffffffffffc000),0x8000)==0x80020016);
+    assert((uint32_t)release(pool,0x4000)==0x80020016);
+    assert((uint32_t)release(pool-0x4000,0x8000)==0x80020016);
+    void *p=NULL;
+    Map map=GET(Map,"L-Q3LEjIbgA#libkernel");
+    assert((uint32_t)map(&p,UINT64_C(0xffffffffffffc000),3,0,0x8000,0)==0x80020016);
+    assert((uint32_t)map(&p,0x8000,3,0,pool-0x4000,0)==0x80020016);
+}
+extern void runtime_low_unmap(void *address);
+static ABI void *short_thread(void *p) { return p; }
+static void thread_reclaim(void) {
+    /* 20 Oct 2026 audit: joined records disappear and low allocations reuse the same address. */
+    typedef int32_t (ABI *Priority)(void *,int *);
+    ThreadCreate create=GET(ThreadCreate,"6UgtwV+0zb4#libkernel");
+    ThreadJoin join=GET(ThreadJoin,"onNY9Byn-W8#libkernel");
+    typedef int32_t (ABI *Detach)(void *);
+    typedef int32_t (ABI *DetachAttr)(void **,int);
+    for (int mode=0;mode<2;++mode) {
+        void *attr=NULL,*detached=NULL;
+        if (mode) {
+            assert(GET(AttrInit,"nsYoNRywwNg#libkernel")(&attr)==0);
+            assert(GET(DetachAttr,"-Wreprtu0Qs#libkernel")(&attr,1)==0);
+        }
+        assert(create(&detached,mode ? &attr : NULL,short_thread,NULL,"detached-reclaim")==0);
+        if (mode) assert(GET(HandleOp,"62KCwEMmzcM#libkernel")(&attr)==0);
+        else assert(GET(Detach,"4qGrR6eoP9Y#libkernel")(detached)==0);
+        int reaped=0;
+        for (int i=0;i<100 && !reaped;++i) {
+            void *t=NULL;
+            assert(create(&t,NULL,short_thread,NULL,"reap-trigger")==0 && join(t,NULL)==0);
+            int prio=0;
+            reaped=(uint32_t)GET(Priority,"1tKyG7RlMJo#libkernel")(detached,&prio)==0x80020003;
+        }
+        assert(reaped);
+    }
+    for (int i=0;i<32;++i) {
+        void *t=NULL,*result=NULL;
+        assert(create(&t,NULL,short_thread,(void *)123,"reclaim")==0);
+        assert(join(t,&result)==0 && result==(void *)123);
+        int prio=0;
+        assert((uint32_t)GET(Priority,"1tKyG7RlMJo#libkernel")(t,&prio)==0x80020003);
+    }
+    void *first=runtime_low_map(0x140000,3); assert(first);
+    runtime_low_unmap(first);
+    void *second=runtime_low_map(0x140000,3); assert(second==first);
+    runtime_low_unmap(second);
+}
 int main(int argc,char **argv) {
 #ifdef _WIN32
     _set_error_mode(_OUT_TO_STDERR);
@@ -436,9 +489,12 @@ int main(int argc,char **argv) {
     if (argc>1 && !strcmp(argv[1],"--key-reuse")) { key_reuse(); return 0; }
     if (argc>1 && !strcmp(argv[1],"--mprotect-range")) { memory_protection(0); return 0; }
     if (argc>1 && !strcmp(argv[1],"--mprotect-overflow")) { memory_protection(1); return 0; }
+    if (argc>1 && !strcmp(argv[1],"--direct-bounds")) { direct_bounds(); return 0; }
+    if (argc>1 && !strcmp(argv[1],"--thread-reclaim")) { thread_reclaim(); return 0; }
     libc_support(); posix_mutexes(); wall_time(); exit_handlers(); guards(); mutexes(); direct_memory(); memory_primitives();
     rw_lifecycle(); rw_concurrency(); rw_timeouts();
     key_reuse(); memory_protection(0); memory_protection(1);
+    direct_bounds(); thread_reclaim();
     puts("PASS: callback lifecycle, guard ABI, mutex errors, shared direct memory, memory primitives, resolver scope");
     return 0;
 }

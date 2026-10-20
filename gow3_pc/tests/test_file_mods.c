@@ -1,6 +1,64 @@
 /* Exercise actual guest file operations on a linked overlay and writable saves. */
-#include "../src/runtime_file.c"
+#define _GNU_SOURCE
+#include <unistd.h>
+#include <pthread.h>
 #include <assert.h>
+static pthread_barrier_t read_ready, read_release;
+static int pause_read;
+static ssize_t audit_read(int fd,void *buffer,unsigned size);
+#define read audit_read
+#include "../src/runtime_file.c"
+#undef read
+static ssize_t audit_read(int fd,void *buffer,unsigned size) {
+    if (__atomic_exchange_n(&pause_read,0,__ATOMIC_SEQ_CST)) {
+        pthread_barrier_wait(&read_ready); pthread_barrier_wait(&read_release);
+    }
+    return read(fd,buffer,size);
+}
+static void *closing_reader(void *p) {
+    char content[7]={0};
+    assert(do_read(*(int *)p,content,6)==6 && !strcmp(content,"modded"));
+    return NULL;
+}
+static void close_race(void) {
+    /* 20 Oct 2026 audit: pause after acquiring the host fd, then close and reopen another file. */
+    int fd=(int)do_open("/app0/asset.dcx",0,0); assert(fd>=3);
+    assert(!pthread_barrier_init(&read_ready,NULL,2) && !pthread_barrier_init(&read_release,NULL,2));
+    pause_read=1;
+    pthread_t reader; assert(!pthread_create(&reader,NULL,closing_reader,&fd));
+    pthread_barrier_wait(&read_ready);
+    assert(!do_close(fd));
+    int other=(int)do_open("/data/other",0x202,0644); assert(other>=3);
+    assert(do_write(other,"other!",6)==6 && do_lseek(other,0,0)==0);
+    pthread_barrier_wait(&read_release);
+    assert(!pthread_join(reader,NULL));
+    assert(!do_close(other) && !path_op("/data/other",2,0));
+    assert(!pthread_barrier_destroy(&read_ready) && !pthread_barrier_destroy(&read_release));
+}
+static void *position_reader(void *p) {
+    int fd=*(int *)p;
+    char content[6];
+    for (int i=0;i<10000;++i) {
+        assert(do_pread(fd,content,6,0)==6 && !memcmp(content,"modded",6));
+        assert(do_pwrite(fd,"modded",6,0)==6);
+    }
+    return NULL;
+}
+static void position_race(void) {
+    /* 20 Oct 2026 audit: concurrent positioned reads must preserve the sequential offset. */
+    int fd=(int)do_open("/data/position",0x202,0644); assert(fd>=3);
+    assert(do_write(fd,"modded",6)==6);
+    assert(do_lseek(fd,2,0)==2);
+    pthread_t a,b;
+    assert(!pthread_create(&a,NULL,position_reader,&fd) && !pthread_create(&b,NULL,position_reader,&fd));
+    for (int i=0;i<10000;++i) {
+        char c=0;
+        assert(do_lseek(fd,2,0)==2 && do_read(fd,&c,1)==1 && c=='d');
+    }
+    assert(!pthread_join(a,NULL) && !pthread_join(b,NULL));
+    assert(do_lseek(fd,0,1)==3 && !do_close(fd));
+    assert(!path_op("/data/position",2,0));
+}
 static int32_t guest_errno;
 int32_t *runtime_errno(void) { return &guest_errno; }
 int32_t runtime_guest_errno(int e) { return e; }
@@ -8,7 +66,11 @@ uintptr_t runtime_lookup(const RuntimeExport *table,size_t n,const char *name) {
     for (size_t i=0;i<n;++i) if (!strcmp(table[i].name,name)) return (uintptr_t)table[i].function;
     return 0;
 }
-int main(void) {
+int main(int argc,char **argv) {
+#ifdef _WIN32
+    _set_error_mode(_OUT_TO_STDERR);
+    _set_abort_behavior(0,_WRITE_ABORT_MSG|_CALL_REPORTFAULT);
+#endif
     char root[]="gow3-mod-files-XXXXXX";
     assert(mkdtemp(root));
     char game[512],user[512],source[512],link[512];
@@ -26,6 +88,8 @@ int main(void) {
     assert(!symlink(absolute,link));
 #endif
     runtime_file_configure(game,user);
+    if (argc==1 || !strcmp(argv[1],"--close-race")) close_race();
+    if (argc==1 || !strcmp(argv[1],"--position-race")) position_race();
     /* 20 Oct 2026 audit: Windows separators must not let guest writes escape a mount. */
     const char *escapes[]={"/data/..\\outside", "/data/sub\\../outside", "/data/sub\\..\\outside", "/data/..\\..\\..\\Users\\x\\file"};
     for (size_t i=0;i<sizeof(escapes)/sizeof(*escapes);++i) {

@@ -58,7 +58,7 @@ int compat_errno_from_win32(unsigned long error) {
 }
 
 /* Positioned I/O on a synchronous handle moves the file pointer: it is restored afterwards.
- * A concurrent read() on the same descriptor would race, as with a shared offset anyway. */
+ * 20 Oct 2026 audit: runtime_file holds the per-File I/O lock, including read(), across this call. */
 static ssize_t positioned(int fd, void *buffer, size_t size, int64_t offset, int write) {
     HANDLE h = (HANDLE)_get_osfhandle(fd);
     if (h == INVALID_HANDLE_VALUE) { errno = EBADF; return -1; }

@@ -40,12 +40,13 @@ typedef struct GuestThread {
     /* Guest-visible TCB is allocated separately; this is the ScePthread handle. */
     uint64_t *tcb;
     unsigned char *tls_block;
+    void *stack_memory;
     pthread_t host;
     GuestEntry entry;
     void *argument, *result;
     ThreadAttr attr;
     char name[32];
-    int detached, finished, joined, host_owned;
+    int detached, finished, joined, host_owned, published;
 #ifdef _WIN32
     gow3_jmp_buf exit_jump; /* no SEH unwinding through guest frames */
 #else
@@ -82,11 +83,13 @@ static void set_gs(void *base) {
     if (!TlsSetValue(tls_slot,base)) { fprintf(stderr,"STOP: TlsSetValue failed (%lu)\n",GetLastError()); exit(21); }
 }
 #define tls_block_alloc(size) _aligned_malloc(size,64)
+#define tls_block_free(block) _aligned_free(block)
 #else
 static void set_gs(void *base) {
     if (syscall(SYS_arch_prctl,ARCH_SET_GS,(unsigned long)base)) { perror("STOP: arch_prctl(ARCH_SET_GS)"); exit(21); }
 }
 #define tls_block_alloc(size) aligned_alloc(64,size)
+#define tls_block_free(block) free(block)
 #endif
 /* Build TCB/static TLS for the calling host thread and point GS at it. */
 static void attach(GuestThread *t) {
@@ -140,12 +143,37 @@ void runtime_thread_attach_main(void) {
     GuestThread *t=runtime_thread_current();
     snprintf(t->name,sizeof(t->name),"main");
 }
+/* The caller keeps the lock until it has finished reading or updating the record. */
 static GuestThread *find_thread(void *handle) {
     GuestThread *found=NULL;
     pthread_mutex_lock(&lock);
     for (GuestThread *t=threads;t;t=t->next) if (t==handle) { found=t; break; }
-    pthread_mutex_unlock(&lock);
+    if (!found) pthread_mutex_unlock(&lock);
     return found;
+}
+extern void runtime_low_unmap(void *address);
+static void free_thread(GuestThread *t) {
+    if (t->stack_memory) runtime_low_unmap(t->stack_memory);
+    tls_block_free(t->tls_block);
+    free(t);
+}
+static void unlink_thread(GuestThread *t) {
+    GuestThread **link=&threads;
+    while (*link && *link!=t) link=&(*link)->next;
+    if (*link) *link=t->next;
+}
+/* 20 Oct 2026 audit: a detached thread may still be returning on its stack; join before reclaiming it. */
+static void reap_threads(void) {
+    for (;;) {
+        pthread_mutex_lock(&lock);
+        GuestThread *t=threads;
+        while (t && (!t->detached || !t->finished || !t->published || t->host_owned || t->joined)) t=t->next;
+        if (t) { t->joined=1; unlink_thread(t); }
+        pthread_mutex_unlock(&lock);
+        if (!t) break;
+        pthread_join(t->host,NULL);
+        free_thread(t);
+    }
 }
 static ThreadAttr *find_attr(ThreadAttr **slot) {
     if (!slot || !*slot) return NULL;
@@ -186,6 +214,7 @@ static ABI int32_t attr_get(void *thread,ThreadAttr **out) {
     ThreadAttr *next=a->next;
     *a=t->attr; a->magic=ATTR_MAGIC; a->next=next;
     a->detached=t->detached;
+    pthread_mutex_unlock(&lock);
     return 0;
 }
 static ABI int32_t attr_set_stack(ThreadAttr **slot,uint64_t size) {
@@ -324,6 +353,7 @@ static void *host_start(void *p) {
 }
 static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,void *argument,const char *name) {
     if (!out || !entry) return ERR(22);
+    reap_threads();
     ThreadAttr *a=NULL;
     if (attr_slot && !(a=find_attr(attr_slot))) return ERR(22);
     GuestThread *t=new_thread();
@@ -342,8 +372,9 @@ static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,
     pthread_attr_setstacksize(&host,stack_bytes);
 #else
     void *stack_memory=runtime_low_map(stack_bytes,PROT_READ|PROT_WRITE);
-    if (stack_memory) pthread_attr_setstack(&host,stack_memory,stack_bytes);
-    else pthread_attr_setstacksize(&host,stack_bytes);
+    if (!stack_memory) { pthread_attr_destroy(&host); free(t); return ERR(12); }
+    t->stack_memory=stack_memory;
+    pthread_attr_setstack(&host,stack_memory,stack_bytes);
 #endif
     publish(t);
     /* Publish the handle before the thread can run and inspect itself. */
@@ -351,31 +382,39 @@ static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,
     int e=pthread_create(&t->host,&host,host_start,t);
     pthread_attr_destroy(&host);
     if (e) { fprintf(stderr,"STOP: host pthread_create failed: %d\n",e); exit(21); }
-    if (t->detached) pthread_detach(t->host);
-    pthread_mutex_lock(&lock); ++created; pthread_mutex_unlock(&lock);
+    pthread_mutex_lock(&lock); ++created;
     printf("Runtime: guest thread '%s' created (stack=%llu, prio=%d)\n",t->name,(unsigned long long)stack,t->attr.prio);
+    t->published=1;
+    pthread_mutex_unlock(&lock);
     return 0;
 }
 static ABI int32_t thread_create(GuestThread **out,ThreadAttr **attr,GuestEntry entry,void *argument,const char *name) {
     return create(out,attr,entry,argument,name);
 }
 static ABI int32_t thread_join(GuestThread *t,void **result) {
-    if (!find_thread(t) || t->host_owned) return ERR(3);
-    if (t==current) return ERR(11);
-    if (t->detached || t->joined) return ERR(22);
+    pthread_mutex_lock(&lock);
+    GuestThread *found=threads;
+    while (found && found!=t) found=found->next;
+    int error=!found || found->host_owned ? 3 : t==current ? 11 : t->detached || t->joined ? 22 : 0;
+    if (error) { pthread_mutex_unlock(&lock); return ERR(error); }
     t->joined=1;
+    pthread_mutex_unlock(&lock);
     void *value=NULL;
     int e=pthread_join(t->host,&value);
     if (e) { fprintf(stderr,"STOP: host pthread_join failed: %d\n",e); exit(21); }
     if (result) *result=t->result;
-    pthread_mutex_lock(&lock); ++joined_count; pthread_mutex_unlock(&lock);
+    pthread_mutex_lock(&lock); ++joined_count; unlink_thread(t); pthread_mutex_unlock(&lock);
+    free_thread(t);
     return 0;
 }
 static ABI int32_t thread_detach(GuestThread *t) {
-    if (!find_thread(t)) return ERR(3);
-    if (t->detached) return ERR(22);
+    pthread_mutex_lock(&lock);
+    GuestThread *found=threads;
+    while (found && found!=t) found=found->next;
+    if (!found) { pthread_mutex_unlock(&lock); return ERR(3); }
+    if (t->detached || t->joined) { pthread_mutex_unlock(&lock); return ERR(22); }
     t->detached=1;
-    if (!t->host_owned) pthread_detach(t->host);
+    pthread_mutex_unlock(&lock);
     return 0;
 }
 static ABI __attribute__((noreturn)) void thread_exit(void *value) {
@@ -387,9 +426,9 @@ static ABI __attribute__((noreturn)) void thread_exit(void *value) {
 }
 static ABI int32_t thread_yield(void) { sched_yield(); return 0; }
 static ABI int32_t thread_get_prio(GuestThread *t,int *prio) {
-    if (!find_thread(t)) return ERR(3);
     if (!prio) return ERR(22);
-    *prio=t->attr.prio; return 0;
+    if (!find_thread(t)) return ERR(3);
+    *prio=t->attr.prio; pthread_mutex_unlock(&lock); return 0;
 }
 static ABI int32_t thread_set_prio(GuestThread *t,int prio) {
     if (!find_thread(t)) return ERR(3);
@@ -397,6 +436,7 @@ static ABI int32_t thread_set_prio(GuestThread *t,int prio) {
 #ifdef _WIN32
     if (!t->host_owned && !t->finished) apply_guest_scheduling(t,pthread_gethandle(t->host),"set prio");
 #endif
+    pthread_mutex_unlock(&lock);
     return 0;
 }
 static ABI int32_t thread_set_affinity(GuestThread *t,uint64_t mask) {
@@ -406,18 +446,20 @@ static ABI int32_t thread_set_affinity(GuestThread *t,uint64_t mask) {
     if (!t->host_owned && !t->finished) apply_guest_scheduling(t,pthread_gethandle(t->host),"set affinity");
     else if (t==current) apply_guest_scheduling(t,GetCurrentThread(),"set affinity");
 #endif
+    pthread_mutex_unlock(&lock);
     return 0;
 }
 static ABI int32_t thread_get_affinity(GuestThread *t,uint64_t *mask) {
-    if (!find_thread(t)) return ERR(3);
     if (!mask) return ERR(22);
-    *mask=t->attr.affinity; return 0;
+    if (!find_thread(t)) return ERR(3);
+    *mask=t->attr.affinity; pthread_mutex_unlock(&lock); return 0;
 }
 static ABI int32_t thread_rename(GuestThread *t,const char *name) {
-    if (!find_thread(t)) return ERR(3);
     if (!name) return ERR(22);
+    if (!find_thread(t)) return ERR(3);
     snprintf(t->name,sizeof(t->name),"%s",name);
     if (t==current) set_host_name(t->name);
+    pthread_mutex_unlock(&lock);
     return 0;
 }
 static ABI int32_t thread_equal(GuestThread *a,GuestThread *b) { return a==b; }
