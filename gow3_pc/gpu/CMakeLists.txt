@@ -263,6 +263,10 @@ if (WIN32)
     target_link_libraries(tsc-clock-test PRIVATE bcrypt -pthread)
     add_executable(gow3-gpu-capabilities ../tools/gpu_capabilities.c ../packaging/windows/gow3-gpu-capabilities.rc)
     target_link_libraries(gow3-gpu-capabilities PRIVATE Vulkan::Vulkan)
+    # NGX's GPU time for one DLSS configuration, without the game (needs gow3_dlss.dll and
+    # nvngx_dlss.dll in out/): dlss-bench --in 3840x2160 --model m.
+    add_executable(dlss-bench EXCLUDE_FROM_ALL ../tools/dlss_bench.cpp)
+    target_link_libraries(dlss-bench PRIVATE Vulkan::Vulkan)
     # "Play God of War III.exe": the game with the launcher's saved settings, no launcher window.
     add_executable(gow3-play WIN32 ../packaging/windows/play.c ../packaging/windows/play.rc)
     target_compile_options(gow3-play PRIVATE -municode)

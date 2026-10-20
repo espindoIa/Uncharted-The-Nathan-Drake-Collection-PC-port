@@ -2197,3 +2197,49 @@ Not verified:
 - Other GPUs and CPUs.
 - Long sessions with the change.
 - U1's gain (its scene drifted).
+
+## 20 October 2026: model M's own cost (same model, same input and output)
+
+The user asked for a cheaper model M at the same sizes: 4K DLAA, no model or resolution change.
+
+Tool: `dlss-bench` (gow3_pc/tools/dlss_bench.cpp, CMake target `dlss-bench`). It loads the
+bridge and nvngx_dlss.dll (310.9.16, the player's) from out/, creates the feature like
+RecordDlss (MVLowRes, inverted depth, HDR + auto-exposure, preset by name) and times Evaluate
+with GPU timestamps. One configuration takes 2-9 s instead of a game boot (1-2 min). Options:
+`--in/--out WxH --model jklm --hdr --bias --color rgba16f|r11g11b10|rgba8 --queue compute
+--load N --game-images 1 --frames N`. It needs the CLANG64 PATH (libc++.dll). Interleaved
+sweeps: run each variant alternately, order flipped every round.
+
+Measurements (RTX 5070, 3840x2160 -> 3840x2160, model M):
+- Short runs (150 frames): 7.51 ms; model K 1.99 ms.
+- Sustained (1000 frames): 7.90 ms median. The GPU reaches its 250 W limit and the clock drops
+  2940 -> 2850 MHz (nvidia-smi). In U3 (GOW3_GPU_PROFILE, bar fight, 342 frames) "DLSS evaluate
+  (NGX)" is 7.87 ms at ~210 W board power. So the game adds nothing to NGX's time: the earlier
+  7.9 vs 7.5 difference is the clock under sustained load.
+- Variants, each against the default in the same sweep:
+
+  | Variant | Evaluate | Change |
+  |---|---|---|
+  | Default (HDR, auto-exposure, bias mask, RGBA16F colour) | 7.51 ms | — |
+  | No bias mask | 7.50 | none |
+  | R11G11B10 colour | 7.51 | none |
+  | Colour and depth with the texture cache's flags (mutable format, extended usage, storage) | 7.51 | none |
+  | DLSS on the async compute queue, alone | 7.48-7.51 | none |
+  | 4.2 ms of graphics-queue load at the same time, DLSS on async compute | frame 11.66 vs 11.74 in series | -0.7%: DLSS M fills the GPU |
+  | LDR input (no IsHDR / auto-exposure), sustained 600 frames | 7.43 vs 7.72 | -0.29 ms (-3.8%) |
+
+- NVIDIA's guide: auto-exposure costs ~0.02 ms, and preset L (M in practice) ignores an exposure
+  texture. So the LDR saving is NGX's own HDR handling.
+
+What this leaves: the LDR path is the only saving, at most 0.29 ms (~2% of a 14.6 ms frame).
+U3's scene colour is HDR (RGBA16F), so LDR input needs a reversible tonemap before DLSS and its
+inverse after. The inverse could ride in the merge pass, which already reads the output. The
+forward pass would cost a 4K read and write, ~0.1-0.2 ms judging by the 0.24 ms motion-vector
+pass. That leaves ~0.1-0.2 ms (~1%) net, with a quality risk in highlights. Not implemented.
+
+Ruled out (do not reinvestigate without new data): the port's integration (barriers, image flags,
+formats, bias mask), async compute overlap, and the in-game vs standalone gap (clock under power
+limit).
+
+Not verified: other GPUs (the power limit decides the sustained clock), other DLSS DLL versions,
+and the LDR path's picture.
