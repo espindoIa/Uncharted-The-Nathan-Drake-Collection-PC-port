@@ -6,6 +6,42 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork 0.5.0 "Expedition")
 
+- **Each game keeps its own shader cache.** Uncharted 1, 2 and 3 share one title ID, so all three
+  used one cache folder (U3's warm-up read 2351 entries, kept 576 and took 30.85 s). Each game now
+  uses `analysis\uncharted-user\cache\CUSA02320-<executable>`. **U1, U2 and U3 each rebuild their
+  shaders once, in the first session after this update.** The old shared folder
+  `analysis\uncharted-user\cache\CUSA02320` is left in place; delete it if you want the space.
+- **Small CPU and GPU savings.** Game clock reads and mutexes no longer take shared locks, a
+  memory-protect call that changes nothing no longer stalls the other threads, and each frame skips
+  clearing the whole 4K image when the picture already covers it. The shader warm-up now advances
+  every frame instead of only when the game asks for a pipeline (before, U1's entries waited
+  about 4.8 s; not re-measured). In a 4K DLAA A/B in U3 the gain
+  (+2.8 FPS on average) was within run-to-run noise.
+- **Streaming reads run in parallel again.** Reads at an offset on one file no longer wait for
+  each other, so the streaming threads load level data at the same time.
+- **No long stalls from the log.** The game log is buffered and written every 250 ms. Before, each
+  line was written under a lock, and the graphics thread once waited 548 ms for it in a level load.
+  If a thread dies holding that lock, some last log lines can be lost.
+- **Fixed: "Apply and restart" in the in-game menu now works.** The button was always disabled. It
+  now relaunches the game in the same launcher process and log, with the new settings (for
+  example a new resolution). Not tried live; if the restarted game never shows, the old settings
+  are not restored.
+- **Fixed: menu keys no longer stick or repeat.** Closing the menu left keys held, a key held
+  while opening it repeated Enter or Escape, and saving on close froze the frame. Input is now
+  cleared on close, key repeat is ignored in dialogs, and the save runs in the background.
+- **Your saves are backed up on every launch.** Before the game starts, `savedata` is copied to
+  `analysis\uncharted-user\save-backups\<date-time>`. The newest 5 are kept, and nothing is copied
+  if nothing changed. Killing the game with STOP during an autosave could leave a broken save with
+  nothing to restore.
+- **Hardening from the second audit.** Save data files (`param.bin`, `icon0.png`) are written
+  atomically and save titles with path separators are refused; threads free their memory and file
+  handles close safely while another thread reads; memory ranges near the end of the pool are
+  bounds-checked; movie slots 17 and up recycle the oldest one; a corrupt `param.sfo` is bounded;
+  a locked game ini is no longer overwritten with the shared one; linking a module without
+  `DT_INIT` stops with an error; the DLSS SDK download is pinned to one commit and hash-checked;
+  the package stops on a DLL with no known license owner; the export no longer lists two deleted
+  tests.
+
 - **Fixed: the DLSS check no longer calls a genuine `nvngx_dlss.dll` unsigned when the folder name
   has an apostrophe.** In a folder such as `C:\Users\D'Angelo\...` the signature check failed to
   run, so the launcher rejected a genuine NVIDIA DLL. The path is now passed outside the check's

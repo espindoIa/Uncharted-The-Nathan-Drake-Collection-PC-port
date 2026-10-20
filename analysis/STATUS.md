@@ -2450,3 +2450,141 @@ U3 1 min boot and play at 4K, MT on (build with all of 9-20): alive at end, no h
 Not verified: a movie of another size, two threads saving at once, a genuine signed DLL in a quoted
 path, a run of the export, a game build that hits a patch mismatch, the rwlock, key and mprotect
 paths in game.
+
+## 20 October 2026: audit leftovers, second audit, performance quick wins
+
+19 commits, 978ab58..1d0593a. Evidence is from the commit messages unless marked.
+
+### Audit leftovers (978ab58, e8b2620, 1233adb, aadc151, 3d18ab7)
+
+- 978ab58 tools: fetch_aa_files.sh pinned the DLSS SDK to commit 9981c635 (the v310.9.16 tag's peeled
+  commit; a tag can be moved) and checks 3 binaries and 23 headers against stored SHA-256 values, on
+  download and for files already in downloads/. A mismatch deletes the file and fails. The .lib and
+  headers are compiled into the shipped gow3_dlss.dll. Tested: bash -n; all 26 hashes match; the .lib
+  and DLL match C:\dev\DLSS; fetch() passes a right hash, fails a wrong one, replaces a corrupted cached
+  file. Not tested: a full script run (MSVC bridge build). The FSR4 files are pinned but not hash-checked.
+- e8b2620 package: package_windows.sh read owners per DLL from pacman -Qo; an unowned DLL (other than
+  gow3_dlss.dll) or an empty owner list fails the package. Before, `2>/dev/null || true` shipped such a
+  DLL with no license entry. Tested: bash -n only. Not tested: a package build, the CI runner.
+- 1233adb tools: export_github.sh no longer lists tests/test_patches.py and tests/test_mod_conflicts.py
+  (deleted). bash -n only; the export was not run.
+- aadc151 launcher: ini_lines fell back to the shared probe.ini on any OSError, so a per-game ini
+  held open by another process was overwritten with the shared contents. Now the shared file is used
+  only when the game ini does not exist; other read errors retry once, then read_ini returns defaults
+  and write_ini skips the write (one log line each). Tested: ast parse; a PermissionError read. Not
+  tested: the launcher UI.
+- 3d18ab7 tools: probe_uncharted.py copies savedata to save-backups/<YYYYMMDD-HHMMSS> before each
+  start, keeps the newest 5, skips when nothing changed or there is no save, never fails the launch.
+  Cause: the launcher's STOP is taskkill /F and the game writes straight into savedata. Tested:
+  test_save_backup (creates, keeps 5, skips unchanged, skips missing/empty). Not tested: a launch from
+  the installed package.
+
+### Second audit (7092d9e, 35fff41, f6abb5d, 1c50cf9, 79f06f2, 1b3e4b1, d57a704, 15b2bba, b7f7e47)
+
+- 7092d9e runtime: param.bin and icon0.png go through write_file_atomic (.tmp then MoveFileExW);
+  write_param, set_param, icon and mount return ERR_INTERNAL on failure; title_ok checks the title in
+  mount, delete and search (path separators refused). Tested: build.sh, runtime-test, U3 1-minute
+  boot. Not tested: a save/load cycle in game, a forced write failure.
+- 35fff41 runtime: range_within guards direct release, discard, find_free and the low window (start +
+  size could wrap past the pool). Joined threads are freed at join, detached ones reaped on the next
+  create; runtime_low_map reuses freed ranges. Files are reference-counted with a per-File lock
+  (close() could free a host fd under a reader; Windows pread restored the file pointer under a
+  concurrent read()). Tested: runtime-test (plus --direct-bounds, --thread-reclaim), file-mods-test
+  (plus --close-race, --position-race), each failing with its fix reverted (per the coder); U3
+  1-minute boot. Not tested: Linux stack unmapping. A detached thread is reclaimed only when another is
+  created. 47c9aeb later removed the pread serialization.
+- f6abb5d gpu: TAA_DIAGNOSTICS and FixedRenderSession getenv cached; PRESET_FILE, SKIP_FILE and
+  DEPTH_PROBE read by poller threads; guest-images.trigger polled at most every 250 ms. Tested:
+  build.sh, graphics-settings-test, U3 1-minute boot (lowest 5 s 72.1 FPS). Not tested: each trigger
+  file by hand; no frame-time A/B.
+- 1c50cf9 gpu: the 16 movie scratch slots recycle least-recently-used (a 17th overwrote a slot in
+  use); KeepWritable has a reference count (g_keep_count) so nested calls keep protection. Tested:
+  build.sh, movie-hook-test, U3 1-minute boot. Not tested: a cutscene sequence with more than 16 movies.
+- 79f06f2 gpu: SetOpen saves on a detached thread; input keys and mouse cleared on close; key-ups
+  outside a capture pass through; the choice dialog and window Enter/Escape ignore key repeat;
+  text_entry_active is atomic. Tested: build.sh, U3 1-minute boot. Not tested: the menu by hand with
+  keyboard or pad.
+- 1b3e4b1 runtime: Apply and restart was always disabled because nothing set GOW3_RESTART_COMMAND.
+  On Windows runtime_restart writes the loadexec file (current executable, guest argv) and exits with
+  LOADEXEC_EXIT (30); probe_uncharted.py sets GOW3_RESTART_EXECUTABLE, so its existing loop re-prepares
+  (new resolution patch) and relaunches in the same process and log. Tested: build.sh; a mocked
+  relaunch loop and the handoff file contents. Not tested: a live restart. Nothing restores the old
+  settings if the restarted game never shows (restart_unconfirmed is not consumed; pre-existing).
+- d57a704 runtime: sfo_value checks offsets in uint64_t and bounds keys with memchr/memcmp; the
+  duplicate exec-watch reader (it deleted the watch file and dropped w: entries) is removed. Tested:
+  build.sh, malformed SFO cases (coder harness). Not tested: exec watch in a live run.
+- 15b2bba runtime: module TLS blocks (module IDs 2..7) live in the GuestThread record and free_thread
+  releases them at join or reap. Tested: runtime-test, --direct-bounds, --thread-reclaim (six module
+  TLS slots). Not tested: allocation counts in a live run.
+- b7f7e47 tools: link_modules raises ValueError naming the file when DT_INIT is missing (it defaulted
+  to the module base, i.e. the ELF header). Tested: Python tests, a missing-DT_INIT harness. The two
+  errors in that run (test_packaged_vulkan, test_upscaler_assets) are pre-existing God of War 3
+  leftovers: they import modules missing since the first commit.
+
+### Performance quick wins (b1ffd84, eaa4dac, 47c9aeb, 4f39daf, 1d0593a)
+
+- b1ffd84 runtime: GOW3_CLOCK_TRACE is read once (every guest clock read called getenv under the CRT
+  environment lock); the mutex lock/unlock/wait/wakeup counters (shared non-atomic writes) are removed,
+  the report keeps created counts; kernel_mprotect checks for an unchanged protection under the read
+  lock and returns without the write lock, generation bump or flush_hooks. Tested: build.sh,
+  runtime-test (plain, --direct-bounds, --thread-reclaim), U3 1-minute boot.
+- eaa4dac gpu: the present clear and its barrier run only when the fitted blit leaves bars; PrepareFrame
+  calls PumpWarmUp once per flip on the GPU command thread (before, it advanced only when the game
+  looked up a pipeline; U1 entries waited ~4.8 s). Tested: build.sh, U3 1-minute boot. Not tested:
+  letterboxed aspect ratios by eye.
+- 47c9aeb runtime: 35fff41 serialized every pread on a file, so streaming threads read one at a time.
+  Game files now open as overlapped handles; read/write/lseek keep the position in the File record and
+  use positioned I/O, so pread/pwrite take no lock and never touch a host cursor; O_APPEND writes use
+  the end-of-file offset; each operation waits on its own event. Tested: file-mods-test plain,
+  --close-race, --position-race, new --pread-race; build.sh; U3 1-minute boot. Not tested: a level-load
+  time A/B, non-Windows.
+- 4f39daf runtime: stdout was unbuffered, so each printf was a WriteFile under the CRT stdout lock
+  (the GPU command thread waited 548 ms for it in a level load). Now a 64 KiB buffer and a flusher
+  thread every 250 ms; exit, _exit, the crash handler and the POSIX fault/watchdog handlers flush
+  first (the crash handler waits up to 500 ms for the flusher, skips it if the flusher crashed).
+  Tested: build.sh; U3 1-minute boot wrote the full boot.log (1810 lines). The commit message says
+  the hang watchdog read the buffered log live; that was not checked (only that the log was complete
+  after the boot). Not tested: an injected crash; output can be lost if a thread dies holding the
+  stdout lock.
+- 1d0593a gpu: U1, U2 and U3 share TITLE_ID CUSA02320, so one cache folder held all three games'
+  pipelines (U3's warm-up read 2351 entries, kept 576, took 30.85 s). probe.c passes a cache id (serial
+  plus executable stem from GOW3_RESTART_EXECUTABLE, e.g. CUSA02320-big3-ps4_shipping) used only for
+  the shader cache and pipeline-binaries folders. Tested: build.sh; U3 boot created
+  cache/CUSA02320-big3-ps4_shipping. Not tested: the U1 and U2 folders. Each game rebuilds its shaders
+  once in its first session; the old shared folder is left in place.
+
+### Performance A/B (U3)
+
+Player settings (4K, DLAA model M, 120 FPS cap, multithreading on), C:/dev/bench/bench.sh with
+SETTLE=5 SECONDS_MEASURE=10, builds alternated:
+
+| Build | Run 1 FPS (PresentMon) | Run 2 FPS | GPU busy ms/frame |
+| --- | --- | --- | --- |
+| baseline b7f7e47 | 61.9 | 63.7 | 15.80, 15.50 |
+| quick wins 1d0593a | 63.9 | 67.3 | 15.45, 14.68 |
+
+Mean +2.8 FPS, -0.6 ms GPU busy. The spread between runs of the same build (1.8-3.4 FPS) is as large
+as the difference: not beyond noise. Earlier 20-second baseline runs that day gave 68.6 and 63.5 FPS
+(63.5 overlapped a compile).
+
+### One freeze, not reproduced
+
+A bench run with the baseline build b7f7e47 (which already contains 35fff41's thread reaping and
+per-File refcount) stopped writing boot.log at 12:49:27, 15 s after start, during loading. The last
+line was an open of u3data/build/main/effect1/sky-desert-teaser-ingame12.bin -> not found. No hang
+report (the watchdog needs Frame stats lines) and no dump; the process was killed about 4 minutes
+later. Four later runs (2 per build) and a 1-minute boot reached gameplay. Cause unknown. Candidates to
+check first: reap_threads (pthread_join of finished detached threads in create) and the per-File
+lock/refcount from 35fff41.
+
+### Open from the performance audit (not done)
+
+- Per-page touch faults on streaming reads (runtime_file.c touch_for_write).
+- winpthreads condvars/mutexes vs SRWLOCK.
+- Frame limiter Sleep granularity and present-thread spin; present thread priority.
+- End-of-frame GC before work_retired.
+- capture_job.Wait translating on the GPU thread.
+- Motion-vector vertex shaders never cached.
+- Prepare chain redone every launch (~2-3 s).
+- EOP readback flushes.
+- VRR/G-Sync on the 164 Hz display unverified (GOW3_DISPLAY_LOG).
