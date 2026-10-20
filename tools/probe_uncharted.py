@@ -1291,6 +1291,34 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     return result
 
 
+def _tree_signature(folder):
+    return sorted((str(p.relative_to(folder)), p.stat().st_size, int(p.stat().st_mtime))
+                  for p in folder.rglob("*") if p.is_file())
+
+
+def backup_saves(user_dir, keep=5):
+    """20 Oct 2026 audit: the game writes straight into <user>/savedata and the launcher's STOP is
+    taskkill /F, so a kill during an autosave could corrupt it. Copy it to <user>/save-backups/<stamp>
+    before each launch, keep the newest `keep`. save-backups is a sibling of savedata, which is all the
+    game mounts. Never fails the launch."""
+    try:
+        source = Path(user_dir) / "savedata"
+        if not source.is_dir() or not any(p.is_file() for p in source.rglob("*")):
+            return
+        backups = Path(user_dir) / "save-backups"
+        old = sorted(p for p in backups.iterdir() if p.is_dir()) if backups.is_dir() else []
+        if old and _tree_signature(old[-1]) == _tree_signature(source):
+            return
+        target = backups / time.strftime("%Y%m%d-%H%M%S")
+        if not target.exists():
+            shutil.copytree(source, target, copy_function=shutil.copy2)
+            old.append(target)
+        for stale in old[:-keep]:
+            shutil.rmtree(stale, ignore_errors=True)
+    except Exception as error:
+        print(f"Save backup failed (launch continues): {error}", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     # The US copy (CUSA02320) first, then Europe's (CUSA02344), each with or without uroot.
@@ -1313,6 +1341,7 @@ def main():
         parser.error("--seconds must be nonnegative")
     user = ROOT / "analysis/uncharted-user"
     user.mkdir(parents=True, exist_ok=True)
+    backup_saves(user)
     loadexec = user / "loadexec.txt"
     executable = args.executable
     guest_args = args.guest_arg
