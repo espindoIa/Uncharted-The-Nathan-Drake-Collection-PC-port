@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copies the port's source into a separate Git repository (default: ../uncharted-github) and commits
 # it, for the private GitHub repository that builds the Windows package (GitHub Actions).
-#   gow3_pc/   the runtime: its tracked and new files (not out/, user/ or other ignored files); the
+#   gow3_pc/   the runtime: its tracked files (not out/, user/ or other ignored files); the
 #              submodules are pinned as gitlinks at the commits checked out here
 #   tools/ launcher/ Start-Uncharted.cmd analysis/STATUS.md
 # Nothing from the game or a player is copied: no game/, *.pkg, analysis/ binaries, dumps, saves,
@@ -27,7 +27,8 @@ copy() {  # copy <relative path>
 submodules=$(git -C gow3_pc config -f .gitmodules --get-regexp '\.path$' | awk '{print $2}')
 # Material of the runtime's original game stays out (its docs, launcher, patches, packaging, run
 # scripts and helpers); tools/github-overlay replaces its READMEs with this project's.
-git -C gow3_pc ls-files -co --exclude-standard | while read -r path; do
+# 20 Oct 2026 audit: tracked files only (-o shipped local test files such as stat-multipliers-test.ini).
+git -C gow3_pc ls-files -c | while read -r path; do
     case $path in
         .github/*|.gitmodules|README.md|README.*.md|docs/*|launcher/*|patches/*|run.py|run.sh) continue ;;
         packaging/linux/*|packaging/appimage.sh|packaging/default.nix|packaging/gow3-entry.c) continue ;;
