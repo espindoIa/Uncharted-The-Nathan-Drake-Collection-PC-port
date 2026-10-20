@@ -2588,3 +2588,37 @@ lock/refcount from 35fff41.
 - Prepare chain redone every launch (~2-3 s).
 - EOP readback flushes.
 - VRR/G-Sync on the 164 Hz display unverified (GOW3_DISPLAY_LOG).
+
+## 20 October 2026: pipeline cache carried over; U3 chapter 2 frame rate
+
+### Cache seeding (8268bac)
+
+- Bug: 1d0593a moved each executable to its own cache folder (cache/CUSA02320-<stem>) and did not carry
+  the old shared cache/CUSA02320 over. After the update the player's U3 played on an empty cache.
+  boot.log showed freezes of 5.1 s (474 compiles), 4.1 s (406), 1.05 s (124), 0.94 s (90) and 0.42 s
+  (26), one of them right after the museum cutscene in chapter 2.
+- Fix: on first open of the new id, the old folder (or zip) is copied once, only when the new folder
+  does not exist. The copy goes to "<id>.seeding" and is then renamed. It never merges, because the
+  <hash>_<perm_idx>.spv names follow the discovery order of each run.
+- Test: U3 bench (chapter 2 rooftops save, 4K, DLAA M, 120 cap, multithreading on) with the U3 folder
+  moved aside. The new folder got all 124 MB; the run had 582 pipeline-binary hits and 13 compiles.
+  Result: 64.1 FPS (PresentMon 64.0), p99 27.9 ms, GPU busy 15.07 ms/frame (96%): GPU-bound there, at
+  980 draws/frame.
+- Not verified: the zip mode. The "Seeded pipeline cache" LOG_INFO line did not appear in boot.log,
+  probably because of the log level. The player's install already has a cold
+  CUSA02320-big3-ps4_shipping (59 MB, created 20 Oct 13:16), so the seeding does not apply to U3
+  there. It does apply to U1 and U2.
+
+### U3 chapter 2, following Sully (player's log, 5 s windows)
+
+- Earlier windows: about 4,000 draws/frame, 55-63 FPS, draw-pipe stage B 60% busy.
+- The chase section: 6,300 draws/frame, 41-49 FPS, a ceiling of about 300k draws/s, stage B 79-90%
+  busy, stage A waited 37%, 0 compiles. There it is CPU-bound on the draw pipe (FPS is about
+  300k / 6,300). This is the known limit (see "Levels are CPU-bound on the GPU command thread"
+  above). Not fixed.
+
+### Can all shaders be compiled before the game starts? (player's question)
+
+No. PS4 shaders and their pipeline state are known only when the game draws with them. The disk cache
+plus warm-up already covers everything seen once; GOW3_BACKGROUND_WARMUP=0 loads it all behind the
+loading screen before play.

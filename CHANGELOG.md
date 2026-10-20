@@ -8,9 +8,14 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 - **Each game keeps its own shader cache.** Uncharted 1, 2 and 3 share one title ID, so all three
   used one cache folder (U3's warm-up read 2351 entries, kept 576 and took 30.85 s). Each game now
-  uses `analysis\uncharted-user\cache\CUSA02320-<executable>`. **U1, U2 and U3 each rebuild their
-  shaders once, in the first session after this update.** The old shared folder
-  `analysis\uncharted-user\cache\CUSA02320` is left in place; delete it if you want the space.
+  uses `analysis\uncharted-user\cache\CUSA02320-<executable>`. **Each game copies the old shared
+  folder into its own once, the first time it opens, so it does not rebuild its shaders.** The old
+  shared folder `analysis\uncharted-user\cache\CUSA02320` is left in place; delete it if you want
+  the space, after each game has been opened once.
+- **Shaders compiled in earlier versions are kept after the update.** The first time a game opens
+  its own shader cache, the old shared one is copied into it once (only if the game has no cache
+  folder yet). This removes the first-play freezes of up to 5 seconds that the empty cache caused,
+  for example right after the museum cutscene in Uncharted 3 chapter 2.
 - **Small CPU and GPU savings.** Game clock reads and mutexes no longer take shared locks, a
   memory-protect call that changes nothing no longer stalls the other threads, and each frame skips
   clearing the whole 4K image when the picture already covers it. The shader warm-up now advances
