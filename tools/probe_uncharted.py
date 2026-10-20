@@ -445,7 +445,9 @@ def apply_patches(image, patches):
             _, offset, original, replacement = variant
             at = found[0] + offset
             if original is not None and data[at:at + len(original)] != original:
-                raise SystemExit(f"Patch '{description}': unexpected bytes at {at:#x}")
+                # 20 Oct 2026 audit: skip like the multi-change path; aborting the start on another game build contradicted the comment below.
+                print(f"Patch '{description}' skipped: unexpected bytes at {at:#x}")
+                continue
             data[at:at + len(replacement)] = replacement
             print(f"Patched: {description} (image offset {at:#x})")
             break
