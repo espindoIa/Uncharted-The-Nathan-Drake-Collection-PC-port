@@ -6,6 +6,20 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork 0.5.0 "Expedition")
 
+- **Fixed: the DLSS check no longer calls a genuine `nvngx_dlss.dll` unsigned when the folder name
+  has an apostrophe.** In a folder such as `C:\Users\D'Angelo\...` the signature check failed to
+  run, so the launcher rejected a genuine NVIDIA DLL. The path is now passed outside the check's
+  script text.
+- **Fixed: a movie of a different size or format no longer corrupts memory.** The video decoder
+  kept the picture conversion it built for the first movie, so a decoder reused for a movie with
+  another size or pixel format wrote rows past the end of its frame buffer. The conversion is now
+  rebuilt when the size or format changes, and a failed buffer allocation now stops with a clear error instead of corrupting memory.
+- **Fixed: a game build with different bytes at a patch site no longer stops the start.** A patch
+  whose bytes did not match was refused with an error for some patches; the game now starts
+  without that patch and the log says "Patch '...' skipped: unexpected bytes at ...".
+- **Fixed: a mod path with `..` between backslashes could reach files outside the user folder.**
+  Such a path is now refused. Only matters if you use mods.
+
 - **Fixed: a failed update no longer loses the installed version when your antivirus holds a
   file.** If an update failed and the antivirus kept one of the new files locked for 15 seconds,
   the installer gave up restoring the old files, and the next launcher start deleted the folder

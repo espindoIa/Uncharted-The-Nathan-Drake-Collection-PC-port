@@ -2373,3 +2373,80 @@ restores the other item and writes the marker; cleanup keeps update\old only wit
 
 Not verified: a profiler run with GOW3_PROFILE_STALLS (the deadlock is timing-dependent, not
 reproduced), the retexture trigger in game, a real failed update on a live install.
+
+### Fixes 9-20
+
+9. DLSS signature check (launcher/uncharted_launcher.pyw ngx_signature_ok).
+   - Cause: the DLL path sat inside the PowerShell -Command text between single quotes.
+   - Failure case: a folder with a ' (C:\Users\D'Angelo\...) broke parsing, so a genuine NVIDIA DLL
+     was called unsigned; a crafted folder name could run commands.
+   - Now the path goes in the NGX_DLL environment variable; the script reads -LiteralPath $env:NGX_DLL.
+10. Video decoder (gpu/shim/videodec2/videodec2_impl.cpp, VdecDecoder::ConvertNV12Frame).
+   - Cause: m_sws_context was built once (sws_getContext when null) and never checked against the
+     frame. av_frame_get_buffer's result was ignored.
+   - Failure case: a decoder reused for a movie of another size or format converted with the old
+     plan and overran the new frame buffer.
+   - Now sws_getCachedContext every frame (same context while the parameters match); a failed
+     buffer or context frees the frame and returns nullptr.
+11. Settings Save() (gpu/shim/gow3_settings.cpp).
+   - Cause: the present thread (restart prompt) and the window thread (menu close) can both call
+     Save(); unlocked they raced on `synced` and wrote the same .tmp.
+   - Now one static std::mutex held for the whole Save().
+12. File paths (src/runtime_file.c, resolve).
+   - Cause: the ".." component check accepted only "/" around it; Windows also takes "\".
+   - Failure case: a guest path like /data/..\..\x reached host files outside the user folder.
+     Only matters with mods.
+   - Now "\" counts as a separator on both sides, so such a path returns EACCES.
+13. window_icon.bmp (launcher/assets, .gitignore, tools/export_github.sh).
+   - Cause: probe_uncharted.py generates it from the game's icon0.png (Sony artwork); it had been
+     tracked since 6036c2a and the export copies launcher/*.
+   - Now untracked (kept on disk, ignored); the export refuses any window_icon.bmp. It stays in past commits.
+14. GitHub export (tools/export_github.sh).
+   - Cause: ls-files -co listed untracked files of gow3_pc, so local files such as
+     stat-multipliers-test.ini went to the public repository.
+   - Now ls-files -c (tracked only).
+15. orb-multiplier-test and stat-multipliers-test (gow3_pc/tests/test_orb_multiplier.cpp,
+    test_stat_multipliers.cpp).
+   - Cause: Save() only keeps the God of War keys already in the file (it stopped writing them on
+     purpose since 6036c2a); the tests expected them written from memory.
+   - Now the orb test writes the keys into the file first; the stat test expects the file's own
+     values. No product change.
+16. Patch mismatch (tools/probe_uncharted.py, apply_patches).
+   - Cause: a multi-change variant with unexpected bytes was skipped, but a single-change one raised
+     SystemExit, against the "unknown game version: start without it" rule.
+   - Failure case: a build whose bytes differ inside a matched pattern (U2 focus and 1 ms wait
+     patterns check literal bytes inside wildcards) would not start.
+   - Now it prints "Patch '...' skipped: unexpected bytes at ...", tries the next variant, then the
+     usual "NOT applied" line.
+17. Timed rwlocks (src/runtime_rwlock.c, acquire and rw_timedread/rw_timedwrite).
+   - Cause: the guest argument was treated as a pointer to {seconds, nanoseconds}; PS4 takes
+     relative microseconds (shadPS4 issue #5175). On contention the value was dereferenced as a pointer.
+   - Now the argument is uint32 microseconds turned into an absolute CLOCK_REALTIME deadline; zero
+     still tries once, then times out. The three games do not import these functions.
+18. pthread keys (src/runtime_kernel.c, key_create/key_delete/key_set/key_get,
+    runtime_thread_keys_cleanup).
+   - Cause: per-thread values were kept by slot only. A deleted and re-created key reused the slot
+     with other threads' old values.
+   - Failure case: key_get returned another thread's stale value, and the new destructor ran on it
+     at thread exit.
+   - Now each slot has a generation, bumped at create; a thread's value is valid only for the
+     generation it was set under. Get and set are lock-free (atomics); cleanup checks under key_lock.
+19. sceKernelMprotect (src/runtime_memory.c, protect_locked).
+   - Cause: the end was start + align_up(size) with start unaligned, so the last page of the
+     interval was missed; huge sizes wrapped.
+   - Now the end is align_up(start + size) and both additions are checked; an overflow returns INVALID.
+20. God of War III script helpers (tools/graphics_options.py, most of mods.py and patches.py, their
+    tests).
+   - Cause: nothing in the Uncharted launch chain called them, but they shipped in the zip.
+   - Now ~900 lines removed. mods.py keeps LINKED, make_link, is_link; patches.py keeps game_sfo,
+     game_title_id, EBOOT_BASE, eboot_image, find_pattern. patches/*.xml left in place.
+
+Verified: build.sh ok. runtime-test passes (all, plus new key-reuse, mprotect range and overflow,
+and rwlock microsecond cases); file-mods-test passes (backslash traversal). Each new test failed with
+its fix reverted (17, 18, 19, 12). orb-multiplier-test, stat-multipliers-test and
+graphics-settings-test pass. Python tests game_update, prepare, content, apply_update, probe pass.
+U3 1 min boot and play at 4K, MT on (build with all of 9-20): alive at end, no hang report, no patch skipped, lowest 5 s window 53.7 FPS, worst frame 149.1 ms (loading).
+
+Not verified: a movie of another size, two threads saving at once, a genuine signed DLL in a quoted
+path, a run of the export, a game build that hits a patch mismatch, the rwlock, key and mprotect
+paths in game.
