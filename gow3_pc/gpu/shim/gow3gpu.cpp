@@ -530,11 +530,12 @@ static void KernelServiceThread(std::stop_token stoken) {
         {
             std::unique_lock lock{m_asio_req};
             cv_asio_req.wait(lock, stoken, [] { return asio_requests != 0; });
+            // 20 Oct 2026 audit: a request between run() returning and the reset was lost; clear before run().
+            asio_requests = 0;
         }
         if (stoken.stop_requested()) break;
         io_context.run();
         io_context.restart();
-        asio_requests = 0;
     }
 }
 
