@@ -183,12 +183,14 @@ def dlss_available():
 
 def ngx_signature_ok(path):
     """Whether `path` carries a valid Authenticode signature by NVIDIA Corporation."""
-    script = (f"$s = Get-AuthenticodeSignature -LiteralPath '{str(path)}'; "
+    # 20 Oct 2026 audit: the path goes in the environment, not into the script text; a ' in a folder
+    # name broke parsing (genuine DLL called unsigned) and a crafted name could run commands.
+    script = ("$s = Get-AuthenticodeSignature -LiteralPath $env:NGX_DLL; "
               "if ($s.Status -eq 'Valid' -and $s.SignerCertificate.Subject -like '*O=NVIDIA Corporation*') "
               "{ exit 0 } else { exit 1 }")
     try:
         result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                                capture_output=True, timeout=60,
+                                capture_output=True, timeout=60, env={**os.environ, "NGX_DLL": str(path)},
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.TimeoutExpired):
         return False
