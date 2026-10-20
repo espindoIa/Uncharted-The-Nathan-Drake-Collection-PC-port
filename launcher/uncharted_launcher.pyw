@@ -679,6 +679,8 @@ def app_version(folder):
 
 # Uncharted 2's torch code as update 1.02 compiled it (tools/probe_uncharted.py
 # TORCH_FORWARD_PATCHES; 1.00 lays this code out differently).
+# 20 Oct 2026 audit: twin of TORCH_FORWARD_PATCHES[0][1][0][0] in tools/probe_uncharted.py (copied, not
+# imported: that module is heavy at start); app_version below is the twin of sfo() in gow3_pc/scripts/prepare.py.
 UPDATE_102_CODE = bytes.fromhex("488d05cc9fd500 8b4850 84c9 7440 8a50".replace(" ", ""))
 _update_102_cache = {}
 
@@ -951,17 +953,30 @@ def ini_file(game):
 
 def ini_lines(game):
     """The game's settings file, or the shared one of earlier versions as its starting point."""
-    for path in (ini_file(game), INI_FILE):
+    # 20 Oct 2026 audit: fall back to the shared file only when the game's own is missing (as
+    # tools/probe_uncharted.py does). Any OSError used to pick it, and write_ini then wrote the
+    # shared file's contents over the game's ini while another process held it.
+    path = ini_file(game)
+    if path.exists():
         try:
             return path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
-            continue
-    return ["# Uncharted settings (launcher and in-game menu: Insert / R3+L2)"]
+            time.sleep(0.2)  # one retry for a transient lock; a second failure propagates
+            return path.read_text(encoding="utf-8", errors="replace").splitlines()
+    try:
+        return INI_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ["# Uncharted settings (launcher and in-game menu: Insert / R3+L2)"]
 
 
 def read_ini(game):
     values = dict(INI_DEFAULTS)
-    for line in ini_lines(game):
+    try:
+        lines = ini_lines(game)
+    except OSError as error:  # 20 Oct 2026 audit: a locked ini must not raise into the launcher's start or Tk callbacks
+        print(f"Settings not read: {ini_file(game)} could not be read ({error}); defaults apply")
+        lines = []
+    for line in lines:
         if "=" in line and not line.lstrip().startswith("#"):
             key, value = line.split("=", 1)
             values[key.strip()] = value.strip()
@@ -978,7 +993,11 @@ def ini_mtime(game):
 
 def write_ini(game, updates):
     """Updates keys in place and keeps every other line (the in-game menu writes more keys)."""
-    lines = ini_lines(game)
+    try:
+        lines = ini_lines(game)
+    except OSError as error:  # 20 Oct 2026 audit: writing now would replace the game's ini with partial data
+        print(f"Settings not saved: {ini_file(game)} could not be read ({error})")
+        return
     done = set()
     for i, line in enumerate(lines):
         if "=" in line and not line.lstrip().startswith("#"):
