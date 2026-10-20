@@ -6,6 +6,15 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork 0.5.0 "Expedition")
 
+- **Fixed: Uncharted 3 chapter 2 no longer gets stuck at a lower frame rate after the alley
+  checkpoint.** A buffer the port uses for small per-draw data could fill up and stay full for the
+  rest of the session. The drawing thread then copied every small piece of data again, and a log of a
+  session in the chase section stayed at 41-49 FPS for over 4 minutes (55-63 FPS before the
+  checkpoint). In a test walk to the meat market exit the old build got stuck in 3 of 5 sessions and
+  the fixed one in 0 of 3 (few sessions). There the difference was 3-5 FPS, about run-to-run noise,
+  because that view is light. In the heavier chase views the gain is estimated at about 6-9 FPS, not
+  measured. The chapter is still limited by the CPU in busy streets (62-73 FPS at 4K with DLSS
+  Performance); that part is not fixed.
 - **Each game keeps its own shader cache.** Uncharted 1, 2 and 3 share one title ID, so all three
   used one cache folder (U3's warm-up read 2351 entries, kept 576 and took 30.85 s). Each game now
   uses `analysis\uncharted-user\cache\CUSA02320-<executable>`. **Each game copies the old shared

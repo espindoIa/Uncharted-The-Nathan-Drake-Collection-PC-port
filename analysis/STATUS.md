@@ -2615,7 +2615,63 @@ lock/refcount from 35fff41.
 - The chase section: 6,300 draws/frame, 41-49 FPS, a ceiling of about 300k draws/s, stage B 79-90%
   busy, stage A waited 37%, 0 compiles. There it is CPU-bound on the draw pipe (FPS is about
   300k / 6,300). This is the known limit (see "Levels are CPU-bound on the GPU command thread"
-  above). Not fixed.
+  above).
+- Correction (same day, later): that window was partly a stuck constant ring, not only the known
+  limit. The ring stayed full from the alley checkpoint load until quit and pushed ~1M copies/s onto
+  stage B. Fixed in 2025147 (next subsection). The CPU limit that remains after the fix is in
+  "Remaining CPU limit (profile)"; it is not fixed.
+
+### Constant ring stuck full (2025147)
+
+- Player's 20 Oct log: 55-63 FPS at ~4,000 pipe items/frame before. A switch right after the alley
+  checkpoint load (col-alley): stream copies ~300k -> ~2.1M per 5 s (~3 GB), static ranges ~1,000
+  promoted and ~1,000 demoted per 5 s, known ranges 863 -> 3,259, and "constant ring ... copies/s left
+  to stage B" ~1,025,000/s. Then 41-49 FPS for 4+ min until quit, at ~6,300 items/frame.
+- Cause (vk_constant_ring.h, ConstantRing::Stamp): when the ring filled while no binding was reused,
+  Allocate failed and the position stopped moving. Every packet then stamped the same end, and Stamp
+  returned early before it published the pending end of the earlier tick. Nothing was retired again, so
+  every small read-only binding (~1M/s) fell back to stage B's stream copies for the rest of the
+  session. Each failed Allocate also called Retire, which refreshes the semaphore.
+- Fix: Stamp publishes the pending (end, tick) pair once the tick has moved on, even with an unchanged
+  end. A publish dropped because the stamp array is full (1024 entries) is retried on later packets.
+  Codex and two workflow reviews (GPU safety, liveness) found no defect.
+- A/B: U3 chapter 2 chase save, player settings (DLSS Performance 1080p -> 4K, model K, 120 cap,
+  multithreading on). The same scripted walk to the meat market exit, then a camera turn and a 30 s
+  wait. Saves /c/dev/bench/backup_ch2chase and backup_ch2meat; routes
+  analysis/play/routes/chase_market.txt and meat_heavy.txt (replays drift; the scripted move
+  sequence is more reliable).
+
+| Build | Stuck sessions | Ring copies/s | Stage B busy | Stage A waiting | FPS |
+| --- | --- | --- | --- | --- | --- |
+| old, when stuck | 3 of 5 | 0 | 87% | 55% | 73.1 |
+| old, when not stuck | 2 of 5 | not recorded | not recorded | not recorded | 75.3 |
+| fixed | 0 of 3 | ~540k | 77% | 28% | 77.8, 73.6 |
+
+- Old build when stuck: ~1.0M/s left to stage B, 1.9M stream copies per 5 s. Fixed build: brief fills
+  of 5-28k/s that recovered to 0.
+- Stage B cost per pipe item: ~2.8 us stuck vs ~2.3 us not stuck (+24%). That view is light (318-460
+  draws/frame), so FPS there moves only ~3-5 FPS, about noise.
+- Estimate for the player's heavier views (6,300 items/frame), not measured: 300k / 6,300 ~ 48 FPS
+  stuck vs ~340-357k / 6,300 ~ 54-57 FPS unstuck.
+- Not verified: the FPS gain in the 6,300 items/frame views. The bench's DLAA M copy was GPU-bound at
+  the chase checkpoint (56.6 FPS, GPU 93%), so it cannot show a CPU-side gain there. The sample is
+  small (5 and 3 sessions), so "0 of 3 stuck" is evidence, not proof.
+
+### Remaining CPU limit (profile)
+
+- Fixed build, market street, CPU-bound at 62-73 FPS, GPU 63-71% busy. Player's settings are DLSS
+  Performance with model K (lighter GPU), which is why he is CPU-bound there. Sampling profile, 5 ms
+  interval, 10 s.
+- Stage B (draw recording thread) 78% busy, about 325k items/s: DispatchRecord 44% and DrawRecord
+  19.5%. Inside the dispatches: BindBuffers 26.5%, ObtainBuffer 18%, GpuRangesAdd (boost::icl)
+  ~10-13%, CompleteReadbacks 7%, LandGuarded 5%, NoteGpuWriteWindows 4%.
+- Stage A (GPU command thread): ProcessCompute 58%, CollectRingBindings 30% (memcpy 17%),
+  RefreshComputeKey -> Shader::Info::RefreshFlatBuf 22%, SyncSrtTables 22%, waiting for stage B 24%.
+- The Vulkan recording thread is not the limit.
+- A player stall frame had 2494 draws and 1604 dispatches. Compute dispatches dominate both stages.
+- Seen in the player's stall frames, not investigated: write-fault handlers took 70-100 ms of
+  80-112 ms frames at the alley load.
+- Not fixed.
 
 ### Can all shaders be compiled before the game starts? (player's question)
 
