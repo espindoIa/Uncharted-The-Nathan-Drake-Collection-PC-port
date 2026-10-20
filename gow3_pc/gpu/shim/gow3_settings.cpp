@@ -300,6 +300,17 @@ bool GraphicsNeedRestart() {
            v.stale_readback != v.startup_stale_readback;
 }
 
+namespace {
+// 20 Oct 2026 audit: the fallback runs after Load(), so synced still said "dlss" while Current()
+// said "fsr3" and the next Save() wrote fsr3 over the player's choice for good. A launch-only
+// fallback is not a menu change: mark it as already synced.
+void SyncUpscalerFallback() {
+    for (auto& [key, value] : synced) {
+        if (key == "upscaler") value = UpscalerName(Get().upscaler);
+    }
+}
+} // namespace
+
 void ConfigureUpscalerSupport(bool fsr4, bool fsr411) {
     auto& v = Get();
     v.fsr4_supported = fsr4;
@@ -311,6 +322,7 @@ void ConfigureUpscalerSupport(bool fsr4, bool fsr411) {
         std::printf("Upscaler: %s unsupported on this GPU; falling back to FSR 3.1 before the first frame\n",
                     UpscalerName(requested));
         v.upscaler = UpscalerFsr3;
+        SyncUpscalerFallback();
     }
 }
 
@@ -324,6 +336,7 @@ void ConfigureDlssSupport(bool available, const char* problem) {
         std::printf("Upscaler: DLSS unavailable (%s); falling back to FSR 3.1\n",
                     kept.empty() ? "gow3_dlss.dll or nvngx_dlss.dll missing" : kept.c_str());
         v.upscaler = UpscalerFsr3;
+        SyncUpscalerFallback();
     }
 }
 

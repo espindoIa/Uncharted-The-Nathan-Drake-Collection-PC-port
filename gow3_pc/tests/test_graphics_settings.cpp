@@ -95,6 +95,20 @@ int main() {
     const std::string cheats = Read(path);
     assert(cheats.find("cheat_double_jumps=1\n") != std::string::npos);
     assert(cheats.find("cheat_very_hard=1\n") != std::string::npos);
+    // 20 Oct 2026 audit: a launch-only DLSS fallback must not be saved as the player's choice.
+    {
+        std::ofstream out(path);
+        out << "upscaler=dlss\noverlay_corner=0\n";
+    }
+    Gow3Settings::Load();
+    Gow3Settings::ConfigureDlssSupport(false, nullptr);
+    assert(v.upscaler == Gow3Settings::UpscalerFsr3);
+    v.overlay_corner = 2;
+    Gow3Settings::Save();
+    const std::string fallback = Read(path);
+    assert(fallback.find("upscaler=dlss\n") != std::string::npos);
+    assert(fallback.find("overlay_corner=2\n") != std::string::npos);
+    assert(!std::ifstream(std::string(path) + ".tmp").good());
     std::remove(path);
     std::puts("PASS: graphics settings");
 }
