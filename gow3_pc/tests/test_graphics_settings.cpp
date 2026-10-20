@@ -19,7 +19,9 @@ static std::string Read(const char* path) {
 
 int main() {
     assert(G::ParseDisplayMode("borderless") == G::Borderless && G::ParseDisplayMode("bogus") == G::Windowed);
-    assert(G::ParseFpsLimit(240) == 240 && G::ParseFpsLimit(75) == 0);
+    assert(G::ParseFpsLimit(120) == 120 && G::ParseFpsLimit(75) == 75);
+    // b9e64a4: 0 and faster limits become 120; 4b0f2f1 added 75/90/100; other values fall back to 60.
+    assert(G::ParseFpsLimit(0) == 120 && G::ParseFpsLimit(240) == 120 && G::ParseFpsLimit(7) == 60);
     assert(G::ParseResolution("1440p") == 3 && G::ParseResolution("8K") == 0);
     assert(G::ParseEngineFps(240) == 240 && G::ParseEngineFps(90) == 120);
     assert(G::ParseFramesQueued(2) == 2 && G::ParseFramesQueued(0) == 0 && G::ParseFramesQueued(5) == 1);
@@ -30,13 +32,14 @@ int main() {
     assert(!G::FsrPassRuns(true, true, 2560, 1440, 1920, 1080));  // larger image: regular scaling
     assert(G::EffectiveFps(0, 120) == 120 && G::EffectiveFps(240, 120) == 120 && G::EffectiveFps(60, 240) == 60);
     // An unpatched engine steps 1/60 s per frame: presenting faster speeds the game up.
-    assert(G::PresentLimit(120, 60) == 60 && G::PresentLimit(240, 120) == 120 && G::PresentLimit(240, 240) == 240);
-    assert(G::PresentLimit(0, 60) == 0 && G::PresentLimit(30, 60) == 30);  // 0: paced by vblank
+    // b9e64a4: one argument, capped at MaxFpsLimit (120); 0 and faster settings give 120.
+    assert(G::PresentLimit(120) == 120 && G::PresentLimit(240) == 120 && G::PresentLimit(30) == 30);
+    assert(G::PresentLimit(0) == 120 && G::PresentLimit(75) == 75);
 
     const char* path = "graphics-settings-test.ini";
     {
         std::ofstream out(path);
-        out << "display_mode=borderless\nvsync=0\nfps_limit=240\nasync_shaders=0\n"
+        out << "display_mode=borderless\nvsync=0\nfps_limit=100\nasync_shaders=0\n"
                "render_resolution=1440p\nengine_fps=240\ndeferred_readback=0\nstale_readback=1\n"
                "fsr1=1\nrcas=0\nrcas_strength=40\nframes_queued=2\n";
     }
@@ -44,7 +47,7 @@ int main() {
     _putenv_s("GOW3_ASYNC_SHADERS", "");
     auto& v = Gow3Settings::Get();
     Gow3Settings::Load();
-    assert(v.display_mode == G::Borderless && !v.vsync && v.fps_limit == 240 && !v.async_shaders);
+    assert(v.display_mode == G::Borderless && !v.vsync && v.fps_limit == 100 && !v.async_shaders);
     assert(v.render_resolution == 3 && v.engine_fps == 240 && !v.deferred_readback && v.stale_readback);
     assert(v.fsr1 && !v.rcas && v.rcas_strength == 40 && v.frames_queued == 2);
     assert(!Gow3Settings::GraphicsNeedRestart());
@@ -53,8 +56,12 @@ int main() {
     Gow3Settings::Load();
     assert(v.engine_fps == 240 && v.applied_engine_fps == 60 && !Gow3Settings::GraphicsNeedRestart());
     _putenv_s("GOW3_ENGINE_FPS", "");
+    // 6036c2a: only the readback modes need a restart; engine_fps no longer does.
     v.engine_fps = 120;
+    assert(!Gow3Settings::GraphicsNeedRestart());
+    v.deferred_readback = true;
     assert(Gow3Settings::GraphicsNeedRestart());
+    v.deferred_readback = false;
     v.fps_limit = 60;  // live: no restart because of it
     v.engine_fps = 240;
     assert(!Gow3Settings::GraphicsNeedRestart());
@@ -76,7 +83,7 @@ int main() {
     _putenv_s("GOW3_ASYNC_SHADERS", "1");  // the environment still wins at start
     v.async_shaders = false;
     Gow3Settings::Load();
-    assert(v.display_mode == G::Windowed && v.fps_limit == 0 && v.render_resolution == 0 && v.engine_fps == 120);
+    assert(v.display_mode == G::Windowed && v.fps_limit == 60 && v.render_resolution == 0 && v.engine_fps == 120);
     assert(v.rcas_strength == 75 && v.frames_queued == 1);
     assert(v.async_shaders);
     {
