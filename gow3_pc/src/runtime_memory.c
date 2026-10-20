@@ -752,12 +752,15 @@ static void note_protect(uintptr_t start, uint64_t size, int old_prot, int prot,
     memset(slots,0,sizeof(slots)); total=0; skipped_slots=0;
 }
 static uintptr_t protect_caller;
-static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type) {
+/* Validates the range (page-aligned start and end are returned) and returns 1 when every VMA already has
+ * `prot` (and `type` if >=0), 0 when something changes, -1 when the range is invalid. Needs a lock. */
+static int protect_check(uintptr_t *start_io, uint64_t size, int prot, int type, uintptr_t *end_out, int *old_prot_out) {
+    uintptr_t start=*start_io;
     /* 20 Oct 2026 audit: round the original interval's end without wrapping either addition. */
-    if (size>UINTPTR_MAX-start || start+size>UINTPTR_MAX-(PAGE-1)) return INVALID;
+    if (size>UINTPTR_MAX-start || start+size>UINTPTR_MAX-(PAGE-1)) return -1;
     uintptr_t end=align_up(start+size,PAGE);
     start&=~(uintptr_t)(PAGE-1);
-    if ((prot & ~0x37) || !covered(start,end,0)) return INVALID;
+    if ((prot & ~0x37) || !covered(start,end,0)) return -1;
     /* An unchanged protection is a no-op: the host pages keep their GPU-tracking protection and
      * the GPU caches stay valid. Uncharted re-protects ranges several times per frame; each
      * invalidation downloaded GPU-written data with a full GPU wait (temple: ~47% of frame time). */
@@ -766,7 +769,14 @@ static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type
         if (old_prot<0) old_prot=vmas[j].prot;
         if (vmas[j].prot!=prot || (type>=0 && vmas[j].type!=type)) { unchanged=0; break; }
     }
-    if (unchanged) return 0;
+    *start_io=start; *end_out=end; *old_prot_out=old_prot;
+    return unchanged;
+}
+static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type) {
+    uintptr_t end; int old_prot;
+    const int state=protect_check(&start,size,prot,type,&end,&old_prot);
+    if (state<0) return INVALID;
+    if (state) return 0;
     note_protect(start,end-start,old_prot,prot,protect_caller);
     if (host_protect(start,end-start,host_prot(prot))) return INVALID;
     int error; size_t i=carve(start,end,&error);
@@ -777,6 +787,13 @@ static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type
     return 0;
 }
 static ABI int32_t kernel_mprotect(const void *address, uint64_t size, int prot) {
+    /* 20 Oct audit: a no-op re-protect (several per frame) took the exclusive lock, bumped table_generation
+     * (flushing every thread's region cache) and ran flush_hooks; the read lock is enough to see it. */
+    read_lock();
+    uintptr_t s=(uintptr_t)address, e; int old_prot;
+    const int state=protect_check(&s,size,prot,-1,&e,&old_prot);
+    read_unlock();
+    if (state>0) return 0;
     write_lock();
     protect_caller=(uintptr_t)__builtin_return_address(0);
     int32_t result=protect_locked((uintptr_t)address,size,prot,-1);
