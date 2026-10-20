@@ -8,11 +8,12 @@ extern "C" {
 #endif
 typedef struct {
     const char *title;          /* window title */
-    const char *serial;         /* CUSA id, names the pipeline cache */
+    const char *serial;         /* CUSA id */
     const char *user_dir;       /* pipeline cache/logs directory */
     uint32_t sdk_version;       /* from the eboot's procparam */
     uint32_t psf_attributes;    /* param.sfo ATTRIBUTE */
     int32_t width, height;      /* initial window size */
+    const char *cache_id;       /* optional per-executable pipeline cache id */
 } Gow3GpuConfig;
 /* Registers kernel event queues (needed with or without graphics). */
 void gow3gpu_register_kernel(void);

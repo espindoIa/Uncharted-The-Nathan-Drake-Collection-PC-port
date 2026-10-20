@@ -1347,7 +1347,22 @@ int main(int argc, char **argv) {
         sfo_value(sfo,"ATTRIBUTE",NULL,0,&attributes);
         uint64_t sdk=0;
         if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
-        Gow3GpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080};
+        /* 20 Oct audit: U3 read 2351 shared cache keys but kept only 576. */
+        const char *executable=getenv("GOW3_RESTART_EXECUTABLE");
+        if (!executable || !*executable) executable=guest_argv[0];
+        for (const char *p=executable;*p;++p) if (*p=='/' || *p=='\\') executable=p+1;
+        char stem[64], cache_id[96];
+        size_t stem_length=0;
+        while (executable[stem_length] && executable[stem_length]!='.' && stem_length<sizeof(stem)-1) {
+            unsigned char c=(unsigned char)executable[stem_length];
+            stem[stem_length]=(char)((c>='A' && c<='Z') ? c+32 :
+                (c>='a' && c<='z') || (c>='0' && c<='9') || c=='-' || c=='_' ? c : '_');
+            ++stem_length;
+        }
+        stem[stem_length]=0;
+        snprintf(cache_id,sizeof(cache_id),"%s-%s",serial,stem);
+        Gow3GpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080,
+                           stem_length ? cache_id : NULL};
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
         if (gow3gpu_init(&gpu)) fail("GPU initialization failed");
         printf("GPU: window and Vulkan presenter ready; SDK 0x%08x, %u HLE symbols\n",(unsigned)sdk,gow3gpu_symbol_count());

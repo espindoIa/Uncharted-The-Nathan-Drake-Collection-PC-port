@@ -66,6 +66,7 @@ class ElfInfo {
     bool initialized = false;
 
     std::string game_serial{};
+    std::string cache_id{};
     std::string title{};
     std::string app_ver{};
     u32 firmware_ver = 0;
@@ -106,6 +107,11 @@ public:
     [[nodiscard]] std::string_view GameSerial() const {
         ASSERT(initialized);
         return Instance().game_serial;
+    }
+
+    [[nodiscard]] std::string_view CacheId() const {
+        ASSERT(initialized);
+        return cache_id.empty() ? game_serial : cache_id;
     }
 
     [[nodiscard]] std::string_view Title() const {
