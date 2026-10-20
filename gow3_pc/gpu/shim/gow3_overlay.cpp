@@ -14,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <SDL3/SDL.h>
@@ -147,8 +148,9 @@ std::atomic<u32> loading_done{0}, loading_total{0};
 std::atomic<u32> background_done{0}, background_total{0};
 bool dirty = false; // settings changed while open: saved on close
 int requested_tab = -1; // switch on the next frame (L1/R1, Q/E, menu opened)
-// The game's text dialog (SetTextEntry), guarded by imgui_mutex.
-bool text_entry_active = false;
+// The game's text dialog (SetTextEntry); the text is guarded by imgui_mutex.
+// 20 Oct 2026 audit: the flag is read without the lock (CapturesInput, Visible), so it is atomic.
+std::atomic<bool> text_entry_active{false};
 std::string text_entry_prompt, text_entry_text;
 // The game's save list (sceSaveDataDialog): a choice made with the arrows/D-pad.
 std::atomic<bool> choice_active{false};
@@ -176,13 +178,20 @@ void SetOpen(bool value) {
     }
     ImGui::GetIO().MouseDrawCursor = value;
     CancelCapture();
+    if (!value) {
+        // 20 Oct 2026 audit: releases arriving after close are dropped (is_open false), so held keys stayed down.
+        ImGui::GetIO().ClearInputKeys();
+        ImGui::GetIO().ClearInputMouse();
+    }
     if (value) {
         requested_tab = std::clamp(Gow3Settings::Get().menu_tab.load(), 0, 3);
         ReloadControls();
     }
     if (!value && dirty) {
         dirty = false;
-        Gow3Settings::Save();
+        // 20 Oct 2026 audit: imgui_mutex is held here; disk I/O stalled the present thread's Render.
+        // Save has its own mutex and replaces the file atomically, so it can run detached.
+        std::thread([] { Gow3Settings::Save(); }).detach();
     }
 }
 
@@ -931,12 +940,17 @@ bool HandleMenuCaptureEvent(const SDL_Event& event) {
     }
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
     case SDL_EVENT_GAMEPAD_BUTTON_UP: {
+        const u32 bit = event.gbutton.button < 30 ? 1u << event.gbutton.button : 0;
+        // 20 Oct 2026 audit: the release of a button that is not part of the capture (the Cross that
+        // started it) must reach ImGui and pad_held, or South stays down.
+        if (event.type == SDL_EVENT_GAMEPAD_BUTTON_UP && (capture != CaptureMenuPad || !(capture_pad_mask & bit))) {
+            return false;
+        }
         if (capture != CaptureMenuPad) {
             control_note = "Unchanged.";
             CancelCapture();
             return true;
         }
-        const u32 bit = event.gbutton.button < 30 ? 1u << event.gbutton.button : 0;
         if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
             capture_pad_mask |= bit;
             if (std::popcount(capture_pad_mask) >= 2) FinishMenuPadCapture();
@@ -1554,7 +1568,9 @@ bool HandleChoiceEvent(const SDL_Event& event) {
     if (event.type == SDL_EVENT_KEY_DOWN) {
         const SDL_Keycode key = event.key.key;
         move = key == SDLK_UP || key == SDLK_W ? -1 : key == SDLK_DOWN || key == SDLK_S ? 1 : 0;
-        finish = key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE ? 1
+        // 20 Oct 2026 audit: a held Space (Cross) repeated into accepting the focused save slot.
+        finish = event.key.repeat                                                ? 0
+                 : key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE ? 1
                  : key == SDLK_ESCAPE || key == SDLK_BACKSPACE                   ? 2
                                                                                  : 0;
     } else if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {

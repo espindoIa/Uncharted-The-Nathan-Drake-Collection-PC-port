@@ -205,7 +205,8 @@ bool WindowSDL::PollEvents() {
                 size_t cut = text.size() - 1; // drop one UTF-8 code point
                 while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) --cut;
                 text.erase(cut);
-            } else if (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER || event.key.key == SDLK_ESCAPE) {
+            } else if (!event.key.repeat && // 20 Oct 2026 audit: the press that opened the dialog repeated into closing it
+                       (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER || event.key.key == SDLK_ESCAPE)) {
                 text_state = event.key.key == SDLK_ESCAPE ? 2 : 1;
                 text_active = false;
                 SDL_StopTextInput(window);
