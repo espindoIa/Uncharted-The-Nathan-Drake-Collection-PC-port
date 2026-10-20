@@ -46,13 +46,16 @@ std::atomic<std::uint32_t> next{0};
 struct Scratch {
     std::atomic<std::uint64_t> base{0};
     std::atomic<std::uint64_t> address{0};
+    std::atomic<std::uint64_t> used{0}; // last-use tick, for recycling
 };
 std::array<Scratch, 16> scratch;
 std::mutex scratch_mutex;
+std::atomic<std::uint64_t> scratch_tick{0};
 
 std::uint64_t FindScratch(std::uint64_t base) {
     for (auto& entry : scratch) {
         if (entry.base.load(std::memory_order_acquire) == base) {
+            entry.used.store(scratch_tick.fetch_add(1, std::memory_order_relaxed) + 1, std::memory_order_relaxed);
             return entry.address.load(std::memory_order_acquire);
         }
     }
@@ -113,26 +116,37 @@ std::uint8_t* ScratchFrame(std::uint64_t base) {
     if (const std::uint64_t address = FindScratch(base)) {
         return reinterpret_cast<std::uint8_t*>(address);
     }
+    // 20 Oct 2026 audit: with all 16 slots used, recycle the least recently used one (and its mapping)
+    // instead of returning null, which showed the top-left 1080p corner of later movies at 4K.
+    Scratch* slot = nullptr;
     for (auto& entry : scratch) {
-        if (entry.base.load(std::memory_order_acquire)) {
-            continue;
+        if (!entry.base.load(std::memory_order_acquire)) {
+            slot = &entry;
+            break;
         }
+        if (!slot || entry.used.load(std::memory_order_relaxed) < slot->used.load(std::memory_order_relaxed)) {
+            slot = &entry;
+        }
+    }
+    void* address = reinterpret_cast<void*>(slot->address.load(std::memory_order_acquire));
+    if (!address) {
         const std::uint64_t bytes = ScaledFrameBytes();
-        void* address = runtime_map_guest_memory(bytes);
+        address = runtime_map_guest_memory(bytes);
         if (!address) {
             std::printf("Movie: no scratch frame (%llu bytes) for %#llx; movies are shown as decoded\n",
                         (unsigned long long)bytes, (unsigned long long)base);
             std::fflush(stdout);
             return nullptr;
         }
-        entry.address.store(reinterpret_cast<std::uint64_t>(address), std::memory_order_release);
-        entry.base.store(base, std::memory_order_release);
-        std::printf("Movie: frame buffer %#llx read as %ux%u from %p\n", (unsigned long long)base,
-                    Display().width, Display().height, address);
-        std::fflush(stdout);
-        return static_cast<std::uint8_t*>(address);
     }
-    return nullptr;
+    slot->base.store(0, std::memory_order_release);
+    slot->address.store(reinterpret_cast<std::uint64_t>(address), std::memory_order_release);
+    slot->used.store(scratch_tick.fetch_add(1, std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    slot->base.store(base, std::memory_order_release);
+    std::printf("Movie: frame buffer %#llx read as %ux%u from %p\n", (unsigned long long)base,
+                Display().width, Display().height, address);
+    std::fflush(stdout);
+    return static_cast<std::uint8_t*>(address);
 }
 
 namespace {

@@ -282,6 +282,7 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
 namespace {
 std::mutex g_keep_writable_mutex;
 std::map<VAddr, VAddr> g_keep_writable; // page-aligned start -> end
+std::map<VAddr, u32> g_keep_count; // keeps per start (under g_keep_writable_mutex)
 std::atomic<bool> g_keep_writable_any{false};
 } // namespace
 
@@ -310,10 +311,14 @@ void KeepWritable(const void* address, u64 size, bool keep) {
     }
     {
         std::scoped_lock lock{g_keep_writable_mutex};
+        // 20 Oct 2026 audit: a stack handed to a new fiber before the old one is finalized keeps its
+        // protection; count keeps per start, erase at 0.
         if (keep) {
             auto& stored = g_keep_writable[start];
             stored = std::max(stored, end);
-        } else {
+            ++g_keep_count[start];
+        } else if (auto count = g_keep_count.find(start); count != g_keep_count.end() && --count->second == 0) {
+            g_keep_count.erase(count);
             g_keep_writable.erase(start);
         }
         g_keep_writable_any = !g_keep_writable.empty();
