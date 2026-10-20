@@ -414,12 +414,26 @@ static void direct_bounds(void) {
     assert((uint32_t)map(&p,0x8000,3,0,pool-0x4000,0)==0x80020016);
 }
 extern void runtime_low_unmap(void *address);
-static ABI void *short_thread(void *p) { return p; }
+static ABI void *short_thread(void *p) {
+    for (uint64_t module=2;module<8;++module) {
+        const uint64_t index[]={module,0};
+        unsigned char *block=GET(TlsAddress,"vNe1w4diLCs#libkernel")(index);
+        assert(block[0]==42 && block[31]==0);
+        block[0]=99;
+    }
+    return p;
+}
 static void thread_reclaim(void) {
     /* 20 Oct 2026 audit: joined records disappear and low allocations reuse the same address. */
     typedef int32_t (ABI *Priority)(void *,int *);
     ThreadCreate create=GET(ThreadCreate,"6UgtwV+0zb4#libkernel");
     ThreadJoin join=GET(ThreadJoin,"onNY9Byn-W8#libkernel");
+    static const unsigned char initial[]={42,17};
+    for (uint64_t module=2;module<8;++module)
+        runtime_set_module_tls(module,initial,sizeof(initial),32);
+    const uint64_t index[]={2,0};
+    unsigned char *main_tls=GET(TlsAddress,"vNe1w4diLCs#libkernel")(index);
+    main_tls[0]=23;
     typedef int32_t (ABI *Detach)(void *);
     typedef int32_t (ABI *DetachAttr)(void **,int);
     for (int mode=0;mode<2;++mode) {
@@ -444,6 +458,7 @@ static void thread_reclaim(void) {
         void *t=NULL,*result=NULL;
         assert(create(&t,NULL,short_thread,(void *)123,"reclaim")==0);
         assert(join(t,&result)==0 && result==(void *)123);
+        assert(GET(TlsAddress,"vNe1w4diLCs#libkernel")(index)==main_tls && main_tls[0]==23);
         int prio=0;
         assert((uint32_t)GET(Priority,"1tKyG7RlMJo#libkernel")(t,&prio)==0x80020003);
     }

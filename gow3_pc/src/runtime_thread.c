@@ -40,6 +40,7 @@ typedef struct GuestThread {
     /* Guest-visible TCB is allocated separately; this is the ScePthread handle. */
     uint64_t *tcb;
     unsigned char *tls_block;
+    unsigned char *module_tls[8]; /* Dynamic module IDs 2..7, owned until join/reap. */
     void *stack_memory;
     pthread_t host;
     GuestEntry entry;
@@ -129,6 +130,9 @@ GuestThread *runtime_thread_current(void) {
     return t;
 }
 /* Fourth TCB word is the active fiber context, shared by all fibers of a thread. */
+unsigned char **runtime_thread_module_tls(void) {
+    return runtime_thread_current()->module_tls;
+}
 void **runtime_thread_fiber_slot(void) {
     GuestThread *t=runtime_thread_current();
     return (void **)&t->tcb[3];
@@ -155,6 +159,7 @@ extern void runtime_low_unmap(void *address);
 static void free_thread(GuestThread *t) {
     if (t->stack_memory) runtime_low_unmap(t->stack_memory);
     tls_block_free(t->tls_block);
+    runtime_free_module_tls(t->module_tls);
     free(t);
 }
 static void unlink_thread(GuestThread *t) {
