@@ -52,7 +52,7 @@ typedef struct {
 _Static_assert(sizeof(GuestStat)==120,"FreeBSD stat layout");
 
 typedef struct { char *names; size_t count, *offsets; unsigned char *types; } Listing;
-typedef struct { int used, host, traced; unsigned refs; pthread_mutex_t io; Listing *dir; size_t position; char path[512]; } File;
+typedef struct { int used, host, traced, append; unsigned refs; pthread_mutex_t io; Listing *dir; size_t position; int64_t offset; char path[512]; } File;
 typedef struct { char guest[64]; char host[512]; } Mount;
 static File files[MAX_FILES];
 static Mount mounts[MAX_MOUNTS];
@@ -398,7 +398,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
         if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
         return -e;
     } else {
-        host=open(path,host_flags(flags)&~O_DIRECTORY,_S_IREAD|_S_IWRITE);
+        host=compat_open_positioned(path,host_flags(flags)&~O_DIRECTORY);
         if (host<0) {
             e=errno;
             if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
@@ -426,7 +426,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
         printf("Runtime: open(%s) failed: guest file table full\n",guest);
         return -EMFILE;
     }
-    files[fd]=(File){.used=1,.host=host,.dir=dir,
+    files[fd]=(File){.used=1,.host=host,.dir=dir,.append=!!(flags&0x8),
                      .traced=file_trace_match() && strstr(guest,file_trace_match())};
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
     pthread_mutex_init(&files[fd].io,NULL);
@@ -482,9 +482,14 @@ static int64_t do_read(int fd,void *buffer,uint64_t size) {
     File *f=file_get(fd); int h=file_host(fd,f);
     if (h<0) { file_put(f); return -EBADF; }
     touch_for_write(buffer,size);
-    /* 20 Oct 2026 audit: serialize sequential I/O with Windows positioned save/restore. */
+    /* 20 Oct audit: only sequential operations share the logical cursor lock. */
     if (f) pthread_mutex_lock(&f->io);
+#ifdef _WIN32
+    ssize_t n=f ? pread(h,buffer,size,f->offset) : host_read(h,buffer,size);
+    if (f && n>0) f->offset+=n;
+#else
     ssize_t n=host_read(h,buffer,size);
+#endif
     if (f) pthread_mutex_unlock(&f->io);
     if (f && f->traced && file_trace_line())
         printf("File trace: read(fd %d, %llu) -> %lld (errno %d)\n",fd,(unsigned long long)size,(long long)n,n<0 ? errno : 0);
@@ -497,9 +502,7 @@ static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     File *f=file_get(fd); int h=file_host(fd,f);
     if (h<0) { file_put(f); return -EBADF; }
     touch_for_write(buffer,size);
-    if (f) pthread_mutex_lock(&f->io);
     ssize_t n=pread(h,buffer,size,offset);
-    if (f) pthread_mutex_unlock(&f->io);
     if (f && f->traced && file_trace_line())
         printf("File trace: pread(fd %d, %llu @%lld) -> %lld (errno %d)\n",fd,(unsigned long long)size,
                (long long)offset,(long long)n,n<0 ? errno : 0);
@@ -512,7 +515,16 @@ static int64_t do_write(int fd,const void *buffer,uint64_t size) {
     File *f=file_get(fd); int h=file_host(fd,f);
     if (h<0) { file_put(f); return -EBADF; }
     if (f) pthread_mutex_lock(&f->io);
+#ifdef _WIN32
+    ssize_t n=f ? (f->append ? compat_append(h,buffer,size) : pwrite(h,buffer,size,f->offset)) : host_write(h,buffer,size);
+    if (f && n>0) {
+        HostStat s;
+        if (f->append && !host_fstat(h,&s)) f->offset=s.st_size;
+        else f->offset+=n;
+    }
+#else
     ssize_t n=host_write(h,buffer,size);
+#endif
     if (f) pthread_mutex_unlock(&f->io);
     file_put(f);
     if (n<0) return -errno;
@@ -522,9 +534,7 @@ static int64_t do_write(int fd,const void *buffer,uint64_t size) {
 static int64_t do_pwrite(int fd,const void *buffer,uint64_t size,int64_t offset) {
     File *f=file_get(fd); int h=file_host(fd,f);
     if (h<0) { file_put(f); return -EBADF; }
-    if (f) pthread_mutex_lock(&f->io);
     ssize_t n=pwrite(h,buffer,size,offset);
-    if (f) pthread_mutex_unlock(&f->io);
     file_put(f);
     return n<0 ? -errno : n;
 }
@@ -541,7 +551,17 @@ static int64_t do_lseek(int fd,int64_t offset,int whence) {
         file_put(f); return r;
     }
     pthread_mutex_lock(&f->io);
+#ifdef _WIN32
+    HostStat s;
+    int64_t base=whence==1 ? f->offset : 0, r=-1;
+    if (whence!=2 || !host_fstat(f->host,&s)) {
+        if (whence==2) base=s.st_size;
+        if ((offset>0 && base>INT64_MAX-offset) || offset < -base) errno=EINVAL;
+        else r=f->offset=base+offset;
+    }
+#else
     int64_t r=host_lseek(f->host,offset,whence);
+#endif
     pthread_mutex_unlock(&f->io);
     if (f->traced && file_trace_line())
         printf("File trace: lseek(fd %d, %lld, %d) -> %lld\n",fd,(long long)offset,whence,(long long)r);

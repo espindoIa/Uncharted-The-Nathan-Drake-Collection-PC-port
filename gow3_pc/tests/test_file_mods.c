@@ -3,18 +3,39 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <assert.h>
+#include <stdint.h>
 static pthread_barrier_t read_ready, read_release;
 static int pause_read;
+static int parallel_pread;
+#ifdef _WIN32
+static ssize_t audit_pread(int fd,void *buffer,size_t size,int64_t offset);
+#endif
 static ssize_t audit_read(int fd,void *buffer,unsigned size);
 #define read audit_read
+#ifdef _WIN32
+#include "compat_win.h"
+#undef pread
+#define pread audit_pread
+#endif
 #include "../src/runtime_file.c"
 #undef read
-static ssize_t audit_read(int fd,void *buffer,unsigned size) {
+static void pause_reader(void) {
     if (__atomic_exchange_n(&pause_read,0,__ATOMIC_SEQ_CST)) {
         pthread_barrier_wait(&read_ready); pthread_barrier_wait(&read_release);
     }
+}
+static ssize_t audit_read(int fd,void *buffer,unsigned size) {
+    pause_reader();
     return read(fd,buffer,size);
 }
+#ifdef _WIN32
+#undef pread
+static ssize_t audit_pread(int fd,void *buffer,size_t size,int64_t offset) {
+    pause_reader();
+    if (parallel_pread) pthread_barrier_wait(&read_ready);
+    return compat_pread(fd,buffer,size,offset);
+}
+#endif
 static void *closing_reader(void *p) {
     char content[7]={0};
     assert(do_read(*(int *)p,content,6)==6 && !strcmp(content,"modded"));
@@ -59,6 +80,28 @@ static void position_race(void) {
     assert(do_lseek(fd,0,1)==3 && !do_close(fd));
     assert(!path_op("/data/position",2,0));
 }
+typedef struct { int fd; int64_t offset; const char *expected; } PreadTask;
+static void *parallel_reader(void *p) {
+    PreadTask *task=p;
+    for (int i=0;i<10000;++i) {
+        char content[3];
+        assert(do_pread(task->fd,content,3,task->offset)==3 && !memcmp(content,task->expected,3));
+    }
+    return NULL;
+}
+static void pread_race(void) {
+    /* 20 Oct audit: both reads must reach positioned I/O on one File without a shared I/O lock. */
+    int fd=(int)do_open("/app0/asset.dcx",0,0); assert(fd>=3);
+    assert(!pthread_barrier_init(&read_ready,NULL,2));
+    PreadTask first={fd,0,"mod"}, second={fd,3,"ded"};
+    pthread_t a,b;
+    parallel_pread=1;
+    assert(!pthread_create(&a,NULL,parallel_reader,&first) && !pthread_create(&b,NULL,parallel_reader,&second));
+    assert(!pthread_join(a,NULL) && !pthread_join(b,NULL));
+    parallel_pread=0;
+    assert(do_lseek(fd,0,1)==0 && !do_close(fd));
+    assert(!pthread_barrier_destroy(&read_ready));
+}
 static int32_t guest_errno;
 int32_t *runtime_errno(void) { return &guest_errno; }
 int32_t runtime_guest_errno(int e) { return e; }
@@ -90,6 +133,7 @@ int main(int argc,char **argv) {
     runtime_file_configure(game,user);
     if (argc==1 || !strcmp(argv[1],"--close-race")) close_race();
     if (argc==1 || !strcmp(argv[1],"--position-race")) position_race();
+    if (argc==1 || !strcmp(argv[1],"--pread-race")) pread_race();
     /* 20 Oct 2026 audit: Windows separators must not let guest writes escape a mount. */
     const char *escapes[]={"/data/..\\outside", "/data/sub\\../outside", "/data/sub\\..\\outside", "/data/..\\..\\..\\Users\\x\\file"};
     for (size_t i=0;i<sizeof(escapes)/sizeof(*escapes);++i) {
@@ -121,6 +165,14 @@ int main(int argc,char **argv) {
     assert(found && !do_close(dir));
     int save=(int)do_open("/data/test-save",0x202,0644); assert(save>=3);
     assert(do_write(save,"save",4)==4 && !do_close(save));
+    save=(int)do_open("/data/test-save",0xa,0); assert(save>=3);
+    assert(do_lseek(save,0,0)==0 && do_write(save,"!",1)==1);
+    assert(do_lseek(save,0,1)==5 && do_lseek(save,-2,2)==3);
+#ifdef _WIN32
+    assert(do_pwrite(save,"a",1,1)==1 && do_lseek(save,0,1)==3);
+#endif
+    char ending[2]; assert(do_read(save,ending,2)==2 && !memcmp(ending,"e!",2));
+    assert(do_lseek(save,-6,2)==-EINVAL && do_lseek(save,0,1)==5 && !do_close(save));
     assert(!path_op("/data/test-save",2,0));
     assert(!unlink(link) && !unlink(source) && !rmdir(game));
     const char *dirs[]={"temp0","download0","data"};
