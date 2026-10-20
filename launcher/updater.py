@@ -179,6 +179,9 @@ def cleanup(root):
         return
     for name in ("old", "staged", ASSET, ASSET + ".part"):
         path = folder / name
+        # 20 Oct 2026 audit: a rollback that could not restore everything leaves the old items here.
+        if name == "old" and (path / "RESTORE-INCOMPLETE").exists():
+            continue
         if path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
         else:

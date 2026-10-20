@@ -92,14 +92,29 @@ def apply(root, staged, status):
                 shutil.copy2(staged / relative, target)
     except Exception:
         status("The update failed: restoring the installed version...")
+        # 20 Oct 2026 audit: every step has its own try, so one locked item no longer leaves the
+        # other old items in update\old for the next launcher start to delete.
+        failed = []
         for name in moved + added:
             if (root / name).exists() and (old / name).exists() or name in added:
-                retry(lambda: remove_item(root / name))
+                try:
+                    retry(lambda: remove_item(root / name))
+                except OSError as error:
+                    print(f"Could not remove {name}: {error}", file=sys.stderr, flush=True)
         for name in moved:
-            retry(lambda: (old / name).rename(root / name))
+            try:
+                retry(lambda: (old / name).rename(root / name))
+            except OSError as error:
+                failed.append(name)
+                print(f"Could not restore {name}: {error}", file=sys.stderr, flush=True)
         for relative in DEFAULTS:
-            if (old / Path(relative).name).is_file():
-                shutil.copy2(old / Path(relative).name, root / relative)
+            try:
+                if (old / Path(relative).name).is_file():
+                    shutil.copy2(old / Path(relative).name, root / relative)
+            except OSError as error:
+                print(f"Could not restore {relative}: {error}", file=sys.stderr, flush=True)
+        if failed:  # updater.cleanup keeps update\old while this marker exists
+            (old / "RESTORE-INCOMPLETE").write_text("\n".join(failed) + "\n", encoding="utf-8")
         raise
 
 
