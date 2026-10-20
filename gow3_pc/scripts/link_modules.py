@@ -190,7 +190,9 @@ def link(game, out, module_names=DEFAULT_MODULES, executable='eboot.bin'):
                 by_nid[(s['identity'][0], s['identity'][1][0])].append(entry_value)
                 count += 1
         fs_patched += patch_fs_loads(image, m['ph'], base)
-        table.append(dict(file=filename, base=base, size=modsize, init=base + m['tags'].get(12, 0),
+        if 12 not in m['tags']:
+            raise ValueError(f'{filename}: missing DT_INIT; cannot initialize module')
+        table.append(dict(file=filename, base=base, size=modsize, init=base + m['tags'][12],
                           tls_address=base + tls['vaddr'] if tls else 0, tls_memsz=tls['memsz'] if tls else 0,
                           tls_filesz=tls['filesz'] if tls else 0, tls_module=module_id,
                           tls_relocations=tls_relocations, exports=count, sha256=m['sha256']))
