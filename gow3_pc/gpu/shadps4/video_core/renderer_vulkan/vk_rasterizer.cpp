@@ -2505,10 +2505,9 @@ void Rasterizer::OnSubmit() {
     SyncSmallGpuWrites();
     texture_cache.ProcessDownloadImages();
     // Diagnostics: GOW3_RETEXTURE_FILE=<file>; creating it re-reads all CPU-sourced textures.
-    static const char* retexture = std::getenv("GOW3_RETEXTURE_FILE");
-    if (retexture && retexture[0] && std::filesystem::exists(retexture)) {
-        std::error_code ec;
-        std::filesystem::remove(retexture, ec);
+    // 20 Oct 2026 audit: polled off this thread; exists() here cost 25-50 ms per check (d026d97).
+    static const int retexture = Gow3TriggerFiles::Watch("GOW3_RETEXTURE_FILE");
+    if (Gow3TriggerFiles::Take(retexture)) {
         std::printf("Texture cache: %zu textures marked for re-upload\n", texture_cache.DebugInvalidateAll());
     }
     texture_cache.RunGarbageCollector();
