@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <pthread.h>
+#include <time.h>
 #include "runtime.h"
 #include "cpu_check.h"
 #include "orb_hook.h"
@@ -33,6 +35,75 @@
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #endif
+
+static char stdout_buffer[64*1024];
+#ifdef _WIN32
+static HANDLE stdout_wake, stdout_flushed, stdout_thread;
+static DWORD stdout_thread_id;
+static LONG stdout_stopping;
+static DWORD WINAPI flush_stdout_thread(LPVOID unused) {
+    (void)unused;
+    for (;;) {
+        DWORD wake=WaitForSingleObject(stdout_wake,250);
+        fflush(stdout);
+        if (wake==WAIT_OBJECT_0) SetEvent(stdout_flushed);
+        if (InterlockedCompareExchange(&stdout_stopping,0,0)) return 0;
+    }
+}
+static void flush_stdout_crash(void) {
+    /* 20 Oct audit: a fault while owning the CRT lock must not deadlock the crash reporter. */
+    if (!stdout_thread || GetCurrentThreadId()==stdout_thread_id) return;
+    ResetEvent(stdout_flushed);
+    SetEvent(stdout_wake);
+    WaitForSingleObject(stdout_flushed,500);
+}
+static void stop_stdout(void) {
+    InterlockedExchange(&stdout_stopping,1);
+    SetEvent(stdout_wake);
+    WaitForSingleObject(stdout_thread,INFINITE);
+    CloseHandle(stdout_thread); CloseHandle(stdout_wake); CloseHandle(stdout_flushed);
+    fflush(stdout);
+}
+#else
+static pthread_t stdout_thread;
+static int stdout_stopping;
+static void *flush_stdout_thread(void *unused) {
+    (void)unused;
+    while (!__atomic_load_n(&stdout_stopping,__ATOMIC_ACQUIRE)) {
+        struct timespec delay={0,250000000};
+        nanosleep(&delay,NULL);
+        fflush(stdout);
+    }
+    return NULL;
+}
+static void flush_stdout_crash(void) {
+    if (!ftrylockfile(stdout)) { fflush_unlocked(stdout); funlockfile(stdout); }
+}
+static void stop_stdout(void) {
+    __atomic_store_n(&stdout_stopping,1,__ATOMIC_RELEASE);
+    pthread_join(stdout_thread,NULL);
+    fflush(stdout);
+}
+#endif
+static void start_stdout(void) {
+    /* 20 Oct audit: unbuffered prints held the GPU command thread for 548 ms during a load. */
+    if (setvbuf(stdout,stdout_buffer,_IOFBF,sizeof(stdout_buffer))) exit(1);
+#ifdef _WIN32
+    stdout_wake=CreateEventA(NULL,FALSE,FALSE,NULL);
+    stdout_flushed=CreateEventA(NULL,FALSE,FALSE,NULL);
+    if (stdout_wake && stdout_flushed)
+        stdout_thread=CreateThread(NULL,0,flush_stdout_thread,NULL,0,&stdout_thread_id);
+    if (!stdout_thread) { fputs("Cannot start stdout flusher\n",stderr); exit(1); }
+#else
+    if (pthread_create(&stdout_thread,NULL,flush_stdout_thread,NULL)) exit(1);
+#endif
+    atexit(stop_stdout);
+}
+static __attribute__((noreturn)) void flushed_exit(int status) {
+    fflush(stdout);
+    _exit(status);
+}
+#define _exit flushed_exit
 
 typedef struct { uint64_t address, size, flags; } Segment;
 typedef struct { uint64_t target, kind, value, addend; } Reloc;
@@ -211,7 +282,7 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
         fprintf(stderr,"  #%d %s\n",depth,where);
         rbp=frame[0];
     }
-    fflush(NULL);
+    flush_stdout_crash();
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -623,7 +694,8 @@ static void fault(int sig, siginfo_t *info, void *context) {
             snprintf(line, sizeof(line), "  #%d %p\n", i, frames[i]);
         ssize_t written_=write(2, line, strlen(line)); (void)written_;
     }
-    _exit(128 + sig);
+    flush_stdout_crash();
+    _Exit(128 + sig);
 }
 #endif
 #ifndef _WIN32
@@ -670,7 +742,8 @@ static void watchdog(int sig, siginfo_t *info, void *context) {
             at+=d->reclen;
         }
     usleep(100000);
-    _exit(128 + sig);
+    flush_stdout_crash();
+    _Exit(128 + sig);
 }
 #endif
 /* param.sfo lookup: string or integer value of key, 0 when absent. */
@@ -1056,7 +1129,7 @@ void runtime_restart(void) {
 }
 
 int main(int argc, char **argv) {
-    setvbuf(stdout, NULL, _IONBF, 0);
+    start_stdout();
 #ifndef _WIN32
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
        non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */
