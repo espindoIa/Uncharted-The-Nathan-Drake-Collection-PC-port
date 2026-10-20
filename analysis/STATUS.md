@@ -2304,3 +2304,41 @@ Multithreading soak (current build with the trigger watcher): U3 chapter 3 Carta
 walking, looking and Cross (57 loops). No freeze, no hang report, no assert; lowest 5 s window
 48.2 FPS, worst frame 99.5 ms. The user's MT freezes were not reproduced. The installed build
 (19 Oct 14:05) is older than this one, so it is not known whether they happen on this build.
+
+## 20 October 2026: repo audit fixes
+
+Four fixes from an audit of the working tree. None changes the picture or the frame rate.
+
+1. Upscaler fallback saved over the player's choice (gpu/shim/gow3_settings.cpp,
+   SyncUpscalerFallback, called from ConfigureUpscalerSupport and ConfigureDlssSupport).
+   - Cause: when DLSS is missing (no nvngx_dlss.dll, or a driver without it) or FSR 4 is not
+     supported by the GPU, the runtime switches to FSR 3.1 for that launch. Closing the in-game menu
+     then ran Save(), which wrote upscaler=fsr3 into the ini.
+   - Failure case: a player with DLSS chosen starts once without the DLL; the next launch (DLL back)
+     still has FSR 3.1.
+   - Now the fallback also updates the snapshot Save() compares against (synced), so Save() keeps the file's upscaler value unless the player changes the upscaler in the menu.
+2. Settings files written in place (gow3_settings.cpp Save(); launcher write_text_safely and
+   write_config in launcher/uncharted_launcher.pyw; the upscaler=off write in
+   tools/probe_uncharted.py run_game).
+   - Cause: the file was opened for writing (truncated) and then filled. A kill or crash in
+     between, or the launcher and the in-game menu writing at once, left an empty or partial
+     probe-uN.ini, and the settings read back as defaults.
+   - Now: write a temp file, then replace (MoveFileExW with MOVEFILE_REPLACE_EXISTING in C++,
+     os.replace in Python). If Windows refuses the swap, the old in-place write is the fallback
+     ("Settings: cannot replace ...; writing in place" in the log).
+3. Kernel service thread lost wake-up (gpu/shim/gow3gpu.cpp, KernelServiceThread).
+   - Cause: asio_requests = 0 ran after io_context.run() returned. A timer request that arrived
+     between the return and the reset was cleared, so the equeue timer never fired.
+   - Failure case: a game thread waiting for that timer hangs. The reset now runs before run().
+   - Not shown that Uncharted hits this. Not reproduced.
+4. Update folder remembered for another title (tools/probe_uncharted.py, run_once).
+   - Cause: the launcher keeps the update folder (US 1.02) after the player switches to the EU
+     CUSA02344 copy. Applying it raised ValueError and the start ended with a traceback.
+   - Now the error is caught: the game starts without the update and logs "Update not used (...)".
+
+Verified: build ok.
+graphics-settings-test: PASS, with a new case (ini upscaler=dlss, DLSS unavailable, another key changed in the menu, Save() keeps upscaler=dlss and leaves no .tmp).
+That test no longer built (PresentLimit's signature, FPS limit and restart rules changed since the God of War 3 import); its stale asserts were updated to the current rules in a separate commit.
+
+Not verified: fix 3 and fix 4 were not exercised at run time (3 has no repro; 4 needs a mismatched
+update folder in the ini). Fixes 1 and 2 were not checked in a game session either.

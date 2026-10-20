@@ -6,6 +6,22 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork 0.5.0 "Expedition")
 
+- **Fixed: your upscaler choice is no longer overwritten when it cannot run.** If DLSS could not
+  start (no `nvngx_dlss.dll`, or a driver without it) or FSR 4 is not supported by the graphics
+  card, the game used FSR 3.1 for that launch, and closing the in-game menu saved FSR 3.1 as your
+  setting. The menu now keeps what you chose; the fallback lasts only for that launch.
+- **Fixed: settings no longer go back to defaults after a crash or a kill.** The launcher, the
+  start script and the in-game menu wrote the settings file in place, so ending the game or
+  launcher at the wrong moment (or both writing at once) could leave it empty or cut off. They
+  now write a temporary file and swap it in.
+- **Fixed: a possible hang in timers the game waits for.** A timer request that arrived at the
+  wrong instant could be dropped, so a game thread waiting for that timer never woke. Not shown to
+  happen in Uncharted and not reproduced; the request is now kept.
+- **Fixed: the game no longer fails to start with an update folder from another version.** After
+  switching copies (for example from the US 1.02 update to the Europe CUSA02344 copy), the old
+  update folder crashed the start with a ValueError. The game now starts without the update and
+  the log says "Update not used (...)".
+
 - **Fewer hitches from the port's diagnostic files.** With the performance log on (the default),
   the graphics threads looked on disk for four "trigger" files (frame capture, frame dump,
   readback and DMA switches) on every frame or game submission. While Windows was busy with
