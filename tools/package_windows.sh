@@ -82,11 +82,21 @@ echo "PkgTool and LibOrbisPkg 0.2.231 by Maxton, unchanged; source: https://gith
     > "$licenses/liborbispkg/SOURCE.txt"
 pacman=$(command -v pacman || echo "$msys/usr/bin/pacman")
 # Three pacman calls in all (one per DLL took minutes on the CI runner).
+# 20 Oct 2026 audit: a DLL no package owns used to be skipped silently (no license in THIRD-PARTY.txt)
+# and an empty list made -Ql/-Qi cover every installed package. -Qo prints one "<file> is owned by
+# <pkg> <ver>" line per owned file on stdout, and the unowned ones as errors on stderr.
 dlls=()
 for dll in "$stage"/gow3_pc/out/*.dll; do
     dlls+=("$(cygpath -m "$msys/clang64/bin/$(basename -- "$dll")")")
 done
-mapfile -t packages < <({ "$pacman" -Qqo "${dlls[@]}" 2>/dev/null || true; } | sort -u)
+owned=$("$pacman" -Qo "${dlls[@]}" 2>/dev/null || true)
+for dll in "${dlls[@]}"; do
+    # gow3_dlss.dll is built by this project (MIT bridge, licensed under licenses/gow3-dlss-bridge).
+    [[ $(basename -- "$dll") == gow3_dlss.dll ]] && continue
+    grep -qF -- "/$(basename -- "$dll") is owned by " <<< "$owned" || { echo "no MSYS2 package owns $(basename -- "$dll"): no license to ship" >&2; exit 1; }
+done
+mapfile -t packages < <(awk '/ is owned by /{print $(NF-1)}' <<< "$owned" | sort -u)
+[[ ${#packages[@]} -gt 0 ]] || { echo "no MSYS2 package owns any shipped DLL" >&2; exit 1; }
 { "$pacman" -Qlq "${packages[@]}" | grep '/share/licenses/.*[^/]$' || true; } | while read -r file; do
     name=${file#*/share/licenses/}
     mkdir -p "$licenses/msys2/$(dirname -- "$name")"
