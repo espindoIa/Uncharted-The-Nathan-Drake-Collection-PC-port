@@ -59,7 +59,8 @@ done <<< "$submodules"
 forbidden=$(cd "$dest" && find . -path ./.git -prune -o \( -iname eboot.bin -o -iname '*.elf' \
     -o -iname sce_sys -o -iname savedata -o -iname '*.log' -o -iname 'probe*.ini' -o -iname '*.pkg' \
     -o -iname '*.psarc' -o -iname '*.pak' -o -iname 'boot*.bin' -o -iname '*.spv' -o -iname '*.dmp' \
-    -o -iname 'content.bin' -o -iname 'entry.bin' -o -iname '*.sav' \) -print)
+    -o -iname 'content.bin' -o -iname 'entry.bin' -o -iname '*.sav' \
+    -o -iname window_icon.bmp \) -print)  # 20 Oct 2026 audit: generated from Sony's icon0.png
 if [[ -n $forbidden ]]; then
     echo "The export holds files that must not be pushed:" >&2
     echo "$forbidden" >&2
