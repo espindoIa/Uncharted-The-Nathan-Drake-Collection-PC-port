@@ -35,7 +35,7 @@ git -C gow3_pc ls-files -c | while read -r path; do
         packaging/windows/README*|packaging/windows/package.sh|packaging/windows/build_dlss.sh) continue ;;
         packaging/windows/make_icon.py|tests/test_launcher_*|tests/test_button_icons.py) continue ;;
         scripts/steam_shortcut.py|scripts/save_backup.py|tools/gow3_frame_map.py) continue ;;
-        tests/test_steam_shortcut.py|tests/test_mod_conflicts.py|tests/test_patches.py) continue ;;
+        tests/test_steam_shortcut.py) continue ;;
     esac
     grep -qxF -- "$path" <<< "$submodules" && continue
     [[ -f gow3_pc/$path ]] && copy "gow3_pc/$path"
