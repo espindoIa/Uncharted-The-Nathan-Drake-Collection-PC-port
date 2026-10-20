@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -465,6 +466,10 @@ KeyValues Current() {
 }
 
 void Save() {
+    // 20 Oct 2026 audit: the present thread (restart prompt) and the window thread (menu close)
+    // both save; unlocked they raced on `synced` and wrote the same .tmp.
+    static std::mutex save_mutex;
+    const std::lock_guard<std::mutex> lock(save_mutex);
     // Keys the in-game menu left alone since the game last read or wrote the file keep the
     // file's value: the launcher may have changed them while the game ran (it used to be
     // overwritten with the game's older value, e.g. a 165 FPS limit after choosing 60).
