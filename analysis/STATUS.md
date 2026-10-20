@@ -2244,3 +2244,63 @@ limit).
 
 Not verified: other GPUs (the power limit decides the sustained clock), other DLSS DLL versions,
 and the LDR path's picture.
+
+## 20 October 2026: freezes before cutscenes and with multithreading (U3), upstream's fixes
+
+User: "travamentos logo antes de uma cutscene" and freezes with multithreading in U3; check
+whether BilalReloaded's fixes apply.
+
+Upstream's fixes and this fork:
+- #52 (freezes of 1.6 s, up to 33 s under Proton, before cutscenes): every unmap rebuilt the whole
+  neighbouring view (carve_host, ~23 ms each). Upstream 0.4.0 maps guest ranges as views of at most
+  2 MiB. Merged here on 19 Oct at 15:31 (4ecc8fd), unchanged.
+- #51 (U3 permanent freeze with MT): compute RELEASE_MEM label written by the Vulkan recording
+  thread into a protected page. The fork already had the same fix (labels always through the
+  backing view) before the merge. Upstream's other step, MT off for U3, was not taken.
+- Upstream since 0.4.0 (0.4.1, kuraeow's job-sleep patch for another 1.02 build): nothing about
+  these freezes.
+
+The player's own logs (Uncharted\analysis\big3-ps4_Shipping):
+- The installed Uncharted.exe is from 19 Oct 14:05, before the 0.4.0 merge (15:31). So it does
+  not have #52's fix.
+- 19 Oct 15:17 session (attempts/boot-1792433849725852700): chapter 1 start, ~200 "mapped direct
+  memory" (1 MiB each) lines, then "Videodec2 FFmpeg decoder created" and a 1476.7 ms frame.
+- 20 Oct 08:42 session: gameplay at 120 FPS, 204 maps, then the movie and a 2069.0 ms frame.
+- Both match #52: the map/unmap burst the game makes before a movie.
+
+Current build, same cutscene (New Game, chapter 1 intro movie, player's settings, MT on):
+- "memory map time: 65 maps 17.8 ms, 63 unmaps 2.2 ms; Windows carves 129 (2.3 ms)".
+- Worst frame at the movie start 109.9 ms (was 1476.7 ms on the installed build).
+- Stall profile (GOW3_PROFILE_STALLS=1) of that frame: the GPU command, draw recording and Vulkan
+  recording threads idle; the game's flip thread in a guest cond_wait. The game waits for its own
+  movie start (decoder thread, first frames), not for the port's GPU work. Not reduced.
+
+Trigger files on the GPU threads (fixed):
+- Stall profiles in the bar fight and museum (current build, MT on, 4K) caught one
+  std::filesystem::exists of a missing trigger file taking 25-50 ms: readback.trigger on the GPU
+  command thread (OnSubmit, 50 of 62 samples in a 73 ms frame; 31 of 40 in a 65 ms frame) and
+  dma.trigger on the draw recording thread (25 of 31 in a 53 ms frame).
+- The launcher sets these for every player (diagnostics on): capture.trigger (exists on every
+  flip), dumps/trigger (a remove() on every presented frame), readback.trigger (every
+  submission), dma.trigger (every 500 ms).
+- gpu/shim/gow3_trigger_files.cpp: one thread polls them every 250 ms; the GPU threads read an
+  atomic flag. Test: trigger-files-test. In game: dma.trigger ("pointers 256") and
+  readback.trigger ("range clear") were taken and logged within a second.
+- Not verified: how much this removes without the profiler. The profiler suspends the sampled
+  threads every millisecond, which may lengthen such waits.
+
+Seen, not fixed:
+- One 880 ms frame during a level load: the GPU command thread waited 548 ms for the stdout lock
+  in a printf (stdout is unbuffered, probe.c). The holder was not sampled. It may be the profiler
+  suspending a thread that held the lock.
+- "Slow submit: 107.7 / 225.1 ms in the driver" during level loads (vkQueueSubmit in nvoglv64).
+- New shaders: the GPU command thread waits for the shader's capture (QueueShader
+  capture_job.Wait, 24 of 37 samples in a 64 ms frame) even with async compiles.
+- The hang watchdog fired once (hang-20261020-101453.txt) during a 46.7 s level load with
+  UNCHARTED_HANG_SECONDS=20: a load, not a freeze.
+
+Multithreading soak (current build with the trigger watcher): U3 chapter 3 Cartagena street
+(bench save), 4K, DLAA model M, 120 FPS cap, MT on, hang watchdog at 20 s; 15 min of scripted
+walking, looking and Cross (57 loops). No freeze, no hang report, no assert; lowest 5 s window
+48.2 FPS, worst frame 99.5 ms. The user's MT freezes were not reproduced. The installed build
+(19 Oct 14:05) is older than this one, so it is not known whether they happen on this build.

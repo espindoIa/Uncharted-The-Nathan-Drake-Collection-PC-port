@@ -10,6 +10,7 @@
 #include <mutex>
 
 #include "core/memory.h"
+#include "gow3_trigger_files.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/texture_cache/image_info.h"
 
@@ -168,23 +169,20 @@ void Write(VAddr presented) {
 void FrameCapture::OnFlip(VAddr presented_address) {
     last_presented.store(presented_address, std::memory_order_relaxed);
     flips.fetch_add(1, std::memory_order_release);
-    static const char* trigger = std::getenv("GOW3_CAPTURE_TRIGGER");
+    static const int trigger = Gow3TriggerFiles::Watch("GOW3_CAPTURE_TRIGGER");
     if (state.load(std::memory_order_relaxed) != Idle) {
         return;
     }
     bool arm = requested.exchange(false, std::memory_order_acq_rel);
-    if (!arm && trigger && std::filesystem::exists(trigger)) {
-        std::error_code ec;
-        // A number in the trigger file overrides GOW3_CAPTURE_PASSES for this capture.
-        if (FILE* f = std::fopen(trigger, "r")) {
-            long passes = 0;
-            if (std::fscanf(f, "%ld", &passes) == 1 && passes > 0) {
+    if (!arm) {
+        if (const auto text = Gow3TriggerFiles::Take(trigger)) {
+            // A number in the trigger file overrides GOW3_CAPTURE_PASSES for this capture.
+            const long passes = std::strtol(text->c_str(), nullptr, 10);
+            if (passes > 0) {
                 capture_passes_override.store(passes, std::memory_order_relaxed);
             }
-            std::fclose(f);
+            arm = true;
         }
-        std::filesystem::remove(trigger, ec);
-        arm = true;
     }
     if (arm) {
         state.store(Armed, std::memory_order_release);

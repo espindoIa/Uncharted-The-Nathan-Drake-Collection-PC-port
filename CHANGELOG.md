@@ -6,6 +6,12 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork 0.5.0 "Expedition")
 
+- **Fewer hitches from the port's diagnostic files.** With the performance log on (the default),
+  the graphics threads looked on disk for four "trigger" files (frame capture, frame dump,
+  readback and DMA switches) on every frame or game submission. While Windows was busy with
+  files, one look could hold the frame for 25-50 ms (measured in Uncharted 3). One background
+  thread now looks for them four times a second; writing a trigger file works as before.
+
 - **New Ultra Quality upscaling mode, between DLAA and Quality.** The scene is drawn at 71% of
   the width and height (2742x1542 for 4K), and DLSS or FSR rebuild the full picture. In
   Uncharted 3 at 4K with DLSS model M: about 24% faster than DLAA (68.6 -> 85.2 FPS in the bar

@@ -14,6 +14,7 @@
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "gow3_toggles.h"
+#include "gow3_trigger_files.h"
 #include "gow3_watch_range.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
@@ -2599,24 +2600,9 @@ void Rasterizer::SyncDmaMemory(const Shader::Info* stage) {
         return true;
     }();
     (void)init;
-    static const char* trigger = std::getenv("GOW3_DMA_TRIGGER");
-    static auto last_poll = std::chrono::steady_clock::now();
-    const auto now = std::chrono::steady_clock::now();
-    if (trigger && trigger[0] && now - last_poll > std::chrono::milliseconds(500)) {
-        last_poll = now;
-        if (std::filesystem::exists(trigger)) {
-            std::string text;
-            if (FILE* f = std::fopen(trigger, "r")) {
-                char line[64]{};
-                if (std::fgets(line, sizeof(line), f)) {
-                    text = line;
-                }
-                std::fclose(f);
-            }
-            std::error_code ec;
-            std::filesystem::remove(trigger, ec);
-            parse(text);
-        }
+    static const int trigger = Gow3TriggerFiles::Watch("GOW3_DMA_TRIGGER");
+    if (const auto text = Gow3TriggerFiles::Take(trigger)) {
+        parse(*text);
     }
     static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
     const u64 bytes_before = Gow3Stats::buffer_upload_bytes.load(std::memory_order_relaxed);
@@ -2747,18 +2733,9 @@ bool Rasterizer::ReadBackEopResults() {
 
 void Rasterizer::SyncSmallGpuWrites() {
     buffer_cache.PollReadbacks();
-    static const char* trigger = std::getenv("GOW3_READBACK_TRIGGER");
-    if (trigger && trigger[0] && std::filesystem::exists(trigger)) {
-        std::string text;
-        if (FILE* f = std::fopen(trigger, "r")) {
-            char line[128]{};
-            if (std::fgets(line, sizeof(line), f)) {
-                text = line;
-            }
-            std::fclose(f);
-        }
-        std::error_code ec;
-        std::filesystem::remove(trigger, ec);
+    static const int trigger = Gow3TriggerFiles::Watch("GOW3_READBACK_TRIGGER");
+    if (const auto taken = Gow3TriggerFiles::Take(trigger)) {
+        const std::string& text = *taken;
         if (text.starts_with("auto")) {
             sync_gpu_constants = true;
             std::printf("GPU constants sync: on\n");
