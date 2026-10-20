@@ -6,6 +6,18 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork 0.5.0 "Expedition")
 
+- **Fixed: a failed update no longer loses the installed version when your antivirus holds a
+  file.** If an update failed and the antivirus kept one of the new files locked for 15 seconds,
+  the installer gave up restoring the old files, and the next launcher start deleted the folder
+  that held them (including your `nvngx_dlss.dll`). Each item is now restored on its own. If one
+  cannot be restored, the old files stay in `update\old` with a `RESTORE-INCOMPLETE` file that
+  lists them, so you can copy them back. Starting another update still clears that folder.
+- **Diagnostic modes no longer freeze or stall the game.** With `GOW3_PROFILE_STALLS=1` the
+  profiler could deadlock the game while it recorded a sample, and `GOW3_RETEXTURE_FILE` looked
+  for its trigger file on every game submission (25-50 ms stalls, as in the entry below). The
+  sample is now stored after the game thread resumes, and the trigger file is checked by the
+  background thread. Only matters if you set these variables.
+
 - **Fixed: your upscaler choice is no longer overwritten when it cannot run.** If DLSS could not
   start (no `nvngx_dlss.dll`, or a driver without it) or FSR 4 is not supported by the graphics
   card, the game used FSR 3.1 for that launch, and closing the in-game menu saved FSR 3.1 as your

@@ -2342,3 +2342,34 @@ That test no longer built (PresentLimit's signature, FPS limit and restart rules
 
 Not verified: fix 3 and fix 4 were not exercised at run time (3 has no repro; 4 needs a mismatched
 update folder in the ini). Fixes 1 and 2 were not checked in a game session either.
+
+### Fixes 5-8
+
+5. Profiler deadlock (gpu/shim/gow3_profiler.cpp, sampler loop in Start, GOW3_PROFILE_STALLS=1).
+   - Cause: in stall mode the sampler pushed into the `recent` std::deque (allocates, frees blocks)
+     while the sampled GPU thread was suspended.
+   - Failure case: the suspended thread held the CRT heap lock; the sampler waited for the same
+     lock and the game froze for good.
+   - Now the stack walk stays inside the suspend window, and the deque is filled after
+     ResumeThread. Diagnostic mode only.
+6. Dead test (gow3_pc/tests/test_save_backup.py, deleted).
+   - It imported save_backup, removed in 2872d75, so it failed on import. No behaviour change.
+7. Retexture trigger on the GPU thread (gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp,
+   Rasterizer::OnSubmit, GOW3_RETEXTURE_FILE).
+   - Cause: std::filesystem::exists on every GPU submission, the 25-50 ms stall class of d026d97.
+   - Now Gow3TriggerFiles::Watch/Take: the trigger-file thread polls it. Only when the variable is
+     set.
+8. Updater rollback (tools/apply_update.py apply; launcher/updater.py cleanup).
+   - Cause: in the failure path, one retry(remove_item) that raised after 15 s (antivirus lock on a
+     new item) aborted the handler before the restore loop ran.
+   - Failure case: the old items stayed in update\old, and the next launcher start deleted that
+     folder (cleanup), losing the installed version and the player's nvngx_dlss.dll.
+   - Now each remove and each restore has its own try. Items not restored are listed in
+     update\old\RESTORE-INCOMPLETE, and cleanup skips update\old while that file exists.
+   - Known limit: the next update start still clears update\old (rmtree at the top of apply()).
+
+Verified: build ok. gow3_pc/tests/test_apply_update.py passes (2 tests: rollback with a locked item
+restores the other item and writes the marker; cleanup keeps update\old only with the marker).
+
+Not verified: a profiler run with GOW3_PROFILE_STALLS (the deadlock is timing-dependent, not
+reproduced), the retexture trigger in game, a real failed update on a live install.
