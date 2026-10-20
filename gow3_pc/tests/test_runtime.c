@@ -4,6 +4,8 @@
 
 /* The settings menu of the GPU library restarts through probe.c, which tests do not link. */
 void runtime_restart(void) { abort(); }
+/* The executable-write diagnostic lives in probe.c; tests never enable it. */
+void runtime_exec_watch_retarget(uint64_t address) { (void)address; }
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -219,8 +221,7 @@ static void memory_primitives(void) {
 }
 
 static HandleOp rw_read, rw_write, rw_tryread, rw_trywrite, rw_unlock, rw_destroy;
-typedef struct { int64_t seconds, nanoseconds; } TestTime;
-typedef int32_t (ABI *TimedLock)(void **, const TestTime *);
+typedef int32_t (ABI *TimedLock)(void **, uint32_t);
 static void rw_setup(void) {
     rw_read=GET(HandleOp,"Ox9i0c7L5w0#libkernel"); rw_write=GET(HandleOp,"mqdNorrB+gI#libkernel");
     rw_tryread=GET(HandleOp,"XD3mDeybCnk#libkernel"); rw_trywrite=GET(HandleOp,"bIHoZCTomsI#libkernel");
@@ -315,17 +316,94 @@ static void rw_timeouts(void) {
     RwFixture f={0}; fixture_init(&f);
     pthread_t writer; assert(pthread_create(&writer,NULL,holding_writer,&f)==0);
     barrier(&f.ready);
-    TestTime expired={0,0},invalid={0,1000000000};
-    assert((uint32_t)read_timed(&f.lock,&expired)==0x8002003c);
-    assert((uint32_t)write_timed(&f.lock,&expired)==0x8002003c);
-    assert((uint32_t)read_timed(&f.lock,&invalid)==0x80020016);
+    /* 20 Oct 2026 audit: timed rwlocks take relative microseconds, including zero. */
+    assert((uint32_t)read_timed(&f.lock,0)==0x8002003c);
+    assert((uint32_t)write_timed(&f.lock,0)==0x8002003c);
+    assert((uint32_t)read_timed(&f.lock,1000)==0x8002003c);
+    assert((uint32_t)write_timed(&f.lock,1000)==0x8002003c);
     assert((uint32_t)rw_unlock(&f.lock)==0x80020001);
     barrier(&f.release); assert(pthread_join(writer,NULL)==0);
-    assert(read_timed(&f.lock,&invalid)==0); /* available lock ignores deadline */
+    assert(read_timed(&f.lock,0)==0);
+    assert(rw_unlock(&f.lock)==0);
+    assert(write_timed(&f.lock,0)==0);
+    assert(rw_unlock(&f.lock)==0);
+    assert(read_timed(&f.lock,1000)==0);
+    assert(rw_unlock(&f.lock)==0);
+    assert(write_timed(&f.lock,1000)==0);
     assert(rw_unlock(&f.lock)==0);
     fixture_destroy(&f);
 }
+typedef int32_t (ABI *KeyCreate)(uint32_t *,void (ABI *)(void *));
+typedef int32_t (ABI *KeyDelete)(uint32_t);
+typedef int32_t (ABI *KeySet)(uint32_t,void *);
+typedef void *(ABI *KeyGet)(uint32_t);
+typedef void *(ABI *ThreadEntry)(void *);
+typedef int32_t (ABI *ThreadCreate)(void **,void **,ThreadEntry,void *,const char *);
+typedef int32_t (ABI *ThreadJoin)(void *,void **);
+static uint32_t reused_key;
+static int destructor_calls;
+static pthread_barrier_t key_ready, key_recreated;
+static ABI void key_destructor(void *value) { assert(value==(void *)123); ++destructor_calls; }
+static ABI void *key_worker(void *unused) {
+    (void)unused;
+    assert(GET(KeySet,"+BzXYkqYeLE#libkernel")(reused_key,(void *)123)==0);
+    barrier(&key_ready); barrier(&key_recreated);
+    return GET(KeyGet,"eoht7mQOCmo#libkernel")(reused_key);
+}
+static ABI void *live_key_worker(void *unused) {
+    (void)unused;
+    assert(GET(KeySet,"+BzXYkqYeLE#libkernel")(reused_key,(void *)123)==0);
+    assert(GET(KeyGet,"eoht7mQOCmo#libkernel")(reused_key)==(void *)123);
+    return NULL;
+}
+static void key_reuse(void) {
+    /* 20 Oct 2026 audit: another thread's deleted value must not survive slot reuse or exit. */
+    KeyCreate create=GET(KeyCreate,"geDaqgH9lTg#libkernel");
+    KeyDelete delete=GET(KeyDelete,"PrdHuuDekhY#libkernel");
+    assert(pthread_barrier_init(&key_ready,NULL,2)==0);
+    assert(pthread_barrier_init(&key_recreated,NULL,2)==0);
+    assert(create(&reused_key,key_destructor)==0);
+    uint32_t old_key=reused_key;
+    void *thread=NULL,*value=(void *)1;
+    assert(GET(ThreadCreate,"6UgtwV+0zb4#libkernel")(&thread,NULL,key_worker,NULL,"key-reuse")==0);
+    barrier(&key_ready);
+    assert(delete(old_key)==0 && create(&reused_key,key_destructor)==0 && reused_key==old_key);
+    barrier(&key_recreated);
+    assert(GET(ThreadJoin,"onNY9Byn-W8#libkernel")(thread,&value)==0);
+    assert(value==NULL && destructor_calls==0);
+    assert(GET(ThreadCreate,"6UgtwV+0zb4#libkernel")(&thread,NULL,live_key_worker,NULL,"key-live")==0);
+    assert(GET(ThreadJoin,"onNY9Byn-W8#libkernel")(thread,NULL)==0 && destructor_calls==1);
+    assert(delete(reused_key)==0);
+    assert(pthread_barrier_destroy(&key_ready)==0 && pthread_barrier_destroy(&key_recreated)==0);
+}
+static void memory_protection(int overflow) {
+    /* 20 Oct 2026 audit: round the interval's end, and reject both addition and rounding overflow. */
+    typedef int32_t (ABI *Protect)(const void *,uint64_t,int);
+    typedef int32_t (ABI *Query)(void *,void **,void **,uint32_t *);
+    Protect protect=GET(Protect,"vSMAm3cxYTY#libkernel");
+    Query query=GET(Query,"WFcfL2lzido#libkernel");
+    int64_t physical=-1;
+    assert(GET(Allocate,"rTXw65xmLIA#libkernel")(0,536870912,0xc000,0,0,&physical)==0);
+    void *base=NULL,*start=NULL,*end=NULL;
+    assert(GET(Map,"L-Q3LEjIbgA#libkernel")(&base,0xc000,3,0,physical,0)==0);
+    if (overflow) {
+        assert((uint32_t)protect(base,UINT64_MAX,3)==0x80020016);
+        assert((uint32_t)protect(base,UINTPTR_MAX-(uintptr_t)base,3)==0x80020016);
+    } else {
+        assert(protect((char *)base+0x3000,0x2000,1)==0);
+        uint32_t prot=0;
+        assert(query((char *)base+0x7000,&start,&end,&prot)==0);
+        assert(start==base && end==(char *)base+0x8000 && prot==1);
+        assert(query((char *)base+0x8000,&start,&end,&prot)==0 && prot==3);
+    }
+    assert(GET(Unmap,"cQke9UuBQOk#libkernel")(base,0xc000)==0);
+    assert(GET(Release,"MBuItvba6z8#libkernel")(physical,0xc000)==0);
+}
 int main(int argc,char **argv) {
+#ifdef _WIN32
+    _set_error_mode(_OUT_TO_STDERR);
+    _set_abort_behavior(0,_WRITE_ABORT_MSG|_CALL_REPORTFAULT);
+#endif
     runtime_start(0); assert(runtime_resolve("bzQExy189ZI#libc",0)==0);
     runtime_start(1);
     assert(runtime_resolve("bzQExy189ZI#wrong#module",0)==0);
@@ -355,8 +433,12 @@ int main(int argc,char **argv) {
     if (argc>1 && !strcmp(argv[1],"--rwlock-lifecycle")) { rw_lifecycle(); return 0; }
     if (argc>1 && !strcmp(argv[1],"--rwlock-concurrency")) { rw_concurrency(); return 0; }
     if (argc>1 && !strcmp(argv[1],"--rwlock-timeouts")) { rw_timeouts(); return 0; }
+    if (argc>1 && !strcmp(argv[1],"--key-reuse")) { key_reuse(); return 0; }
+    if (argc>1 && !strcmp(argv[1],"--mprotect-range")) { memory_protection(0); return 0; }
+    if (argc>1 && !strcmp(argv[1],"--mprotect-overflow")) { memory_protection(1); return 0; }
     libc_support(); posix_mutexes(); wall_time(); exit_handlers(); guards(); mutexes(); direct_memory(); memory_primitives();
     rw_lifecycle(); rw_concurrency(); rw_timeouts();
+    key_reuse(); memory_protection(0); memory_protection(1);
     puts("PASS: callback lifecycle, guard ABI, mutex errors, shared direct memory, memory primitives, resolver scope");
     return 0;
 }

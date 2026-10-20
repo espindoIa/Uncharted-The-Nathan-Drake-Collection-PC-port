@@ -744,7 +744,9 @@ static void note_protect(uintptr_t start, uint64_t size, int old_prot, int prot,
 }
 static uintptr_t protect_caller;
 static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type) {
-    uintptr_t end=start+align_up(size,PAGE);
+    /* 20 Oct 2026 audit: round the original interval's end without wrapping either addition. */
+    if (size>UINTPTR_MAX-start || start+size>UINTPTR_MAX-(PAGE-1)) return INVALID;
+    uintptr_t end=align_up(start+size,PAGE);
     start&=~(uintptr_t)(PAGE-1);
     if ((prot & ~0x37) || !covered(start,end,0)) return INVALID;
     /* An unchanged protection is a no-op: the host pages keep their GPU-tracking protection and
