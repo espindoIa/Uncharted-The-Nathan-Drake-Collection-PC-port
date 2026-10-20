@@ -173,8 +173,9 @@ static int resolve(const char *guest,char *out,size_t size,int base_only) {
     char buffer[1024];
     if (guest[0]!='/') snprintf(buffer,sizeof(buffer),"/app0/%s",guest);
     else snprintf(buffer,sizeof(buffer),"%s",guest);
+    /* 20 Oct 2026 audit: both Windows separators delimit parent traversal components. */
     for (const char *p=buffer;(p=strstr(p,".."));p+=2)
-        if ((p==buffer || p[-1]=='/') && (p[2]==0 || p[2]=='/')) return EACCES;
+        if ((p==buffer || p[-1]=='/' || p[-1]=='\\') && (p[2]==0 || p[2]=='/' || p[2]=='\\')) return EACCES;
     pthread_mutex_lock(&lock);
     size_t best=0; const Mount *m=NULL;
     for (size_t i=0;i<mount_count;++i) {

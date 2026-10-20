@@ -9,7 +9,7 @@ uintptr_t runtime_lookup(const RuntimeExport *table,size_t n,const char *name) {
     return 0;
 }
 int main(void) {
-    char root[]="/tmp/gow3-mod-files-XXXXXX";
+    char root[]="gow3-mod-files-XXXXXX";
     assert(mkdtemp(root));
     char game[512],user[512],source[512],link[512];
     snprintf(game,sizeof(game),"%s/game",root);
@@ -18,8 +18,21 @@ int main(void) {
     snprintf(link,sizeof(link),"%s/game/asset.dcx",root);
     assert(!mkdir(game,0755));
     FILE *f=fopen(source,"w"); assert(f); assert(fputs("modded",f)>=0); assert(!fclose(f));
-    assert(!symlink(source,link));
+#ifdef _WIN32
+    /* Windows has no POSIX symlink API; hard links exercise the same linked asset reads. */
+    assert(CreateHardLinkA(link,source,NULL));
+#else
+    char absolute[PATH_MAX]; assert(realpath(source,absolute));
+    assert(!symlink(absolute,link));
+#endif
     runtime_file_configure(game,user);
+    /* 20 Oct 2026 audit: Windows separators must not let guest writes escape a mount. */
+    const char *escapes[]={"/data/..\\outside", "/data/sub\\../outside", "/data/sub\\..\\outside", "/data/..\\..\\..\\Users\\x\\file"};
+    for (size_t i=0;i<sizeof(escapes)/sizeof(*escapes);++i) {
+        char host[1024];
+        assert(resolve(escapes[i],host,sizeof(host),0)==EACCES);
+        assert(do_open(escapes[i],0x202,0644)==-EACCES);
+    }
     for (int i=0;i<3;++i) {
         const char *path=i==0 ? "/app0/asset.dcx" : i==1 ? "/hostapp/asset.dcx" : "asset.dcx";
         int fd=(int)do_open(path,0,0); assert(fd>=3);
