@@ -162,6 +162,9 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.rcas = i != 0;
     } else if (key == "rcas_strength") {
         v.rcas_strength = Gow3Graphics::ParseRcasStrength(value.empty() ? -1 : i);
+    } else if (key == "anisotropy") {
+        // 0 = the game's own; any other value snaps down to 2, 4, 8 or 16 (1 is the game's own too).
+        v.anisotropy = value.empty() ? 16 : i >= 16 ? 16 : i >= 8 ? 8 : i >= 4 ? 4 : i >= 2 ? 2 : 0;
     } else if (key == "frames_queued") {
         v.frames_queued = Gow3Graphics::ParseFramesQueued(value.empty() ? -1 : i);
     } else if (key == "render_resolution") {
@@ -274,7 +277,7 @@ void Load() {
         {"GOW3_ASYNC_SHADERS", "async_shaders"},      {"GOW3_DEFERRED_READBACK", "deferred_readback"},
         {"GOW3_STALE_READBACK", "stale_readback"},     {"GOW3_FSR1", "fsr1"},
         {"GOW3_RCAS", "rcas"},                        {"GOW3_FRAMES_AHEAD", "frames_queued"},
-        {"GOW3_DLSS_MODEL", "dlss_model"},
+        {"GOW3_DLSS_MODEL", "dlss_model"},            {"GOW3_ANISOTROPY", "anisotropy"},
         {"GOW3_PAD_MAP", "pad_map"},                  {"GOW3_KEY_MAP", "key_map"},
         {"GOW3_MOUSE_MAP", "mouse_map"},              {"GOW3_MOUSE", "mouse"},
         {"GOW3_MOUSE_SENS", "mouse_sens"},            {"GOW3_MOUSE_INVERT", "mouse_invert"},
@@ -423,7 +426,7 @@ KeyValues Current() {
                  v.reactive_scale.load(), v.reactive_threshold.load(), v.reactive_max.load(),
                  v.debug_view.load(), int(v.show_fps.load()),
                  int(v.fsr4_auto_exposure.load()), int(v.fsr4_invert_jitter.load()));
-    Append(text, "dlss_model=%s\n", DlssModelName(v.dlss_model));
+    Append(text, "dlss_model=%s\nanisotropy=%d\n", DlssModelName(v.dlss_model), v.anisotropy.load());
     Append(text, "output_res=%dx%d\n", OutputWidths[v.output_res], OutputHeights[v.output_res]);
     Append(text,
                  "overlay_fps=%d\noverlay_frametime=%d\noverlay_upscaler=%d\noverlay_gpu=%d\n"

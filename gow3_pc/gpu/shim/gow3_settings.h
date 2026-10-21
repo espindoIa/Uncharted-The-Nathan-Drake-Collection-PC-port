@@ -83,6 +83,9 @@ struct Values {
     std::atomic<bool> fsr1{false};
     std::atomic<bool> rcas{true};
     std::atomic<int> rcas_strength{75};
+    /// gow3 21 Oct 2026: anisotropic filtering forced on scene samplers (0 = the game's own, 2, 4,
+    /// 8 or 16 times). Live; Rasterizer::ForceAnisotropy.
+    std::atomic<int> anisotropy{16};
     /// Set by the presenter: sharpening ran on the last frame (it needs FSR 1 when the game's
     /// image is smaller than the window).
     std::atomic<bool> rcas_applied{false};

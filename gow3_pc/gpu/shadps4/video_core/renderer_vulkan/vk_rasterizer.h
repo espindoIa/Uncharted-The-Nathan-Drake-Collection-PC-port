@@ -316,6 +316,7 @@ private:
     bool BindResources(const Pipeline* pipeline);
     void BindSamplers(const Shader::Info& stage, const PreparedStage* prepared,
                       Shader::Backend::Bindings& binding, u32& write_index);
+    void ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const;
     /// gow3: a stage's resolved textures remembered by its prepared T# hashes
     /// (TextureSetMemo): a hit only redoes the per-draw effects (binding flags, transitions).
     struct TextureSetEntry {
@@ -701,6 +702,10 @@ private:
     void CheckRingReuse(VAddr address, const u8* copy, u64 size);
     u64 proxy_samples = 0; ///< texture bindings that read a scene proxy (statistics)
     float sampler_lod_bias = 0.0f; ///< gow3: extra bias of this draw's samplers
+    /// gow3 21 Oct 2026: anisotropy forced on this draw's mipmapped linear samplers (2-16), 0 = the
+    /// game's own. Set per BindResources call, like the bias, because the setting is live.
+    u32 sampler_forced_aniso = 0;
+    bool sampler_graphics = false; ///< this BindResources call is a graphics draw's
     bool scene_debug_frame = false; ///< GOW3_SCENE_DEBUG: this frame's passes are printed
     bool PendingWriteOverlaps(VAddr address, u64 size);
     void PrunePendingLabels();

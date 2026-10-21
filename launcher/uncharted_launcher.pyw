@@ -151,7 +151,7 @@ FPS_LIMITS = [(30, "30"), (40, "40"), (45, "45"), (50, "50"), (55, "55"), (60, "
 INI_DEFAULTS = {
     "display_mode": "windowed", "vsync": "1", "fps_limit": "60", "frames_queued": "1",
     "async_shaders": "1", "fsr1": "0", "rcas": "1", "rcas_strength": "75", "show_fps": "1",
-    "upscaler": "off", "preset": "0", "dlss_model": "k", "gpu_id": "-1",
+    "upscaler": "off", "preset": "0", "dlss_model": "k", "gpu_id": "-1", "anisotropy": "16",
 }
 # FSR/DLSS quality modes (the runtime's preset key, also in the in-game menu): 0 draws the scene at
 # the render resolution (Native AA / DLAA); the others draw it smaller and rebuild it at the render
@@ -1927,6 +1927,10 @@ class Launcher:
                              value, self.change_sharpening, self.f_small)
         self.widgets["sharpening"] = self.row(page, "Sharpening", "Makes the final picture crisper (AMD FidelityFX RCAS).",
                                               sharpening)
+        self.ini_choice(page, "anisotropy", "Texture filtering",
+                        "Sharper textures on floors and walls seen at an angle (anisotropic filtering). Game's is "
+                        "how the PS4 drew them.",
+                        [("0", "Game's"), ("4", "4x"), ("8", "8x"), ("16", "16x")], recommended="16")
         self.ini_toggle(page, "show_fps", "Show FPS counter", "Shows the frame rate in a corner of the screen.")
         gpus = vulkan_gpus()
         if len(gpus) > 1:

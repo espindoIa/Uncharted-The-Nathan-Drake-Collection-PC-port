@@ -472,6 +472,15 @@ void ImageTab() {
         ImGui::EndDisabled();
         ImGui::EndTable();
     }
+    ImGui::SeparatorText("Textures");
+    if (BeginRows("##textures")) {
+        static const char* const aniso_labels[] = {"Game's", "2x", "4x", "8x", "16x"};
+        static constexpr int aniso_values[] = {0, 2, 4, 8, 16};
+        ChoiceRow("Texture filtering", s.anisotropy, aniso_labels, aniso_values, int(std::size(aniso_values)),
+                  "Sharper textures on floors and walls seen at an angle (anisotropic filtering). Game's is "
+                  "how the PS4 drew them. Applied on the next draw.");
+        ImGui::EndTable();
+    }
     ImGui::SeparatorText("Draw distance (experimental)");
     if (BeginRows("##draw_distance")) {
         if (!runtime_gamesettings_active()) {

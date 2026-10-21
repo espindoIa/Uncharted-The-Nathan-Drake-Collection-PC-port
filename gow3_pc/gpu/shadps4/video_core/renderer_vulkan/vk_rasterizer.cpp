@@ -13,6 +13,7 @@
 
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
+#include "gow3_settings.h"
 #include "gow3_toggles.h"
 #include "gow3_trigger_files.h"
 #include "gow3_watch_range.h"
@@ -3494,6 +3495,18 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
             std::printf("Upscaler: scene texture LOD bias %.2f\n", sampler_lod_bias);
         }
     }
+    // gow3 21 Oct 2026: the anisotropy setting is live (menu), so it is read per call; compute
+    // dispatches keep the game's samplers. The forced S# changes the sampler cache's key, so no
+    // descriptor memo holds an old sampler (the texture set memos remember images only).
+    sampler_graphics = !pipeline->IsCompute();
+    sampler_forced_aniso = 0;
+    if (sampler_graphics && instance.IsAnisotropicFilteringSupported() &&
+        !Gow3Toggle::Disabled2(Gow3Toggle::ForcedAniso)) {
+        const int wanted = Gow3Settings::Get().anisotropy.load(std::memory_order_relaxed);
+        const u32 forced = static_cast<u32>(
+            std::clamp(wanted, 0, static_cast<int>(instance.MaxSamplerAnisotropy())));
+        sampler_forced_aniso = forced >= 2 ? forced : 0;
+    }
 
     bool uses_dma = false;
     const Shader::Info* dma_stage = nullptr;
@@ -5106,6 +5119,7 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
         const auto& sampler = stage.samplers[sampler_index];
         auto ssharp =
             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
+        ForceAnisotropy(ssharp, sampler.is_depth);
         const auto vk_sampler = texture_cache.GetSampler(
             ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias);
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
@@ -5117,6 +5131,43 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
         set_write.descriptorType = vk::DescriptorType::eSampler;
         set_write.pImageInfo = &image_infos.back();
     }
+}
+
+// gow3 21 Oct 2026 (ported from the Bloodborne PC port, same core): the PS4 builds sample most scene
+// textures with little or no anisotropic filtering. Behind the temporal upscaler the output shows
+// the detail of the output's mip level, and surfaces seen at a grazing angle (floors, walls along
+// the view) stay blurred. Only mipmapped linear samplers of graphics draws are raised; depth
+// compares, point filters and unmipped samplers (UI, post-processing) keep the game's setup.
+void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
+    if (sampler_graphics && !is_depth) {
+        // The game's filters, once per kind: min filter, mip filter, ratio (evidence of what the
+        // games ask for, logged whether or not the setting raises them).
+        static std::atomic<u64> seen{0};
+        const u32 kind = u32(sharp.xy_min_filter.Value()) * 3 * 5 + u32(sharp.mip_filter.Value()) * 5 +
+                         u32(sharp.max_aniso.Value());
+        if (kind < 64 && !(seen.fetch_or(1ull << kind) & (1ull << kind))) {
+            std::printf("Sampler: game uses min filter %u, mip filter %u, anisotropy %.0fx\n",
+                        u32(sharp.xy_min_filter.Value()), u32(sharp.mip_filter.Value()), sharp.MaxAniso());
+        }
+    }
+    const u32 forced = sampler_forced_aniso;
+    if (forced < 2 || is_depth || sharp.mip_filter == AmdGpu::MipFilter::None ||
+        (sharp.xy_min_filter != AmdGpu::Filter::Bilinear &&
+         sharp.xy_min_filter != AmdGpu::Filter::AnisoLinear)) {
+        return;
+    }
+    if (AmdGpu::IsAnisoFilter(sharp.xy_min_filter) && sharp.MaxAniso() >= static_cast<float>(forced)) {
+        return;
+    }
+    const auto ratio = forced >= 16  ? AmdGpu::AnisoRatio::Sixteen
+                       : forced >= 8 ? AmdGpu::AnisoRatio::Eight
+                       : forced >= 4 ? AmdGpu::AnisoRatio::Four
+                                     : AmdGpu::AnisoRatio::Two;
+    sharp.xy_min_filter.Assign(AmdGpu::Filter::AnisoLinear);
+    if (sharp.xy_mag_filter == AmdGpu::Filter::Bilinear) {
+        sharp.xy_mag_filter.Assign(AmdGpu::Filter::AnisoLinear);
+    }
+    sharp.max_aniso.Assign(ratio);
 }
 
 Rasterizer::BeginSignature Rasterizer::MakeBeginSignature(const GraphicsPipeline* pipeline) const {
