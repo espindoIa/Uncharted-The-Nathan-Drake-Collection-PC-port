@@ -209,6 +209,9 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
 void TileManager::RecordTilingDispatch(vk::Pipeline pipeline, const vk::DescriptorBufferInfo& tiled,
                                        const vk::DescriptorBufferInfo& linear,
                                        const vk::DescriptorBufferInfo& params, u32 dim_x) {
+    if (!pipeline || dim_x == 0) {
+        return;
+    }
     // gow3 19 Oct 2026, from Supermedo/uncharted_pc #94: large textures need more work groups
     // than a dispatch may have on some GPUs (Vulkan guarantees 65535; RADV, Intel); they are
     // dispatched in pieces, each starting at its first group (the shader sees the same
@@ -267,7 +270,9 @@ void TileManager::RecordTilingDispatch(vk::Pipeline pipeline, const vk::Descript
 
 std::pair<const Buffer*, u64> TileManager::DetileImage(const VideoCore::Buffer* in_buffer,
                                                        u64 in_offset, const ImageInfo& info) {
-    if (!info.props.is_tiled) {
+    // gow3 21 Oct 2026 (Bloodborne port): garbage formats with under 8 bits per element divided by
+    // zero in dim_x below; they stay linear.
+    if (!info.props.is_tiled || info.num_bits < 8 || info.guest_size == 0) {
         return {in_buffer, in_offset};
     }
     Gow3Stats::Timer timer{Gow3Stats::t_detile};
@@ -321,7 +326,8 @@ std::pair<const Buffer*, u64> TileManager::DetileImage(const VideoCore::Buffer* 
 void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
                             const VideoCore::Buffer* out_buffer, u64 out_offset) {
     const auto& info = in_image.info;
-    if (!info.props.is_tiled) {
+    // Same guard as DetileImage.
+    if (!info.props.is_tiled || info.num_bits < 8 || info.guest_size == 0) {
         for (auto& copy : buffer_copies) {
             copy.bufferOffset += out_offset;
         }
