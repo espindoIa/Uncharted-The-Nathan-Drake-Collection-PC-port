@@ -6,6 +6,17 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork 0.5.0 "Expedition")
 
+- **Fixed: freezes of 1-6 seconds after some cutscenes in Uncharted 3 and 2.** After a cutscene the
+  treasure effect (two compute shaders) read data from table slots that hold plain numbers instead of
+  buffer descriptions. The port already ignored those slots when drawing, but its shader cache still
+  treated every random value as a new variant, so almost every frame compiled a new one on the
+  graphics thread (about 20 ms each). Logs from the player's install showed a 6.1 s freeze (263
+  compute pipelines), then 4.0 s, 2.2 s and 1.8 s ones in Uncharted 3, and 2.2 s and 1.0 s ones in
+  Uncharted 2, every session. Such slots now count as empty for the shader cache too, so one variant
+  is enough. Variants already in your cache still match, so nothing is recompiled and the cache does
+  not need to be cleared; the old extra variants stay in the file and load in the background without
+  a freeze. Not tested at the player's own cutscene spots, and not in Uncharted 2.
+
 - **Fixed: Uncharted 3 chapter 2 no longer gets stuck at a lower frame rate after the alley
   checkpoint.** A buffer the port uses for small per-draw data could fill up and stay full for the
   rest of the session. The drawing thread then copied every small piece of data again, and a log of a

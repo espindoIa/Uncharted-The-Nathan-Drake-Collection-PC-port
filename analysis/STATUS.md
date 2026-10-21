@@ -2678,3 +2678,41 @@ lock/refcount from 35fff41.
 No. PS4 shaders and their pipeline state are known only when the game draws with them. The disk cache
 plus warm-up already covers everything seen once; GOW3_BACKGROUND_WARMUP=0 loads it all behind the
 loading screen before play.
+
+## 21 October 2026: freezes after cutscenes = garbage V#s specialized compute shaders
+
+### Evidence (player's install logs, 20-21 Oct)
+
+- U3 boot.log: 9 stalls per session, dominated by compute compiles. Worst: "Stall: 6107.4 ms frame ...
+  compute variants 263 536.0 ms, compute pipelines 263 5517.5 ms". Others: 3988 ms (186), 2238 ms (99),
+  1760 ms (93). U2: 2208 ms (105 compute pipelines) and 1038 ms (73). Same pattern every session.
+- The player's U3 pipeline cache held 1,095 permutations of shader 8f067540 and 245 of 7d7e7206, and
+  grew every run.
+
+### Cause
+
+- The treasure-effect compute shaders 8f067540 and 7d7e7206 read V#s from table slots that hold floats
+  (the branches that use them are not taken). Binding already bound these as null (vk_rasterizer.cpp,
+  "garbage V#", the 16 Oct GPU hang fix).
+- StageSpecialization still keyed on their random stride/format/swizzle, so nearly every dispatch was a
+  new permutation, compiled synchronously on the GPU thread (~20 ms each).
+
+### Fix
+
+- The binding predicate is now one function, ClassifyGarbageSharp (vk_rasterizer.cpp), also installed as
+  a specialization hook (Shader::g_garbage_buffer_filter, shader_recompiler/buffer_filter.h). A garbage
+  guest-buffer V# counts as null in the specialization (bitset bit clear).
+- Permutations already cached still match: StageSpecialization operator== skips slots whose incoming bit
+  is clear, so nothing recompiles.
+- Toggle: second word bit 1024 (SpecGarbageSharps, gow3_toggles.h) restores the old behaviour, read live.
+- Offline replay (Codex) of the cached .meta specializations: a mapped-base check alone leaves 53 / 13
+  permutations (8f067540 / 7d7e7206); the binding predicate applied before specialization leaves 1 / 1.
+- Old junk permutations stay in the player's cache and keep loading in the background warm-up (no
+  stall). Clearing the cache is not needed.
+
+### Tested / not tested
+
+- Tested: build OK; one short U3 gameplay run from source: no crash.
+- Not tested: the player's own cutscene spots (the repo saves never reach the treasure effect; the repo
+  cache has 1 permutation of 8f067540), so the stall removal is inferred from the replay, not seen
+  in game. No performance A/B of the extra ClampRangeSize per guest buffer per specialization. U2.
