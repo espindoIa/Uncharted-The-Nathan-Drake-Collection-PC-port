@@ -1659,11 +1659,37 @@ void TextureCache::GarbageCollectImages() {
         ticks_to_destroy = std::min(ticks_to_destroy, gc_tick);
         num_deletions = aggresive ? 40 : pressured ? 20 : 10;
     };
+    // gow3 21 Oct 2026: limits per pass, from the Bloodborne port (Mrsuss60, 89f0521, 0d52d15).
+    // Every download below ends in scheduler.Finish() (a full GPU wait): under pressure one pass
+    // downloaded every GPU-written image in the walk, one wait after another on the GPU command
+    // thread. Images the pass kept stayed at the head of the list and were visited (and counted
+    // against the quota) again by the next pass, so a few tiled or GPU-written ones could block
+    // the walk from reaching the others. GcPassLimits set: the old walk.
+    const bool limits = !Gow3Toggle::Disabled2(Gow3Toggle::GcPassLimits);
+    constexpr size_t MAX_VISITS = 512;
+    constexpr size_t MAX_DOWNLOADS = 1;
+    size_t visits = 0;
+    size_t downloads = 0;
+    // Keeps the image: moved to the end of the list, so the next pass starts from others.
+    // Touched in the list only, not lru_touched_tick: UpdateImage's fast path reads that one as
+    // "tracked and refreshed in this tick".
+    const auto keep = [&](const Image& image) {
+        if (limits) {
+            lru_cache.Touch(image.lru_id, gc_tick);
+        }
+        return false;
+    };
     const auto clean_up = [&](ImageId image_id) {
         if (num_deletions == 0) {
             return true;
         }
-        --num_deletions;
+        if (limits) {
+            if (++visits > MAX_VISITS) {
+                return true;
+            }
+        } else {
+            --num_deletions;
+        }
         auto& image = slot_images[image_id];
         ResolveReadbacks(image.info.guest_address, image.info.guest_size, true,
                          ReadbackSource::CacheCleanup);
@@ -1671,20 +1697,32 @@ void TextureCache::GarbageCollectImages() {
         const bool tiled = image.info.IsTiled();
         if (tiled && download) {
             // This is a workaround for now. We can't handle non-linear image downloads.
-            return false;
+            return keep(image);
         }
         if (download && !pressured) {
-            return false;
+            return keep(image);
+        }
+        // Used by the last recorded draw (bound, render target), or a video-out surface.
+        if (limits && (image.binding.is_bound || image.binding.is_target || image.usage.vo_surface)) {
+            return keep(image);
         }
         if (download) {
+            if (limits && downloads >= MAX_DOWNLOADS) {
+                ++gc_download_deferred;
+                return keep(image);
+            }
             // gow3: synchronously, while the image still protects its pages. A deferred
             // write-back landed after FreeImage had unprotected them, over whatever the game
             // had meanwhile stored there (e.g. its heap after unloading an area).
             DownloadImageMemory(image_id, true);
             ++gc_downloads;
+            ++downloads;
         }
         ++gc_evictions;
         FreeImage(image_id);
+        if (limits) {
+            --num_deletions; // only freed images use the quota
+        }
         if (total_used_memory < critical_gc_memory) {
             if (aggresive) {
                 num_deletions >>= 2;
@@ -1713,13 +1751,15 @@ void TextureCache::GarbageCollectImages() {
         const auto now = std::chrono::steady_clock::now();
         if (now - gc_report_time >= std::chrono::seconds(5)) {
             std::printf("Texture cache: memory pressure, %llu of %llu MiB (critical %llu): "
-                        "%llu images evicted, %llu written back since the last report\n",
+                        "%llu images evicted, %llu written back, %llu kept for the write-back "
+                        "limit since the last report\n",
                         (unsigned long long)(total_used_memory >> 20),
                         (unsigned long long)(pressure_gc_memory >> 20),
                         (unsigned long long)(critical_gc_memory >> 20),
-                        (unsigned long long)gc_evictions, (unsigned long long)gc_downloads);
+                        (unsigned long long)gc_evictions, (unsigned long long)gc_downloads,
+                        (unsigned long long)gc_download_deferred);
             gc_report_time = now;
-            gc_evictions = gc_downloads = 0;
+            gc_evictions = gc_downloads = gc_download_deferred = 0;
         }
     }
 }

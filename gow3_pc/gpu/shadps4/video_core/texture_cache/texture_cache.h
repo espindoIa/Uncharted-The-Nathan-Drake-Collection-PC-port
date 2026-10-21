@@ -527,6 +527,7 @@ private:
     }();
     u64 total_used_memory = 0;
     u64 gc_evictions = 0, gc_downloads = 0; ///< gow3: pressure report
+    u64 gc_download_deferred = 0; ///< gow3: images kept for the one-download-per-pass limit
     std::chrono::steady_clock::time_point gc_report_time{};
     u64 trigger_gc_memory = 0;
     u64 pressure_gc_memory = 0;

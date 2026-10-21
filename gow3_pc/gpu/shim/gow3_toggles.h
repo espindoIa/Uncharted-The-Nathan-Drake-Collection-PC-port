@@ -100,6 +100,10 @@ enum : std::uint64_t {
     /// wrote the page before the GPU command thread fetches it (19 Oct: ~140 a second in U3 at
     /// 4K, ~1.4 ms each of the command thread's time waiting for the GPU).
     FaultPrewait = 1,
+    /// Bit set: old behaviour. Texture GC: at most one synchronous write-back download per pass,
+    /// images it keeps are touched so they do not block the walk, the deletion quota counts only
+    /// freed images, bound / render-target / video-out images are kept, 512 visits a pass (A/B).
+    GcPassLimits = 2,
     /// A compute queue INDIRECT_BUFFER packet does not drain the draw pipe (its packets pass the
     /// drain check one by one, as on the graphics queue). U3 at 4K DLAA M: +2% FPS, p99 -3 ms.
     ComputeNestedNoDrain = 4,
