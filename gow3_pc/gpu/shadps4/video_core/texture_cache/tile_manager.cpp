@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "gow3_toggles.h"
+#include <chrono>
+#include <cstdio>
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -97,6 +100,8 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
         return *it->second;
     }
 
+    // 21 Oct 2026: first use of each key compiles synchronously on the GPU thread; time it.
+    const auto create_start = std::chrono::steady_clock::now();
     const auto device = instance.GetDevice();
     const auto micro_tile_mode = AmdGpu::GetMicroTileMode(info.tile_mode);
     const bool is_macro = AmdGpu::IsMacroTiled(info.array_mode);
@@ -191,6 +196,13 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
     const auto handle = *pipeline;
     tiling_pipelines.emplace(key, std::move(pipeline));
     device.destroyShaderModule(module);
+    const auto create_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now() - create_start)
+                               .count();
+    if (Gow3Stats::enabled) {
+        Gow3Stats::t_detile_pipeline.fetch_add(create_ns, std::memory_order_relaxed);
+    }
+    std::printf("Detiler pipeline %s created in %.1f ms\n", module_name.c_str(), create_ns / 1e6);
     return handle;
 }
 
@@ -258,6 +270,7 @@ std::pair<const Buffer*, u64> TileManager::DetileImage(const VideoCore::Buffer* 
     if (!info.props.is_tiled) {
         return {in_buffer, in_offset};
     }
+    Gow3Stats::Timer timer{Gow3Stats::t_detile};
 
     TilingInfo params{};
     params.bank_swizzle = info.bank_swizzle;

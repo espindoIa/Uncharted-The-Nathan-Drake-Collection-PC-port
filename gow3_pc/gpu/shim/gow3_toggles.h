@@ -162,8 +162,12 @@ inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0};
 inline std::atomic<std::uint64_t> gpu_frames{0};
 /// Wall time spent in operations suspected of stalls (ns, all threads).
 inline std::atomic<std::uint64_t> t_resident{0}, t_protect{0}, t_image_create{0}, t_refresh{0},
-    t_staging{0}, t_host_wait{0}, t_copy{0}, copy_bytes{0}, t_read_faults{0}, read_faults{0},
+    t_copy{0}, copy_bytes{0}, t_read_faults{0}, read_faults{0},
     t_write_faults{0}, t_copy_cpu{0}, copy_sys_us{0}, copy_minflt{0}, t_gc{0}, t_readback_wait{0};
+/// 21 Oct 2026: a post-movie frame spent 63 ms in image refresh; its parts, to find the cost:
+/// new staging buffers, inline guest copies for images, detile (whole) and its pipeline creation.
+inline std::atomic<std::uint64_t> t_staging_alloc{0}, t_refresh_copy{0}, t_detile{0},
+    t_detile_pipeline{0};
 /// Diagnostics are collected only with GOW3_FRAME_STATS=1.
 inline const bool enabled = [] {
     const char* env = std::getenv("GOW3_FRAME_STATS");

@@ -38,6 +38,23 @@ u64 RoundAllocationSize(u64 size) {
     return Common::AlignUp(size, step);
 }
 
+// 21 Oct 2026: a post-movie frame re-created 20 large buffers; time each new buffer (stall line)
+// and name the slow ones (>= 5 ms).
+void NoteNewBuffer(std::chrono::steady_clock::time_point start, u64 bytes, MemoryType type,
+                   const char* kind) {
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - start)
+                        .count();
+    if (Gow3Stats::enabled) {
+        Gow3Stats::t_staging_alloc.fetch_add(ns, std::memory_order_relaxed);
+    }
+    if (ns >= 5'000'000) {
+        static constexpr const char* names[] = {"DeviceLocal", "HostUncached", "HostCached"};
+        std::printf("Slow staging allocation: %.1f ms, %llu MiB, %s %s\n", ns / 1e6,
+                    static_cast<unsigned long long>(bytes >> 20), names[u32(type)], kind);
+    }
+}
+
 } // Anonymous namespace
 
 StagingBufferPool::StagingBufferPool(const Instance& instance_, Scheduler& scheduler_)
@@ -84,11 +101,13 @@ StagingBufferRef StagingBufferPool::RequestFromRing(Ring& ring, u64 size, u64 al
     }
 
     if (!best) {
+        const auto start = std::chrono::steady_clock::now();
         best = &ring.blocks.emplace_back(Block{
             .buffer =
                 std::make_unique<VideoCore::StreamBuffer>(instance, scheduler, type, BLOCK_SIZE),
             .last_used_frame = frame,
         });
+        NoteNewBuffer(start, BLOCK_SIZE, type, "ring block");
         ring.current = ring.blocks.size() - 1;
         best_offset = *best->buffer->Reserve(size, alignment, false);
     }
@@ -125,6 +144,7 @@ StagingBufferRef StagingBufferPool::RequestLarge(u64 size, MemoryType type, bool
     }
 
     if (!best) {
+        const auto start = std::chrono::steady_clock::now();
         best = &cache.emplace_back(LargeBuffer{
             .buffer = std::make_unique<VideoCore::Buffer>(instance, 0, RoundAllocationSize(size),
                                                           type, "StagingBufferPool:Dedicated"),
@@ -132,6 +152,7 @@ StagingBufferRef StagingBufferPool::RequestLarge(u64 size, MemoryType type, bool
             .last_used_frame = frame,
             .held = false,
         });
+        NoteNewBuffer(start, best->buffer->SizeBytes(), type, "large");
     }
 
     best->tick = scheduler.CurrentTick();

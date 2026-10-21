@@ -3131,6 +3131,8 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_add
                 .extra = reinterpret_cast<u64>(staging.buffer),
             };
             if (staging.size < Chunk) {
+                // 21 Oct 2026: inline copies counted apart from the async ones (stall line).
+                Gow3Stats::Timer timer{Gow3Stats::t_refresh_copy};
                 SmallGuestCopy(item);
             } else {
                 Gow3Copy::Async([item] { item.run(item); });
@@ -3138,6 +3140,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_add
         }
         return {staging.buffer, staging.offset};
     }
+    Gow3Stats::Timer timer{Gow3Stats::t_refresh_copy};
     memory->CopySparseMemory(device_addr, staging.mapped, staging.size);
     staging.Flush();
     return {staging.buffer, staging.offset};
