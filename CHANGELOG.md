@@ -4,7 +4,7 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
-## Unreleased (fork 0.5.0 "Expedition")
+## 21 October 2026 (fork 0.5.0, Expedition Edition)
 
 - **Not fixed yet: the frame rate drop in heavy Uncharted 3 areas (chapter 2, after the movie).** In
   the player's log the game ran at 52-80 FPS with 1,600-3,000 draws and 1,600-1,900 compute
