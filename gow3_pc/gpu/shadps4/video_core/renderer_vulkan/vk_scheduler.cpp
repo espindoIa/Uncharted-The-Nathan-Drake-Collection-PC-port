@@ -27,6 +27,10 @@
 
 namespace Vulkan {
 
+// Defined in vk_pipeline_cache.cpp: 5 s window compile totals (reset by the frame stats).
+extern std::atomic<u64> g_gow3_compile_ns, g_gow3_async_ns;
+extern std::atomic<u32> g_gow3_compiles, g_gow3_compiles_running;
+
 std::mutex Scheduler::submit_mutex;
 
 Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
@@ -591,6 +595,44 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
                     ms, info.num_wait_semas, info.num_signal_semas,
                     static_cast<unsigned long long>(images - last_images));
         last_images = images;
+        if (ms >= 50.0) {
+            // 21 Oct: a player log had one 188 ms submit during a chapter load that two test runs
+            // did not repeat. Name the cause next time: video memory over budget (the driver
+            // pages/evicts inside the submit) or shader compiles running (CPU/driver contention).
+            // "compiles running" is live (compiler workers); the window counters are 5 s totals of
+            // finished compiles, read without resetting them.
+            char heaps[384];
+            size_t n = 0;
+            heaps[0] = '\0';
+            if (instance.CanReportMemoryUsage()) {
+                vk::PhysicalDeviceMemoryBudgetPropertiesEXT budget{};
+                vk::PhysicalDeviceMemoryProperties2 props = {.pNext = &budget};
+                instance.GetPhysicalDevice().getMemoryProperties2(&props);
+                const auto& mem = props.memoryProperties;
+                for (u32 h = 0; h < mem.memoryHeapCount && n < sizeof(heaps); ++h) {
+                    if (!(mem.memoryHeaps[h].flags & vk::MemoryHeapFlagBits::eDeviceLocal)) {
+                        continue;
+                    }
+                    const double use_mb = double(budget.heapUsage[h]) / 1048576.0;
+                    const double budget_mb = double(budget.heapBudget[h]) / 1048576.0;
+                    n += std::snprintf(heaps + n, sizeof(heaps) - n, "%sheap %u %.0f/%.0f MB (%.0f%%)",
+                                       n ? ", " : "", h, use_mb, budget_mb,
+                                       budget_mb > 0.0 ? 100.0 * use_mb / budget_mb : 0.0);
+                }
+            } else {
+                std::snprintf(heaps, sizeof(heaps), "heap budget unavailable (no VK_EXT_memory_budget)");
+            }
+            const u64 in_flight = signal_value - std::min(signal_value, work_semaphore.KnownGpuTick());
+            std::printf("Slow submit detail: %s; compiles running %u; compile work finished in this "
+                        "5 s window: async workers %.0f ms, GPU thread %u compiles %.0f ms; %llu "
+                        "submits not yet known complete, %u pending ops\n",
+                        heaps, g_gow3_compiles_running.load(std::memory_order_relaxed),
+                        double(g_gow3_async_ns.load(std::memory_order_relaxed)) / 1e6,
+                        g_gow3_compiles.load(std::memory_order_relaxed),
+                        double(g_gow3_compile_ns.load(std::memory_order_relaxed)) / 1e6,
+                        static_cast<unsigned long long>(in_flight),
+                        num_pending_ops.load(std::memory_order_relaxed));
+        }
     }
     if (submit_result==vk::Result::eErrorDeviceLost) { ReportCheckpoints(); DumpDeviceFault(instance); }
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
