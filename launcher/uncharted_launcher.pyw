@@ -151,7 +151,7 @@ FPS_LIMITS = [(30, "30"), (40, "40"), (45, "45"), (50, "50"), (55, "55"), (60, "
 INI_DEFAULTS = {
     "display_mode": "windowed", "vsync": "1", "fps_limit": "60", "frames_queued": "1",
     "async_shaders": "1", "fsr1": "0", "rcas": "1", "rcas_strength": "75", "show_fps": "1",
-    "upscaler": "off", "preset": "0", "dlss_model": "k",
+    "upscaler": "off", "preset": "0", "dlss_model": "k", "gpu_id": "-1",
 }
 # FSR/DLSS quality modes (the runtime's preset key, also in the in-game menu): 0 draws the scene at
 # the render resolution (Native AA / DLAA); the others draw it smaller and rebuild it at the render
@@ -877,6 +877,28 @@ def gpu_names():
         return [line.strip() for line in result.stdout.splitlines() if line.strip()]
     except (OSError, subprocess.SubprocessError):
         return []
+
+
+_VULKAN_GPUS = None
+
+
+def vulkan_gpus():
+    """The Vulkan devices as (index, name), in the order GOW3_GPU_ID counts them; [] when the
+    tool is missing or fails. Read once (creating a Vulkan instance takes a moment)."""
+    global _VULKAN_GPUS
+    if _VULKAN_GPUS is None:
+        _VULKAN_GPUS = []
+        tool = ROOT / "gow3_pc" / "out" / "gow3-gpu-capabilities.exe"
+        try:
+            result = subprocess.run([str(tool), "--list"], capture_output=True, text=True,
+                                    timeout=10, creationflags=NO_WINDOW)
+            for line in result.stdout.splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 2 and parts[0].strip().isdigit():
+                    _VULKAN_GPUS.append((parts[0].strip(), parts[1].strip()))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return _VULKAN_GPUS
 
 
 def gpu_tier(name):
@@ -1906,6 +1928,12 @@ class Launcher:
         self.widgets["sharpening"] = self.row(page, "Sharpening", "Makes the final picture crisper (AMD FidelityFX RCAS).",
                                               sharpening)
         self.ini_toggle(page, "show_fps", "Show FPS counter", "Shows the frame rate in a corner of the screen.")
+        gpus = vulkan_gpus()
+        if len(gpus) > 1:
+            self.ini_choice(page, "gpu_id", "Graphics card",
+                            "Which GPU runs the game. Automatic picks the fastest one. Takes effect the next "
+                            "time the game starts.",
+                            [("-1", "Automatic")] + list(gpus), recommended="-1")
         return page
 
     def add_ngx(self):

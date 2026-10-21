@@ -27,6 +27,8 @@ mkdir -p "$stage/gow3_pc/out" "$stage/gow3_pc/scripts" "$stage/tools" "$stage/la
 
 # The runtime without debug information, and every DLL it loads from the CLANG64 tree.
 llvm-strip --strip-debug -o "$stage/gow3_pc/out/gow3-probe.exe" gow3_pc/out/gow3-probe.exe
+# The launcher lists the Vulkan GPUs with it (Display page, graphics card); it needs no CLANG64 DLL.
+llvm-strip --strip-debug -o "$stage/gow3_pc/out/gow3-gpu-capabilities.exe" gow3_pc/out/gow3-gpu-capabilities.exe
 ldd gow3_pc/out/gow3-probe.exe | awk '/clang64/ {print $3}' | sort -u | while read -r dll; do
     cp "$dll" "$stage/gow3_pc/out/"
 done
