@@ -187,6 +187,17 @@ private:
     bool RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource& color,
                     const Dlss::Resource& depth, u32 w, u32 h, u32 ow, u32 oh, float frame_ms,
                     bool hdr);
+    /// Result of EnsureDlssFeature: the create's start and end when it ran.
+    struct DlssCreate {
+        bool ok = true, created = false;
+        std::chrono::steady_clock::time_point start{}, end{};
+    };
+    /// Creates the DLSS feature for `desc` into `cmdbuf` unless it is the current one (waits for
+    /// submitted work and drops the old feature first).
+    DlssCreate EnsureDlssFeature(vk::CommandBuffer cmdbuf, const Dlss::FeatureDesc& desc);
+    /// gow3: creates, at the first frame start with DLSS selected (menus, no scene yet), the
+    /// feature the first scene frame will ask for; RecordDlss then finds it ready.
+    void PrecreateDlss();
     /// Records FSR 4 into output_image; on a permanent failure FSR 3 takes over.
     bool RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image color, Fsr4Upscaler::Image depth,
                     u32 w, u32 h, u32 ow, u32 oh, float frame_ms);
@@ -287,6 +298,10 @@ private:
     std::unique_ptr<Fsr4Upscaler> fsr4;
     bool fsr4_failed = false;
     bool dlss_failed = false;
+    bool dlss_precreate_tried = false; ///< PrecreateDlss runs once a session
+    bool dlss_recorded = false;        ///< RecordDlss has recorded into a command buffer
+    bool dlss_precreated = false;     ///< the first RecordDlss has not checked the pre-created feature
+    Dlss::FeatureDesc dlss_precreated_desc{};
     VideoCore::UniqueImage motion_image;
     VideoCore::UniqueImage output_image;
     vk::UniqueImageView motion_view;

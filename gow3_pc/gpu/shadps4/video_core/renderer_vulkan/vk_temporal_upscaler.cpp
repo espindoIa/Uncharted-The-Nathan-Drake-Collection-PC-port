@@ -399,6 +399,7 @@ bool TemporalUpscaler::OnFrameStart() {
     last_active = active;
     last_jitter = jitter_on;
     dispatched_last_frame = false;
+    PrecreateDlss(); // after SetSize and the output size above: the first scene frame's sizes
 
     // The display pass of an upscaled frame reads the upscaled UI image. After OnComposite the
     // HUD and menu draws of the frame just upscaled still go to its host display buffer.
@@ -2400,25 +2401,110 @@ bool TemporalUpscaler::UseDlss() const {
            !dlss_failed;
 }
 
-bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource& color,
-                                  const Dlss::Resource& depth, u32 w, u32 h, u32 ow, u32 oh,
-                                  float frame_ms, bool hdr) {
+namespace {
+/// The feature RecordDlss asks for; PrecreateDlss predicts it with the same function.
+Dlss::FeatureDesc DlssDesc(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
+    return {w, h, ow, oh, Dlss::QualityForScale(float(ow) / float(w)), hdr,
+            Dlss::TransformerPreset(Gow3Settings::Get().dlss_model)};
+}
+
+std::string DlssDescText(const Dlss::FeatureDesc& d) {
+    char text[96];
+    std::snprintf(text, sizeof(text), "%ux%u -> %ux%u, quality %d, preset %u, HDR %d",
+                  d.input_width, d.input_height, d.output_width, d.output_height, d.quality,
+                  d.preset, int(d.hdr));
+    return text;
+}
+} // namespace
+
+TemporalUpscaler::DlssCreate TemporalUpscaler::EnsureDlssFeature(vk::CommandBuffer cmdbuf,
+                                                                 const Dlss::FeatureDesc& desc) {
     Dlss* dlss = Dlss::Get();
-    const Dlss::FeatureDesc desc{w, h, ow, oh, Dlss::QualityForScale(float(ow) / float(w)), hdr,
-                                 Dlss::TransformerPreset(Gow3Settings::Get().dlss_model)};
-    bool ok = true;
-    bool created = false; // 21 Oct 2026: time the synchronous create (a 230 ms stall frame followed it)
-    std::chrono::steady_clock::time_point create_start, create_end;
+    DlssCreate result;
+    // 21 Oct 2026: time the synchronous create (a 230 ms stall frame followed it)
     if (!dlss->HasFeature(desc)) {
         // The previous feature may still be in use by submitted work; `cmdbuf` stays open.
         scheduler.WaitSubmitted();
         dlss->ReleaseFeature();
-        create_start = std::chrono::steady_clock::now();
-        ok = dlss->CreateFeature(cmdbuf, desc);
-        create_end = std::chrono::steady_clock::now();
-        created = true;
+        result.start = std::chrono::steady_clock::now();
+        result.ok = dlss->CreateFeature(cmdbuf, desc);
+        result.end = std::chrono::steady_clock::now();
+        result.created = true;
         reset = true;
     }
+    return result;
+}
+
+void TemporalUpscaler::PrecreateDlss() {
+    if (dlss_precreate_tried || Gow3Toggle::Disabled2(Gow3Toggle::DlssPrecreate)) {
+        return;
+    }
+    if (dlss_recorded) {
+        // WaitSubmitted waits through CurrentTick()-1 only: the open command buffer may still
+        // reference the feature a replacement would release.
+        dlss_precreate_tried = true;
+        return;
+    }
+    if (!Active() || !UseDlss()) {
+        return;
+    }
+    dlss_precreate_tried = true;
+    // 21 Oct 2026, U3 at the player's settings (4K, Performance, model K): NGX's CreateFeature
+    // took 80.4 ms (another run 176.5 ms, the player's log 230.2 ms) inside the first scene
+    // frame, which showed as a 92-230 ms stall; DLAA creates in ~40 ms. The sizes it needs are
+    // known at the first frame start, long before a scene exists, so the create happens here
+    // (menus or boot videos, where one long frame goes unseen). The prediction follows the two
+    // callers: Run (Scaled() false: HDR scene color, scene_targets size -> output) and RunScaled
+    // (tonemapped frame, SceneSize -> target size). Output is target_width x target_height in
+    // both (Run's scene color has the Native size, which is the target when not Scaled()).
+    // Without GOW3_RENDER_RES the input size is the one SetSize just set; with it, until the
+    // first camera, SceneSize falls back to the same render_width x render_height RunScaled
+    // would use; a game that reports another size only costs the recreate it costs without this.
+    const auto [w, h] = SceneSize(render_width, render_height);
+    const u32 ow = target_width, oh = target_height;
+    if (!w || !h || !ow || !oh || w > ow || h > oh || ow > 8192 || oh > 8192) {
+        std::printf("DLSS: no pre-create (implausible sizes %ux%u -> %ux%u)\n", w, h, ow, oh);
+        return;
+    }
+    const auto desc = DlssDesc(w, h, ow, oh, !Scaled());
+    // As Run and RunScaled before their direct recording: close the draw's render pass first.
+    scheduler.EndRendering();
+    const auto create = EnsureDlssFeature(scheduler.CommandBuffer(), desc);
+    if (!create.created) {
+        return; // a feature for exactly this desc exists already
+    }
+    // NGX may leave Vulkan state changed (DLSS guide 5.2.5); draws emit only changed dynamic state.
+    scheduler.GetDynamicState().Invalidate();
+    if (!create.ok) {
+        std::printf("DLSS: pre-create failed; the first scene frame tries again\n");
+        return;
+    }
+    dlss_precreated = true;
+    dlss_precreated_desc = desc;
+    std::printf("DLSS: feature pre-created in %.1f ms (%s)\n",
+                std::chrono::duration<double, std::milli>(create.end - create.start).count(),
+                DlssDescText(desc).c_str());
+}
+
+bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource& color,
+                                  const Dlss::Resource& depth, u32 w, u32 h, u32 ow, u32 oh,
+                                  float frame_ms, bool hdr) {
+    Dlss* dlss = Dlss::Get();
+    const auto desc = DlssDesc(w, h, ow, oh, hdr);
+    if (dlss_precreated) { // the first scene frame: did PrecreateDlss predict it?
+        dlss_precreated = false;
+        if (dlss->HasFeature(desc)) {
+            std::printf("DLSS: pre-created feature used\n");
+        } else {
+            std::printf("DLSS: pre-created feature did not match (pre-created %s; needed %s), "
+                        "recreating\n", DlssDescText(dlss_precreated_desc).c_str(),
+                        DlssDescText(desc).c_str());
+        }
+    }
+    const auto create = EnsureDlssFeature(cmdbuf, desc);
+    bool ok = create.ok;
+    const bool created = create.created;
+    dlss_recorded = true; // the open command buffer now references the feature (see PrecreateDlss)
     if (ok) {
         // The jitter and motion vectors FSR 3 gets: render pixels, current to previous.
         const float sign = Gow3Toggle::Disabled(1u << 26) ? -1.0f : 1.0f;
@@ -2445,7 +2531,7 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
                 return std::chrono::duration<double, std::milli>(b - a).count();
             };
             std::printf("DLSS: feature created in %.1f ms (first evaluate %.1f ms)\n",
-                        ms(create_start, create_end), ms(create_end, std::chrono::steady_clock::now()));
+                        ms(create.start, create.end), ms(create.end, std::chrono::steady_clock::now()));
         }
     }
     if (!ok) {

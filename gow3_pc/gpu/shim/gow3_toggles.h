@@ -126,6 +126,9 @@ enum : std::uint64_t {
     /// Bit set: old behaviour. 21 Oct U3: prewait even when the write misses GPU-written bytes
     /// (the shared-page path needs no wait: ~746 prewaits per 5 s, ~1.1 s waited).
     PrewaitAlways = 8192,
+    /// Bit set: old behaviour. 21 Oct U3 4K Performance: DLSS created its feature on the first
+    /// scene frame (80-230 ms stall); on, it is created at the first frame start in the menus.
+    DlssPrecreate = 16384,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;
