@@ -123,6 +123,9 @@ enum : std::uint64_t {
     /// Bit set: off. File reads into tracked memory fault once per 4 KiB page again (U3 chapter
     /// load, 21 Oct: thousands of write faults a second) instead of preparing the range once.
     RangeWritePrepare = 2048,
+    /// Bit set: old behaviour. 21 Oct U3: prewait even when the write misses GPU-written bytes
+    /// (the shared-page path needs no wait: ~746 prewaits per 5 s, ~1.1 s waited).
+    PrewaitAlways = 8192,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;
@@ -133,6 +136,18 @@ namespace Gow3Stats {
 /// Guest writes caught by page protection, and pages currently left unprotected as hot.
 inline std::atomic<std::uint64_t> tracker_faults{0};
 inline std::atomic<std::int64_t> hot_pages{0};
+/// Region-lock diagnostics, collected only with GOW3_FAULT_STATS=1.
+inline const bool fault_stats = [] {
+    const char* env = std::getenv("GOW3_FAULT_STATS");
+    return env && env[0] == '1';
+}();
+inline std::atomic<std::uint64_t> buffer_lock_wait_ns{0}, buffer_under_lock_ns{0};
+/// 21 Oct: where BufferCache::InvalidateMemory's on_flush time goes (GOW3_FAULT_STATS=1, 5 s).
+/// ff_ns/ff_n by phase of ReadMemory(is_write): see FF_* below; ff_total_* is the whole on_flush.
+enum FaultFlushPhase { FF_RBWAIT, FF_EARLY, FF_FETCH, FF_LAZY, FF_LAZYWRITE, FF_PREWAIT, FF_DOWNLOAD,
+                       FF_OTHER, FF_COUNT };
+inline std::atomic<std::uint64_t> ff_ns[FF_COUNT], ff_n[FF_COUNT], ff_total_ns{0}, ff_total_n{0},
+    ff_prewait_wait_ns{0}, ff_prewait_skipped{0};
 /// Stall diagnostics (GOW3_FRAME_STATS): per-frame deltas printed for frames over 40 ms.
 inline std::atomic<std::uint64_t> images_registered{0};
 inline std::atomic<std::uint64_t> image_upload_bytes{0};

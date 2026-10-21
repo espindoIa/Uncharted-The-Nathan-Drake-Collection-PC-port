@@ -81,13 +81,30 @@ public:
                     // in case we are racing with GPU thread trying to mark the page as GPU
                     // modified. If we need to flush the flush function is going to perform CPU
                     // state change.
-                    std::scoped_lock lk{manager->lock};
+                    using Clock = std::chrono::steady_clock;
+                    const auto start = Gow3Stats::fault_stats ? Clock::now() : Clock::time_point{};
+                    std::unique_lock lk{manager->lock};
+                    const auto acquired = Gow3Stats::fault_stats ? Clock::now() : Clock::time_point{};
+                    const auto finish = [&] {
+                        if (Gow3Stats::fault_stats) {
+                            const auto end = Clock::now();
+                            lk.unlock();
+                            Gow3Stats::buffer_lock_wait_ns.fetch_add(
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(acquired - start)
+                                    .count(), std::memory_order_relaxed);
+                            Gow3Stats::buffer_under_lock_ns.fetch_add(
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(end - acquired)
+                                    .count(), std::memory_order_relaxed);
+                        }
+                    };
                     if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled &&
                         manager->template IsRegionModified<Type::GPU>(offset, size)) {
+                        finish();
                         return true;
                     }
                     manager->template ChangeRegionState<Type::CPU, true>(
                         manager->GetCpuAddr() + offset, size);
+                    finish();
                     return false;
                 }();
                 if (should_flush) {

@@ -370,10 +370,14 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
         const auto start = std::chrono::steady_clock::now();
         ReadMemory(device_addr, size, true, assume_locks);
         g_invalidate_downloads.fetch_add(1, std::memory_order_relaxed);
-        g_invalidate_download_ns.fetch_add(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
-                .count(),
-            std::memory_order_relaxed);
+        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - start)
+                            .count();
+        g_invalidate_download_ns.fetch_add(ns, std::memory_order_relaxed);
+        if (Gow3Stats::fault_stats) {
+            Gow3Stats::ff_total_n.fetch_add(1, std::memory_order_relaxed);
+            Gow3Stats::ff_total_ns.fetch_add(ns, std::memory_order_relaxed);
+        }
     });
 }
 
@@ -768,6 +772,21 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     }
     const auto flush_request = [this, device_addr, size, is_write] {
         const ReadbackScope readback_scope{*this, "ReadMemory request"};
+        // 21 Oct diagnostics: sequential phases of a write flush, each lap adds the time since the
+        // previous one to its bucket (GOW3_FAULT_STATS=1 only).
+        const bool lap_on = is_write && Gow3Stats::fault_stats;
+        auto lap_mark = lap_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        const auto lap = [&](Gow3Stats::FaultFlushPhase phase) {
+            if (!lap_on) {
+                return;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            Gow3Stats::ff_ns[phase].fetch_add(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now - lap_mark).count(),
+                std::memory_order_relaxed);
+            Gow3Stats::ff_n[phase].fetch_add(1, std::memory_order_relaxed);
+            lap_mark = now;
+        };
         if (!is_write && FaultStatsEnabled() && gpu_modified_ranges.Intersects(device_addr, size)) {
             std::scoped_lock lock{g_writers_mutex};
             auto& [reads, addresses] = g_gpu_byte_reads[device_addr >> 20];
@@ -904,10 +923,12 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             }
             // gow3: finished readbacks of this page first (no wait): it may be clean already.
             CompleteReadbacks(false);
+            lap(Gow3Stats::FF_RBWAIT);
             if (!gpu_modified_ranges.Intersects(page, 4096)) {
                 lazy_pages.erase(page);
                 memory_tracker->UnmarkRegionAsGpuModified(page, 4096);
                 memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+                lap(Gow3Stats::FF_EARLY);
                 return;
             }
             // gow3 17 Oct 2026: the page's GPU bytes are final (the last GPU write into its 1 MiB
@@ -917,8 +938,10 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             // 5 s, ~10 ms each at 1440p-4K, 60 -> 45 FPS).
             if (ReadFinishedGpuPage(page) || CopyFinishedGpuPage(page)) {
                 memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+                lap(Gow3Stats::FF_FETCH);
                 return;
             }
+            lap(Gow3Stats::FF_FETCH);
             // gow3: the GPU bytes in this page come from work still in flight (recorded in this
             // submission or not finished): the guest, a frame ahead, writes next to them (false
             // sharing: ~90 per second in heavy U2 scenes, each a download waiting for all GPU
@@ -936,6 +959,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             if (shared_writes && !gpu_modified_ranges.Intersects(device_addr, size) &&
                 !GpuBytesInFlight(page)) {
                 FetchOldGpuBytes(page);
+                lap(Gow3Stats::FF_FETCH);
             }
             if (shared_writes && !gpu_modified_ranges.Intersects(device_addr, size)) {
                 if (GpuBytesInFlight(page)) {
@@ -962,10 +986,13 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                     NoteReadbackKind(page, 4096, ReadbackSharedPage);
                     memory_tracker->MarkRegionAsCpuModified(device_addr, size);
                     ++g_shared_writes_count;
+                    lap(Gow3Stats::FF_LAZY);
                     return;
                 }
             }
-            if (TryLazyWrite(device_addr, size)) {
+            const bool lazy_written = TryLazyWrite(device_addr, size);
+            lap(Gow3Stats::FF_LAZYWRITE);
+            if (lazy_written) {
                 return;
             }
         }
@@ -999,10 +1026,12 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), arena->cpu_addr);
         const VAddr window_end = std::min<VAddr>(
             std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
+        lap(Gow3Stats::FF_OTHER);
         DownloadMemory(arena, window_start, window_end - window_start);
         if (is_write) {
             memory_tracker->MarkRegionAsCpuModified(device_addr, size);
         }
+        lap(Gow3Stats::FF_DOWNLOAD);
     };
     if (assume_locks) {
         flush_request();
@@ -1012,8 +1041,30 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         // that work itself: Uncharted 3 at 4K, ~140 a second, ~1.4 ms each, a fifth of that
         // thread. This thread waits anyway: it waits for that work first, and the fetch then
         // finds it done. Toggle: second word, FaultPrewait.
-        if (is_write && !Gow3Toggle::Disabled2(Gow3Toggle::FaultPrewait)) {
+        // gow3 21 Oct 2026: not when the written bytes miss every GPU-written byte: skipping only
+        // removes this thread's wait. flush_request still decides, and CopyFinishedGpuPage can wait
+        // on the GPU command thread for submitted-but-unfinished work (21 Oct review). U3 bench:
+        // 746 prewaits per 5 s waited 1,040-1,275 ms, while the shared-page path took 452 calls in
+        // 4.4 ms. The set is read under its shared lock; a stale answer only changes whether we
+        // wait. Toggle: PrewaitAlways.
+        const bool skip_prewait = is_write && !Gow3Toggle::Disabled2(Gow3Toggle::FaultPrewait) &&
+                                  !Gow3Toggle::Disabled2(Gow3Toggle::PrewaitAlways) &&
+                                  !IsRangeGpuWrittenShared(device_addr, size);
+        if (skip_prewait && Gow3Stats::fault_stats) {
+            Gow3Stats::ff_prewait_skipped.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (is_write && !skip_prewait && !Gow3Toggle::Disabled2(Gow3Toggle::FaultPrewait)) {
+            const auto prewait_start =
+                Gow3Stats::fault_stats ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             PrewaitPageWrites(device_addr);
+            if (Gow3Stats::fault_stats) {
+                Gow3Stats::ff_ns[Gow3Stats::FF_PREWAIT].fetch_add(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - prewait_start)
+                        .count(),
+                    std::memory_order_relaxed);
+                Gow3Stats::ff_n[Gow3Stats::FF_PREWAIT].fetch_add(1, std::memory_order_relaxed);
+            }
         }
         const auto queued = std::chrono::steady_clock::now();
         liverpool->SendCommand<true>(std::move(flush_request));
@@ -2453,6 +2504,12 @@ void BufferCache::PrewaitPageWrites(VAddr address) {
                                      std::chrono::steady_clock::now() - start)
                                      .count(),
                                  std::memory_order_relaxed);
+    if (Gow3Stats::fault_stats) {
+        Gow3Stats::ff_prewait_wait_ns.fetch_add(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
+                .count(),
+            std::memory_order_relaxed);
+    }
 }
 
 void BufferCache::FinishPageFetch(VAddr page) {

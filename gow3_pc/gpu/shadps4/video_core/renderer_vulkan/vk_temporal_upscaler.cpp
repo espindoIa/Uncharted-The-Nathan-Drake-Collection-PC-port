@@ -2407,11 +2407,16 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
     const Dlss::FeatureDesc desc{w, h, ow, oh, Dlss::QualityForScale(float(ow) / float(w)), hdr,
                                  Dlss::TransformerPreset(Gow3Settings::Get().dlss_model)};
     bool ok = true;
+    bool created = false; // 21 Oct 2026: time the synchronous create (a 230 ms stall frame followed it)
+    std::chrono::steady_clock::time_point create_start, create_end;
     if (!dlss->HasFeature(desc)) {
         // The previous feature may still be in use by submitted work; `cmdbuf` stays open.
         scheduler.WaitSubmitted();
         dlss->ReleaseFeature();
+        create_start = std::chrono::steady_clock::now();
         ok = dlss->CreateFeature(cmdbuf, desc);
+        create_end = std::chrono::steady_clock::now();
+        created = true;
         reset = true;
     }
     if (ok) {
@@ -2435,6 +2440,13 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
                                                     vk::ImageAspectFlagBits::eColor, w, h}
                                    : Dlss::Resource{},
         });
+        if (created) {
+            const auto ms = [](auto a, auto b) {
+                return std::chrono::duration<double, std::milli>(b - a).count();
+            };
+            std::printf("DLSS: feature created in %.1f ms (first evaluate %.1f ms)\n",
+                        ms(create_start, create_end), ms(create_end, std::chrono::steady_clock::now()));
+        }
     }
     if (!ok) {
         std::printf("Upscaler: DLSS failed; falling back to FSR 3.1\n");

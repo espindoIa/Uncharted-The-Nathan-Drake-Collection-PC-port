@@ -49,9 +49,13 @@ bool Gow3AnyPageWatched(VAddr addr, u64 size);
 bool Gow3PageOnlyWriteWatched(VAddr addr);
 extern std::atomic<u64> g_range_prepares, g_range_prepare_bytes, g_range_prepare_ns,
     g_range_prepare_pages;
+// Write fault split (GOW3_FAULT_STATS): ns in buffer / texture / extend / landing, and calls.
+extern std::atomic<u64> g_wf_split_ns[4], g_wf_split_calls;
 } // namespace VideoCore
 
 namespace Vulkan {
+// Set by HandleWriteAt while timing its InvalidateMemory (GOW3_FAULT_STATS only).
+static thread_local bool g_wf_split_active = false;
 using VideoCore::g_range_prepare_pages;
 using VideoCore::Gow3PageOnlyWriteWatched;
 using VideoCore::Gow3AnyPageWatched;
@@ -5745,6 +5749,21 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
         // Not GPU mapped memory, can skip invalidation logic entirely.
         return false;
     }
+    if (g_wf_split_active) {
+        const auto t0 = std::chrono::steady_clock::now();
+        texture_cache.ResolveReadbacks(addr, size, assume_locks, VideoCore::ReadbackSource::CpuWrite);
+        const auto t1 = std::chrono::steady_clock::now();
+        buffer_cache.InvalidateMemory(addr, size, assume_locks);
+        const auto t2 = std::chrono::steady_clock::now();
+        texture_cache.InvalidateMemory(addr, size);
+        const auto t3 = std::chrono::steady_clock::now();
+        using std::chrono::duration_cast, std::chrono::nanoseconds;
+        VideoCore::g_wf_split_ns[0].fetch_add(duration_cast<nanoseconds>(t2 - t1).count(),
+                                              std::memory_order_relaxed);
+        VideoCore::g_wf_split_ns[1].fetch_add(
+            duration_cast<nanoseconds>((t1 - t0) + (t3 - t2)).count(), std::memory_order_relaxed);
+        return true;
+    }
     texture_cache.ResolveReadbacks(addr, size, assume_locks, VideoCore::ReadbackSource::CpuWrite);
     buffer_cache.InvalidateMemory(addr, size, assume_locks);
     texture_cache.InvalidateMemory(addr, size);
@@ -5781,6 +5800,32 @@ bool Rasterizer::OnWriteFault(VAddr addr, bool assume_locks) {
 }
 
 bool Rasterizer::HandleWriteAt(VAddr addr, bool assume_locks) {
+    static const bool split_stats = [] {
+        const char* env = std::getenv("GOW3_FAULT_STATS");
+        return env && env[0] == '1';
+    }();
+    if (split_stats) {
+        // Same steps as below, timed; sums are printed by the page manager's 5 s fault stats.
+        using Clock = std::chrono::steady_clock;
+        const auto ns = [](Clock::time_point a, Clock::time_point b) {
+            return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+        };
+        g_wf_split_active = true; // InvalidateMemory splits its buffer / texture parts
+        const bool ok = InvalidateMemory(addr, 8, assume_locks);
+        g_wf_split_active = false;
+        if (!ok) {
+            return false;
+        }
+        const auto t0 = Clock::now();
+        buffer_cache.ExtendWriteFault(addr);
+        const auto t1 = Clock::now();
+        LandWatchedReadback(addr, assume_locks);
+        const auto t2 = Clock::now();
+        VideoCore::g_wf_split_ns[2].fetch_add(ns(t0, t1), std::memory_order_relaxed);
+        VideoCore::g_wf_split_ns[3].fetch_add(ns(t1, t2), std::memory_order_relaxed);
+        VideoCore::g_wf_split_calls.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
     if (!InvalidateMemory(addr, 8, assume_locks)) {
         return false;
     }
