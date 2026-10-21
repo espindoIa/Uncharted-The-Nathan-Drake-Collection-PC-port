@@ -117,6 +117,9 @@ enum : std::uint64_t {
     /// Draining the draw pipe for a queued command (guest fault downloads, readback landings,
     /// flips) keeps the ring epoch: those write only GPU-written memory, which is never copied.
     RingKeepOnCommands = 64,
+    /// Bit set: off. Shader specialization reads a garbage buffer V# (bound as null) as it is,
+    /// so its random stride/format makes new permutations (21 Oct: U3 treasure effect freezes).
+    SpecGarbageSharps = 1024,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

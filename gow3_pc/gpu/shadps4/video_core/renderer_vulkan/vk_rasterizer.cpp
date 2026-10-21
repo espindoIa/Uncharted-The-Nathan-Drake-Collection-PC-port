@@ -87,6 +87,43 @@ bool LateConstantsEnabled();
 void NoteLateGuestCopy(VideoCore::Buffer& buffer, u64 offset, VAddr address, u32 size);
 void NoteLateFlatCopy(VideoCore::Buffer& buffer, u64 offset, const Shader::Info& stage, u32 size);
 void RefreshLateConstants(Core::MemoryManager* memory);
+
+struct GarbageSharp {
+    bool unbound;
+    bool garbage;
+    u64 mapped_size;
+};
+
+// gow3: the garbage V# predicate, shared by binding and (through the hook below) shader
+// specialization. See the comments at the binding site.
+GarbageSharp ClassifyGarbageSharp(Core::MemoryManager* memory, const AmdGpu::Buffer& vsharp,
+                                  u64 pgm_hash) {
+    const bool unbound = vsharp.base_address == 0 || vsharp.GetSize() == 0;
+    const u64 mapped_size =
+        unbound ? 0 : memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+    // gow3 16 Oct: the treasure effect's float slots can also make a V# that lands in mapped
+    // memory: after 90 minutes one with an unaligned base, a stride of ~15 KB and ~1e9
+    // records was bound, the GPU hung (OBS's own device was removed with DEVICE_HUNG at the
+    // same moment) and the game stopped with "Device lost during submit". For these two
+    // shaders an unaligned base, a stride of 8 KiB or more or over 64 MiB is garbage too.
+    const bool treasure_effect = pgm_hash == 0x8f067540 || pgm_hash == 0x7d7e7206;
+    const bool garbage =
+        !unbound && (mapped_size >= 1_GB ||
+                     (mapped_size != vsharp.GetSize() && vsharp.num_records < 0xFFFF0000u) ||
+                     (treasure_effect && ((vsharp.base_address & 3) != 0 || vsharp.stride >= 8192 ||
+                                          vsharp.GetSize() > 64_MB)));
+    return {unbound, garbage, mapped_size};
+}
+
+// gow3 21 Oct: specialization hook. Binding nulls garbage V#s, but specialization read their
+// random stride/format: the player's U3 log had a 6.1 s frame compiling 263 permutations of
+// 8f067540 (cache held 1,095 of them); an offline replay with this filter gave 1.
+bool SpecGarbageFilter(const AmdGpu::Buffer& vsharp, u64 pgm_hash) {
+    if (Gow3Toggle::Disabled2(Gow3Toggle::SpecGarbageSharps)) {
+        return false;
+    }
+    return ClassifyGarbageSharp(Core::Memory::Instance(), vsharp, pgm_hash).garbage;
+}
 } // namespace
 
 Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime& runtime_,
@@ -98,6 +135,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
       pipeline_cache{instance, scheduler, liverpool, buffer_cache.GetSparsePageShift()},
       host_markers_enabled{EmulatorSettings.IsVkHostMarkersEnabled()},
       guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
+    Shader::g_garbage_buffer_filter.store(&SpecGarbageFilter, std::memory_order_relaxed);
     // Before the rasterizer is bound: Liverpool enqueues buffers only once it sees it.
     draw_prep = std::make_unique<DrawPreparation>(pipeline_cache);
     scene_targets = std::make_unique<SceneTargets>(instance, scheduler, runtime, texture_cache);
@@ -4255,20 +4293,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             // it: the game's fg-draw-mgr assert), and the arena over them ran out of device
             // memory. A V# reaching past mapped memory, other than an unbounded raw buffer
             // (num_records ~0), or spanning 1 GiB is bound as null. Normal play has none.
-            const bool unbound = vsharp.base_address == 0 || vsharp.GetSize() == 0;
-            const u64 mapped_size =
-                unbound ? 0 : memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
-            // gow3 16 Oct: the treasure effect's float slots can also make a V# that lands in mapped
-            // memory: after 90 minutes one with an unaligned base, a stride of ~15 KB and ~1e9
-            // records was bound, the GPU hung (OBS's own device was removed with DEVICE_HUNG at the
-            // same moment) and the game stopped with "Device lost during submit". For these two
-            // shaders an unaligned base, a stride of 8 KiB or more or over 64 MiB is garbage too.
-            const bool treasure_effect = stage.pgm_hash == 0x8f067540 || stage.pgm_hash == 0x7d7e7206;
-            const bool garbage =
-                !unbound && (mapped_size >= 1_GB ||
-                             (mapped_size != vsharp.GetSize() && vsharp.num_records < 0xFFFF0000u) ||
-                             (treasure_effect && ((vsharp.base_address & 3) != 0 || vsharp.stride >= 8192 ||
-                                                  vsharp.GetSize() > 64_MB)));
+            const GarbageSharp gs = ClassifyGarbageSharp(memory, vsharp, stage.pgm_hash);
+            const bool unbound = gs.unbound;
+            const u64 mapped_size = gs.mapped_size;
+            const bool garbage = gs.garbage;
             if (garbage) {
                 static u32 garbage_reports = 0;
                 if (garbage_reports < 32) {
