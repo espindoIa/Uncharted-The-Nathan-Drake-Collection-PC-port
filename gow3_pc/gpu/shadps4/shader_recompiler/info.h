@@ -228,6 +228,10 @@ struct Info : InfoPersistent {
             std::memcpy(&base, &ud[ptr_index], sizeof(base));
             base = reinterpret_cast<const u32*>(VAddr(base) & 0xFFFFFFFFFFFFULL);
         }
+        if (!base) {
+            // gow3 21 Oct 2026 (Bloodborne port): a null user-data table pointer read address 0
+            return T{};
+        }
         std::memcpy(&data, base + dword_offset, sizeof(T));
         return data;
     }
