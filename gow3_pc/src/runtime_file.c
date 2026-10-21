@@ -471,12 +471,21 @@ static ssize_t host_write(int h,const void *buffer,uint64_t size) { return write
 /* Pages of the destination may be write-protected for GPU tracking: the kernel's copy then
  * fails with EFAULT instead of faulting to our handler. A user-mode write to each page first
  * goes through the handler, which unprotects it (and records the upcoming write). */
-static void touch_for_write(void *buffer,uint64_t size) {
+static void touch_for_write(void *buffer,uint64_t size,int h,int64_t offset) {
     if (!size) return;
     /* 21 Oct: player's U3 chapter load: up to 6,348 write faults/s from these touches, 1,049
      * one-page protects in a 103 ms frame. The range is prepared in one call first; the touches
      * stay as the safety net (then they fault nowhere). */
-    gow3gpu_prepare_cpu_write(buffer,size);
+    /* 21 Oct U3: discard only pages the read can fill, not the requested bytes past EOF.
+     * Unknown sizes keep the touches' fault path. shortcut: a failed or short read (e.g. I/O
+     * errors or concurrent truncation) leaves unwritten parts of discarded pages without their
+     * GPU bytes. If this matters, stage the read in a host buffer, then prepare only the returned
+     * range before copying it to the destination. */
+    HostStat s;
+    if (offset>=0 && !host_fstat(h,&s) && S_ISREG(s.st_mode) && s.st_size>=0) {
+        uint64_t available=offset<s.st_size ? (uint64_t)(s.st_size-offset) : 0;
+        gow3gpu_prepare_cpu_write(buffer,size<available ? size : available);
+    }
     uintptr_t p=(uintptr_t)buffer & ~(uintptr_t)4095, end=(uintptr_t)buffer+size;
     for (; p<end; p+=4096) {
         volatile unsigned char *b=(volatile unsigned char *)(p<(uintptr_t)buffer ? (uintptr_t)buffer : p);
@@ -486,13 +495,15 @@ static void touch_for_write(void *buffer,uint64_t size) {
 static int64_t do_read(int fd,void *buffer,uint64_t size) {
     File *f=file_get(fd); int h=file_host(fd,f);
     if (h<0) { file_put(f); return -EBADF; }
-    touch_for_write(buffer,size);
     /* 20 Oct audit: only sequential operations share the logical cursor lock. */
     if (f) pthread_mutex_lock(&f->io);
 #ifdef _WIN32
+    touch_for_write(buffer,f ? size : (size>0x7ffff000 ? 0x7ffff000 : size),h,
+                    f ? f->offset : host_lseek(h,0,SEEK_CUR));
     ssize_t n=f ? pread(h,buffer,size,f->offset) : host_read(h,buffer,size);
     if (f && n>0) f->offset+=n;
 #else
+    touch_for_write(buffer,size,h,host_lseek(h,0,SEEK_CUR));
     ssize_t n=host_read(h,buffer,size);
 #endif
     if (f) pthread_mutex_unlock(&f->io);
@@ -506,7 +517,7 @@ static int64_t do_read(int fd,void *buffer,uint64_t size) {
 static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     File *f=file_get(fd); int h=file_host(fd,f);
     if (h<0) { file_put(f); return -EBADF; }
-    touch_for_write(buffer,size);
+    touch_for_write(buffer,size,h,offset);
     ssize_t n=pread(h,buffer,size,offset);
     if (f && f->traced && file_trace_line())
         printf("File trace: pread(fd %d, %llu @%lld) -> %lld (errno %d)\n",fd,(unsigned long long)size,

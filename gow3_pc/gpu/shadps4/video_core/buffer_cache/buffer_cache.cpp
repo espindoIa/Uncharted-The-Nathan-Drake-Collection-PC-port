@@ -381,6 +381,36 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
     });
 }
 
+bool BufferCache::DiscardCpuWritePage(VAddr page) {
+    const ReadbackScope readback_scope{*this, "DiscardCpuWritePage"};
+    ASSERT((page & 4095) == 0);
+    for (const auto& readback : pending_readbacks) {
+        for (const auto& [address, size] : readback.pieces) {
+            if (address < page + 4096 && page < address + size) {
+                return false;
+            }
+        }
+    }
+    // 21 Oct U3 load: ~94 us/page fetched bytes the file was about to replace. The command
+    // runs in flush_request's serialization; no download or landing can retain these bytes.
+    {
+        std::unique_lock lock{gpu_ranges_mutex};
+        if (!gpu_modified_ranges.Intersects(page, 4096)) {
+            return false;
+        }
+        gpu_modified_ranges.Subtract(page, 4096);
+        gpu_write_page_tick.erase(page >> 12);
+        // Window ticks and the ever-written window bits still cover neighboring pages.
+    }
+    page_writes.erase(page >> 12);
+    EraseLazyPages(page, 4096);
+    // Shared records are exactly one aligned page (ReadMemory's shared-write path).
+    std::erase_if(shared_readbacks, [page](const auto& entry) { return entry.first == page; });
+    memory_tracker->UnmarkRegionAsGpuModified(page, 4096);
+    memory_tracker->MarkRegionAsCpuModified(page, 4096);
+    return true;
+}
+
 // gow3: the game fills its per-frame buffers (constants, skinning output) sequentially and
 // every 4 KiB page cost a protection fault (~110k/s in the test scene, a fifth of each
 // render worker's time in the kernel). A fault unprotects the aligned window around it instead;

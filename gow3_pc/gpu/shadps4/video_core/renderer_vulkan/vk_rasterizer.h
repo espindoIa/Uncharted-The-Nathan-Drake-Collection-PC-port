@@ -181,6 +181,8 @@ public:
     /// OnWriteFault does per page, once for the range. True when the range was prepared (also when
     /// nothing in it is tracked), false when the caller must fall back to touching pages.
     bool PrepareCpuWrite(VAddr addr, u64 size);
+    /// Whole file-read page, on the GPU command thread after the draw pipe drain.
+    bool DiscardCpuWritePage(VAddr page);
     /// The per-address work of a write fault (after the drain), shared by both.
     bool HandleWriteAt(VAddr addr, bool assume_locks);
     /// gow3: a guest instruction keeps faulting on one page (see BufferCache::ReleaseStuckPage).

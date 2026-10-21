@@ -132,6 +132,10 @@ public:
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false, bool assume_locks = false);
 
+    /// GPU command thread, with the draw pipe drained: CPU will overwrite this entire page.
+    /// Refuses pending readback pieces; synchronous downloads/landings cannot run alongside it.
+    bool DiscardCpuWritePage(VAddr page);
+
     /// gow3: 1 MiB windows where the CPU wrote into GPU-written memory (each write needed a
     /// download with a full GPU wait). GPU writes there join the per-submission download
     /// (Rasterizer::SyncSmallGpuWrites) so later CPU writes find the pages clean. GPU-side use.

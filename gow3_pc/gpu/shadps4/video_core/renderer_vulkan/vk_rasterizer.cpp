@@ -48,7 +48,7 @@ namespace VideoCore {
 bool Gow3AnyPageWatched(VAddr addr, u64 size);
 bool Gow3PageOnlyWriteWatched(VAddr addr);
 extern std::atomic<u64> g_range_prepares, g_range_prepare_bytes, g_range_prepare_ns,
-    g_range_prepare_pages;
+    g_range_prepare_pages, g_range_prepare_discarded;
 // Write fault split (GOW3_FAULT_STATS): ns in buffer / texture / extend / landing, and calls.
 extern std::atomic<u64> g_wf_split_ns[4], g_wf_split_calls;
 } // namespace VideoCore
@@ -5834,6 +5834,24 @@ bool Rasterizer::HandleWriteAt(VAddr addr, bool assume_locks) {
     return true;
 }
 
+bool Rasterizer::DiscardCpuWritePage(VAddr page) {
+    if (!Gow3PageOnlyWriteWatched(page) || !IsMapped(page, 4096)) {
+        return false;
+    }
+    // Check before the buffer discard takes its locks; GPU-owned images keep HandleWriteAt.
+    if (texture_cache.PageHasGpuImageAuthority(page, 4096)) {
+        return false;
+    }
+    // Texture copies may protect only writes (stale readbacks). Resolving one keeps that page
+    // on the old path; pages actually discarded never wait for a GPU copy.
+    if (texture_cache.ResolveReadbacks(page, 4096, true, VideoCore::ReadbackSource::CpuWrite) ||
+        !buffer_cache.DiscardCpuWritePage(page)) {
+        return false;
+    }
+    texture_cache.InvalidateMemory(page, 4096);
+    return true;
+}
+
 // gow3 21 Oct 2026: the player's U3 chapter load: up to 6,348 write faults/s from the game's file
 // reads (touch_for_write: one store per 4 KiB page), 1,049 one-page protects in a 103 ms frame
 // (96.4 ms in write-fault handlers), a 215 ms frame with 203 ms in them. The faults the touches
@@ -5862,8 +5880,34 @@ bool Rasterizer::PrepareCpuWrite(VAddr addr, u64 size) {
     WaitDrawPipeForCapture();
     const VAddr end = addr + size;
     u64 pages = 0;
+    std::vector<VAddr> discarded;
+    if (!Gow3Toggle::Disabled2(Gow3Toggle::FileReadDiscard) &&
+        (!assume_locks || OnStageA())) {
+        for (VAddr at = addr; at < end; at = Common::AlignDown(at, VAddr{4096}) + 4096) {
+            if ((at & 4095) == 0 && end - at >= 4096 && Gow3PageOnlyWriteWatched(at) &&
+                buffer_cache.IsRangeGpuWrittenShared(at, 4096)) {
+                discarded.push_back(at);
+            }
+        }
+        if (!discarded.empty()) {
+            // 21 Oct U3: 532 pages/50.1 ms. One queue hop per read, without fetching each page;
+            // Liverpool drains the draw pipe before commands, exactly as for flush_request.
+            const auto discard = [this, &discarded] {
+                std::erase_if(discarded, [this](VAddr page) { return !DiscardCpuWritePage(page); });
+            };
+            if (assume_locks) {
+                discard();
+            } else {
+                liverpool->SendCommand<true>(discard);
+            }
+        }
+    }
+    pages = discarded.size();
     // The touch addresses of touch_for_write: the buffer itself, then each page base after it.
     for (VAddr at = addr; at < end; at = Common::AlignDown(at, VAddr{4096}) + 4096) {
+        if (std::binary_search(discarded.begin(), discarded.end(), at)) {
+            continue;
+        }
         if (!Gow3PageOnlyWriteWatched(at)) {
             // Unprotected (maybe by an earlier window): the touch would not fault. Read-watched:
             // left to the touches (21 Oct review: their load takes the read fault, which lands
@@ -5876,6 +5920,7 @@ bool Rasterizer::PrepareCpuWrite(VAddr addr, u64 size) {
         ++pages;
     }
     g_range_prepare_pages.fetch_add(pages, std::memory_order_relaxed);
+    VideoCore::g_range_prepare_discarded.fetch_add(discarded.size(), std::memory_order_relaxed);
     g_range_prepares.fetch_add(1, std::memory_order_relaxed);
     g_range_prepare_bytes.fetch_add(size, std::memory_order_relaxed);
     g_range_prepare_ns.fetch_add(

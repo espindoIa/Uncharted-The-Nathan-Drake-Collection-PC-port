@@ -129,6 +129,9 @@ enum : std::uint64_t {
     /// Bit set: old behaviour. 21 Oct U3 4K Performance: DLSS created its feature on the first
     /// scene frame (80-230 ms stall); on, it is created at the first frame start in the menus.
     DlssPrecreate = 16384,
+    /// Bit set: off. File reads fetch whole overwritten pages again (21 Oct U3 load:
+    /// 532 pages cost 50.1 ms); on, one queued command discards their GPU bytes.
+    FileReadDiscard = 32768,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

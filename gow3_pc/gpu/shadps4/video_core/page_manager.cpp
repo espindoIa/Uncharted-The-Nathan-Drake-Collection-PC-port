@@ -57,7 +57,7 @@ constexpr size_t PM_PAGE_BITS = 12;
 // gow3 21 Oct 2026: file-read ranges prepared by Rasterizer::PrepareCpuWrite (count, bytes, ns),
 // reported by the 5 s fault stats line; taken (and cleared) there.
 std::atomic<u64> g_range_prepares{0}, g_range_prepare_bytes{0}, g_range_prepare_ns{0},
-    g_range_prepare_pages{0};
+    g_range_prepare_pages{0}, g_range_prepare_discarded{0};
 
 // gow3 21 Oct 2026: Rasterizer::HandleWriteAt's time split (GOW3_FAULT_STATS): ns in buffer-cache
 // invalidate, texture-cache part, ExtendWriteFault, LandWatchedReadback; and the call count.
@@ -170,12 +170,13 @@ struct PageManager::Impl {
         };
         std::printf("Fault stats (5 s): guest-thread read faults %llu (%.1f ms), GPU-side %llu (%.1f ms), "
                     "writes into GPU-written memory %llu (%.1f ms), file-read ranges prepared %llu "
-                    "(%.1f MB, %llu pages, %.1f ms)\n",
+                    "(%.1f MB, %llu pages, %llu discarded, %.1f ms)\n",
                     (unsigned long long)count[0], ns[0] / 1e6, (unsigned long long)count[1], ns[1] / 1e6,
                     (unsigned long long)write_count, write_ns / 1e6,
                     (unsigned long long)g_range_prepares.exchange(0),
                     g_range_prepare_bytes.exchange(0) / 1048576.0,
                     (unsigned long long)g_range_prepare_pages.exchange(0),
+                    (unsigned long long)g_range_prepare_discarded.exchange(0),
                     g_range_prepare_ns.exchange(0) / 1e6);
         for (const auto& [n, key] : top(by_rip)) {
             std::printf("  %s rip %#llx: %u\n", key >> 63 ? "write" : "read",
