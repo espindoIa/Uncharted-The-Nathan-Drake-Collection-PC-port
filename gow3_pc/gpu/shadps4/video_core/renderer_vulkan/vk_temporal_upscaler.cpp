@@ -1454,9 +1454,15 @@ float TemporalUpscaler::SceneMipBias() const {
     if (!Active() || Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa) return 0.0f;
     const float render = float(Gow3Settings::Get().active_render_width.load());
     const float output = float(Scaled() ? target_width : SceneResolution::Native().width);
-    if (!(render > 0.0f && render < output)) return 0.0f;
-    // DLSS Programming Guide 3.5: log2(render / display) - 1 (Performance: -2). DLAA (render =
-    // display) keeps the game's bias: it was validated at 0 and has no detail to restore.
+    if (!(render > 0.0f)) return 0.0f;
+    // DLSS Programming Guide 3.5: log2(render / display) - 1 (Performance: -2). It applies at
+    // DLAA too (render = display: -1). 21 Oct 2026 U3 bar scene, DLAA K: bias -1 raised the
+    // high-frequency detail (Laplacian variance) of a static wall crop from 5.3 to 13.4 (+150%,
+    // run-to-run noise ~9%); DLSS evaluate unchanged (2.27 vs 2.28 ms). The guide warns about
+    // flicker/moire; toggle bit 4096 (Disabled2) restores 0.
+    if (render >= output) {
+        return UseDlss() && !Gow3Toggle::Disabled2(Gow3Toggle::DlaaMipBias) ? -1.0f : 0.0f;
+    }
     return std::log2(render / output) - (UseDlss() ? 1.0f : 0.0f);
 }
 
@@ -1977,6 +1983,26 @@ void TemporalUpscaler::RunScaled() {
         reset = false;
         dispatched_last_frame = true;
         ExtraSharpen(cmdbuf, vk::Image(ui_image), true, ow, oh);
+        // GOW3_DUMP_TRIGGER: the inputs, the motion with and without the characters' own and
+        // the scene stencil (motion vector checks).
+        if (const int dump = DumpFrame(); dump >= 0 && camera_motion.VelocityMode()) {
+            DumpImages(instance, scheduler, cmdbuf, dump,
+                       {{color_image, source_width, source_height, 4, "input", "rgba"},
+                        {vk::Image(motion_image), w, h, 4, "motion", "rg16f"}});
+            DumpImages(instance, scheduler, cmdbuf, dump,
+                       {{depth_image, source_width, source_height, 4, "depth", "f32",
+                         vk::ImageAspectFlagBits::eDepth}});
+            DumpImages(instance, scheduler, cmdbuf, dump,
+                       {{depth_image, source_width, source_height, 1, "stencil", "u8",
+                         vk::ImageAspectFlagBits::eStencil}});
+            barrier(vk::Image(motion_image), vk::ImageAspectFlagBits::eColor,
+                    vk::ImageLayout::eGeneral, all, vk::AccessFlagBits2::eMemoryRead,
+                    vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
+                    vk::AccessFlagBits2::eShaderWrite);
+            camera_motion.RecordVelocity(cmdbuf, depth_view, *motion_view, w, h, false);
+            DumpImages(instance, scheduler, cmdbuf, dump,
+                       {{vk::Image(motion_image), w, h, 4, "camera", "rg16f"}});
+        }
     }
     barrier(vk::Image(ui_image), vk::ImageAspectFlagBits::eColor, vk::ImageLayout::eGeneral, all,
             rw, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eColorAttachmentOutput,
@@ -2320,8 +2346,16 @@ bool TemporalUpscaler::DisplayOverride(VAddr address, Display& display) {
     }();
     static int dump_index = 0;
     static int dump_remaining = 0;
-    if (dump && dump_remaining == 0 && std::remove(dump) == 0) {
-        dump_remaining = dump_count;
+    // gow3: the trigger file is looked for at most every 250 ms, not with a kernel call per frame.
+    static auto dump_poll = std::chrono::steady_clock::time_point{};
+    if (dump && dump_remaining == 0) {
+        if (const auto now = std::chrono::steady_clock::now();
+            now - dump_poll >= std::chrono::milliseconds(250)) {
+            dump_poll = now;
+            if (std::remove(dump) == 0) {
+                dump_remaining = dump_count;
+            }
+        }
     }
     if (dump_remaining > 0) {
         --dump_remaining;

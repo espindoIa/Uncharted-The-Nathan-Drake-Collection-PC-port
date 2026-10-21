@@ -1971,7 +1971,7 @@ sample (its UAC prompt was not accepted twice): no Nsight trace was taken.
     its movies use the same code path.
 
 ## 19 October 2026: 15.8 GB texture from a garbage T# (upstream #57, device lost)
-- Report (upstream #57, 0.3.1, U1 1.02 Europe, RTX 4060 8 GB, 1080p DLSS, 100 FPS, MT off):
+- Report (upstream #57, 0.3.1, U1 1.02 Europe, 1080p DLSS, 100 FPS, MT off):
   "Device lost during submit" after 26 minutes. The log's last lines:
   - "Slow image create: ... image 960x540x1 mips 1 layers 6755 R8G8B8A8Unorm, 15832.0 MiB in a
     dedicated allocation";
@@ -2025,7 +2025,7 @@ Method:
 
 Details:
 - #59/#60 (the newest U1 reports, both 0.3.1). #59 says chapter 3 "A Surprising Find" at the
-  plane, crashing even standing still, on an i5-8400 + RTX 4060 at 1440p/1080p; #60 is an MX130
+  plane, crashing even standing still, on an i5-8400 at 1440p/1080p; #60 is an MX130
   at 960x600, 30 FPS.
   - Reproduction tried here at chapter 3's start, with camera and walking: no crash in any of
     these runs.
@@ -3016,3 +3016,410 @@ fault. The ~1,500 other faults/5 s are cheap (~4 us).
 ### Not tested
 
 - U1, U2; the player's own run; long soak with the SRT change.
+
+## 21 October 2026 (evening): upstream fixes ported (batch 1)
+
+Four commits taken from BilalReloaded's repo one by one (no merge).
+
+- 2959f6d gpu: impossible images skipped; border table at 0. Source: upstream 0.4.1 (512676a).
+  Files: vk_instance.h, vk_rasterizer.cpp, texture_cache/sampler.cpp. Test: build.sh exit 0; U1 and
+  U3 40 s boots, no exception. Not tested: the hour-long U1 session (#63), U2's crash scene (#56).
+- 220268e games: constant tables touched before the fill. Source: upstream 0.5.0 (3b23bf9). Files:
+  tools/probe_uncharted.py (CUE_PRETOUCH_PATCHES). Test: U1 and U3 (1.02) 40 s boots, 2 changes
+  each, no exception. Not tested: U2; the crash itself (needs the reporters' Windows 10 stack layout).
+- 63e0a9b games: idle job workers sleep on the other retail 1.02 build. Source: upstream 64abc3f.
+  Files: tools/probe_uncharted.py (JOB_SLEEP_PATCHES). Test: U1 and U3 boots on our dump, same
+  patch offsets. Not tested: the EP9000 build; our extra 1 ms wait patch still matches only the r15
+  form.
+- f8d8aa2 u3: screen wipe covers the whole screen below 720p. Source: upstream 696bcb1. Files:
+  tools/probe_uncharted.py. Test: the script parses. Not tested: a sub-720p run.
+
+### Not taken yet from upstream
+
+- Memory trimming, pageable fallback, nested command-list leak.
+- The multithreaded flicker fix (draws wait for the second-thread constant copy, #23).
+- Shader cache checksum and per-GPU cache.
+- Player features: 5.1/7.1, trophies, unlock rewards, light bar, .pkg install.
+- Character motion vectors (needs reconciling with our flat camera source).
+
+A full merge of upstream gives 19 conflicting files. Upstream has its own v0.5.0 tag on 3b23bf9
+(ours is dcae6ae).
+
+## Upstream (BilalReloaded) 0.4.1 / 0.5.0 notes, merged 21 Oct
+
+BilalReloaded's STATUS sections after the merge base 6318dfb, as they wrote them (headings one
+level down). Their dates are theirs; fork merge choices are in the fork notes above.
+
+### 20 October 2026: U1 0x64011f crash (red zone) and the nested-task leak
+
+- **"execute access to 0" called from 0x64011f** (U1 1.02; #27, #30, #42, #62): `call rcx` at
+  0x64011d walks a constant-update table (0x28-byte header, 0x30-byte entries, the 16-bit word at
+  entry +0 selects a member function pointer). The table is filled by a leaf function (U1 0x63df10,
+  U2 0xd645f0, U3 0x12d6cf0; same code in 1.00) that keeps running entry indices and pointers in
+  the red zone ([rsp-4] .. [rsp-0x2c]). A table that crosses into a GPU-tracked, write-protected
+  page faults inside it; the Windows x64 exception frame may be built right below rsp, a counter
+  comes back wrong, an entry keeps a stale word and the walk calls null. Measured on this PC
+  (Windows 10.0.26300, scratchpad cue/deep.c): the dispatch writes nothing above rsp-1648, which is
+  why the bug never showed here. Fix (probe_uncharted.py CUE_PRETOUCH_PATCHES,
+  UNCHARTED_CUE_PRETOUCH=0 turns it off): the function's first 5 bytes jump to a stub in a dead
+  assert path nearby (still int 0x41 first) that does `lock or byte [p], 0` on every page of
+  [rdi, rdi + 0x28 + 0x30*edx), then the moved pushes and back. Stub tested standalone
+  (scratchpad cue/stubtest.c: a leaf with a red-zone value, a handler that zeroes rsp-48..rsp: the
+  value is lost without the stub, kept with it, faults move into the stub); U1/U2/U3 run at 60 FPS
+  with it, no faults.
+- **Host memory leak** (liverpool.cpp): nested IndirectBuffer / IndirectBufferConst tasks stop at
+  final_suspend and were never destroyed (only top-level tasks were). `task.handle.destroy()` after
+  the three wait loops. U3 bench: private bytes +344 MiB in 135 s before, +26 MiB after (flat in the
+  last minute), 60 FPS both.
+- **Device-loss report from Semaphore::Refresh** (vk_semaphore.cpp; GitHub #67: the loss was first
+  seen reading the master semaphore counter): ErrorDeviceLost there now dumps the GPU checkpoints
+  and the device fault info before the assertion, as the waits and the submit already did.
+- **Effect shader variant storms** (GitHub #71/#79; shader_recompiler/resource.h
+  IsGarbageEffectBuffer, Shader::gpu_mapped_extent set in the Rasterizer constructor;
+  GOW3_EFFECT_SHARP_FILTER=0 = old): cs 8f067540 (effects + U3 crowd skinning) and 7d7e7206 read
+  V#s from table slots that hold floats for some effects. BindBuffers bound them as null, but
+  StageSpecialization and the translation still saw their random stride/format: every new float
+  set made a variant plus a compute pipeline on the GPU thread. Our cache: 8f067540 1,177
+  variants (all 9 slots with 450-590 distinct stride/format values), 7d7e7206 364; the user's
+  18 Oct U2 session had a 7.8 s frame with 1,112 compiles right after the garbage V#s started.
+  BufferResource::GetSharp now returns Null for these two shaders when BindBuffers' garbage rule
+  holds (unaligned, stride >= 8 KiB, > 64 MiB, or not fully mapped with num_records < 0xFFFF0000),
+  so specialization, translation and binding agree. Checked: all 95 garbage V#s logged in the
+  three sessions that made the variants are caught; the stride rule alone cuts the cached keys
+  1,177 -> 399 (364 -> 84); U2/U3 from empty caches and warm, 60 FPS, no faults. The U2
+  Treasures screen did not produce garbage V#s on 20 Oct, so no live A/B.
+- **Pageable video memory** (GitHub #81, MX350 2 GB: `ErrorOutOfDeviceMemory` from the buffer
+  arenas' vkAllocateMemory). The sparse arena buffer accepts only device-local memory on NVIDIA
+  (RTX 5080: type 1 only; temporary "GPU: arena memory type N allowed" lines in
+  BufferCache's constructor). vramfill test (analysis/test-tools/vram): NVIDIA refuses device-local
+  memory at 15,360 MiB without VK_EXT_pageable_device_local_memory and hands out 24,576 MiB (the
+  test's maximum) with it; the limit is per process (a second process holding 12 GB changes
+  nothing); held device memory also charges system commit (13 GB held: +13.4 GB commit).
+  vk_instance.cpp now enables VK_EXT_memory_priority + VK_EXT_pageable_device_local_memory when
+  supported ("GPU: pageable video memory on"; GOW3_PAGEABLE_MEMORY=0 = off). U1/U2/U3 normal runs
+  60 FPS, no faults. Test knob GOW3_TEST_VRAM_HOG_MB=N holds N MiB at device creation: with it
+  (11,000 or 13,300, pageable on or off) U1 dies at start with STATUS_STACK_OVERFLOW (exit
+  0xC00000FD) about 2 s in, before the first frame, with no access violation (GOW3_FAULT_TRACE=1)
+  and no log line: cause unknown, test-only so far (a real 2 GB card boots). Open lead.
+
+### 20 October 2026 (afternoon): PR #87 merged (job sleep on game version 1.00)
+
+kuraeow's #87 (merged on GitHub as 5cc4ea0, applied to the local tree; backup of the previous
+tools/probe_uncharted.py in the session scratchpad) adds a second form to two of the three
+JOB_SLEEP_PATCHES sites. The PR calls it "another retail 1.02 build"; in our dumps the new forms
+are exactly the 1.00 executables (game/CUSA02344, all three games: one match each; 1.02: none):
+- re-check before waiting: `mov rax,[r13]` instead of `[r15]`; the 1.00 timed-wait wrapper
+  (U1 1.00 0x362420) multiplies its argument by 1000, so `mov edx,10` is the same 10 ms as 1.02's
+  `mov edx,10000` passed straight to the wait.
+- submission: `cmp byte [rdi+0x59],0; je short` instead of `[rax+0x59]` + `je rel32`.
+Before: 1.00 players got only the worker-loop part (workers slept, woken only by the 10 ms
+timeout). Offline check (apply_patches on copies of the six executables, old vs new script):
+1.00 all three parts patched in U1/U2/U3; 1.02 output byte for byte the same as before.
+No game run (the user was playing). CHANGELOG "Next version" entry added.
+
+### 20 October 2026 (afternoon): 10 player crash logs (downloaded with the user's OK)
+
+analysis/test-tools/issues/i<issue>/boot.log; summary script analysis/test-tools/issue_summary.py.
+- **4 of 10 = U1 0x64011f** ("execute access to 0 at 0", host #1 guest offset 0x64011f, same
+  guest stack 0x641532 <- 0x501ea9 <- 0x56d027 ...): #78 (RTX 3050 Laptop 4 GB), #82 (RX 9060 XT),
+  #85, #90 (RTX 5060 Laptop 8 GB). That is the CUE red-zone crash fixed by
+  CUE_PRETOUCH_PATCHES (unreleased; 0.4.1 does not have it). The "crash after 10-30 min on 4-8 GB
+  laptops" pattern is this crash, not video memory: no VRAM pressure in #90, #78 steady ~2.9 GB.
+- U1 0x5f64f3 read of 0 (#59), U2 0xd09665 read of 0 (#61), U1 0x63f61e read of -1 (#34),
+  RX 9070 boot "ASSERTION: root" + read of -1 at 0x4dd8ca (#80): open.
+- Device lost: #57 (0.3.1, garbage 6755-layer image, fixed in 0.4.1 by PlausibleTarget), #76
+  (RTX 5080 4K, U3 chapter 8): open.
+- Performance: #61 (U2, RTX 4070 SUPER, 2880x1620) guest-thread read faults on readback pages
+  445 per 5 s costing 426 ms (8.5% of the time), "23590 recurring readback pieces"; FPS min 25.7,
+  worst frame 6.5 s. #34 (U1, older build) 1,850 compiles, worst frame 2.5 s.
+- Arena residency is never released (EnsureResident only adds; nothing removes resident_ranges,
+  also not on unmap): real, but not what these logs crash on. Keep as a later 4 GB-card item.
+
+### 20 October 2026 (afternoon): performance work in progress (2 workers), notes
+
+- Worker A (done, built, not deployed): trigger files polled at most every 250 ms (TriggerPollDue in
+  vk_rasterizer.cpp; vk_frame_capture.cpp; vk_temporal_upscaler.cpp), stream-copy stats clock once
+  per submission, write-fault statistics only with GOW3_FAULT_STATS, small-GPU-write stats
+  lock-free once printed, IsComputeMetaClear cheap tests first, CopyBuffer watch lookups only with a
+  watch range, PublishGraphics early return + failed_graphics map, fetch shader data assigned in
+  place (vk_pipeline_cache GetProgram out-parameter, FetchReset), getenv cached in runtime_kernel.c
+  (every guest clock read), runtime_audio.c, runtime_sema.c. Reviewed by me against
+  analysis/backups/src-before-perf-20oct: behaviour-identical. Also mine: shim/common/debug.h
+  TRACE_* no longer evaluate their argument (texture_cache formatted a string per image refresh).
+- Not done (risk found on the second check): dropping the dead 8f067540/7d7e7206 variants from
+  players' caches by a per-shader meta version. New variants would reuse the old perm_idx names
+  (_0.spv, compute key HashCombine(hash, perm)), so a stale pipeline binary could pair with a new
+  module unless pipeline binaries are keyed by the SPIR-V. Needs that check first.
+- PR #84 (open), new concern, checked twice: LoadShaderMeta never loads motion vertex shaders
+  (session-local buffer device addresses), and #84 sets sel.motion for every Uncharted G-buffer
+  draw (stencil + depth write, one target) -> every G-buffer vertex shader variant is compiled
+  again in EVERY session (not only the first). Decide "character draw" before pipeline selection,
+  or make the motion VS address-independent (push constant / descriptor) so it can be cached.
+
+### 20 October 2026 (evening): US copy (CUSA02320) tested, E:\uncharted usa
+
+The user's US PKGs (base 43 GB + update 1.02, 1 GB): base unpacked with tools/pkgtool PkgTool
+pkg_extract to E:\uncharted usa\CUSA02320 (3 min, 59 GB, same uroot layout as CUSA02344); the
+update with the launcher's installer (tools/install_update.py) as CUSA02320-patch (separate
+folder, the layout of #43/#29/#58/#73).
+- PkgTool pkg_extract leaves out the PKG's metadata entries: the base had no sce_sys/param.sfo,
+  playgo-chunk.dat/.sha, playgo-manifest.xml, shareparam.json, so install_update.py refused the
+  folder ("Choose the game folder first"). Added them with install_update's own entries() +
+  pkg_extractentry (METADATA list). A player who unpacks the base PKG himself hits the same.
+- With the current build (deployed before-perf exe): U1, U2, U3 all start (title, 60 FPS) through
+  the links view (E:\uncharted usa\.uncharted-views, eboot = the update's, sha1 d81e699f...) and
+  with UNCHARTED_TEST_OVERLAY=1 (runtime overlay, 171 files). Without the base's metadata the game
+  still starts (playgo-chunk.dat comes from the update's sce_sys). So the US start crash does not
+  reproduce here; cause still unknown (#82 is US + 0.4.1 and got in-game).
+- Idea for players with PKGs: launcher "Install game from .pkg" (base: pkg_extract + metadata).
+- 20 Oct evening: launcher Advanced -> FOLDERS -> "Install game from .pkg" (launcher
+  install_game_pkg -> tools/install_update.py install_game; CLI `--game <pkg> <folder>`): pkg_extract
+  into <folder>/<TITLE_ID>, metadata entries added to uroot/sce_sys, base files checked, update PKG
+  refused (param.sfo CATEGORY gp; base is gd), existing install refused. Tested with the US PKG
+  (2 min 49 s, then removed). US 1.02 executables are byte-identical to EU 1.02 (all patches apply).
+- 20 Oct evening, US gameplay check (new build out/gpu, GOW3_TEST_CHOICE=0 answers the port's save
+  list dialog, new test knob in shim/gow3gpu.cpp): New Game in all three games from the US copy:
+  U1 chapter 1 boat (60 FPS, worst 17.2 ms), U2 chapter 1 train cliff (60 FPS, 4+ min), U3
+  chapter 1 bar fight (60 FPS; one 65 ms frame at the level load). No faults.
+
+### 20 October 2026 (evening): hybrid-laptop freezes = present under the submit lock (fix built)
+
+- Laptop (7840HS, NVIDIA laptop GPU + 780M; the 780M drives the 2560x1600
+  165 Hz panel, frames copied across): 17:30 build, 1080p windowed: U3 median 38 FPS (min 24),
+  freezes to 0.82 s; U1 Continue median 47 (min 32), freezes to 0.61 s; menus 46-184 ms freezes.
+  In the freezes the GPU command thread was not idle, in no counted wait, ~31 ms on the CPU.
+- Cause in code: Presenter::Present / PresentLoadingFrame called vkQueuePresentKHR holding
+  Scheduler::submit_mutex (present queue = graphics queue), so every SubmitExecution waited for a
+  blocking cross-adapter present. Fix (built 19:21, out/gpu, sha1 1e31b0d7): a third queue of the
+  graphics family for presents (vk_instance.cpp; Instance::SeparatePresentQueue; PresentLock in
+  vk_presenter.cpp), GOW3_PRESENT_QUEUE=0 = old. New counters Gow3Stats::frame_wait_ns /
+  submit_lock_ns (draw scheduler only) / acquire_ns / present_ns: "Presentation waits:" line per
+  5 s and a "presentation:" line per Stall block (driver.cpp). AMD (1 graphics queue) unchanged.
+- Desktop check (5080, screen on the card): U3 and U1 gameplay 60 FPS, worst 17.2 ms (U1 one
+  38 ms), "presents on their own queue", present 1% of wall time, saves restored. Usual build
+  (before-perf) deployed again. Backups: analysis/backups/main/present-queue/.
+- Package for the laptops: analysis/laptop-pkg/fix-20oct-2(.zip, 34.6 MB): exe, present-queue.patch,
+  LAPTOP-HANDOFF.md (pq-on/pq-off A/B twice in U3, U1, U2, stall stacks, 780M). Laptop share access
+  failed both ways (laptop port 445 closed; this PC refuses the laptop: account restrictions).
+- 5060 laptop: no results today; its session was offline at 19:40.
+- Still open: U3 ~48 FPS ceiling on laptop CPUs (GPU command thread CPU-bound, ~54K draws/s).
+
+### 20 October 2026 (night): laptop freezes = port on a USB exFAT drive
+
+- Laptop: D: = NVMe SSD in a USB enclosure (ASMT 2462, exFAT); C: = internal NVMe.
+  The port tree (D:\uncharted) and first the game (D:\game, /app0 overlay) were on D:.
+- Present-queue theory disproven on the laptop (Presentation waits ~0% with and without it).
+- Game on C:, port on D:: U3 steady 53-55 FPS but freezes to 0.67 s after the level load;
+  U1 worse (28-60 FPS, 0.5 s freezes every window). Port AND game on C: (port copied to
+  C:\Users\bilal\Desktop\uncharted\port, 3.2 GB): U3 1 frame over 40 ms (43.9), 0 over 100 ms.
+- Freeze stacks (port on D:): GPU thread 61% waiting for the guest, ~13% in trigger-file checks
+  (filesystem::exists/remove on D:, ~100 ms each); game flip thread waiting on a guest condvar.
+- Launcher: slow_drive_reason / confirm_slow_drive (USB/SD/MMC/FireWire bus via
+  IOCTL_STORAGE_QUERY_PROPERTY, removable, FAT/exFAT): warns once per port+game folder pair.
+  Checked here: D: (WD My Passport USB HDD, exFAT) flagged, NVMe drives not. CHANGELOG entry.
+- Open: make the port immune (async log writes, no trigger polls on slow drives): pinpoint run
+  dport-guest-u3 requested; CPU-bound U3 ~47-54 FPS (NVIDIA GPU) / 41 (780M 720p): optimization worker.
+
+### 20 October 2026 (night): GitHub #95 memory, proper fix (built, laptop test pending)
+
+- #95 log (0.4.1): compute pipelines 926 -> 9,942 over the session (variant storm of cs 7d7e7206 /
+  8f067540, fixed in the tree: laptop soak 40 -> 47). RAM flat in steady state on the laptop
+  (8.46 GB private for the last 6 of 16 min) = the host leak fix holds.
+- Remaining: buffer arenas never release (soak 320 -> 1,920 MiB in 16 min, one level change).
+  Fix (fix-20oct-6, sha1 06725fb6, 21:40): BufferCache::ReclaimArenaMemory (per submission from
+  Rasterizer::OnSubmit, works every 2 s): 1 MiB windows of guest GPU memory get the epoch of their
+  last arena use (TouchArenaWindows in GetArena and SynchronizeDmaRange). Above GOW3_ARENA_LIMIT_MB
+  (default max(768, heap/4)), windows unused for GOW3_ARENA_RECLAIM_AGE_S (60) are released oldest
+  first down to 3/4 of the limit: skipped when GPU-written (gpu_modified_ranges, tracker), pending
+  readbacks, lazy pages, or the GPU has not finished the epoch after their last use.
+  ReleaseArenaBlocks: IntervalList::Remove (new, with a cut functor: Backing::SubRange mixes block
+  and byte units), sparse unbinds into pending_binds, BDA page table entries zeroed, guest range
+  marked CPU-modified (re-upload; static ranges demote via IsRegionCpuModified), memory runs
+  quarantined until SubmitPendingArenaBinds, then reused first by EnsureResident (which also trims
+  pending unbinds of ranges bound again). GOW3_ARENA_RECLAIM=0 off. Memory: line shows held / in
+  use / given back. Risk: shaders in DMA "full" mode reading a released window see zeros (as for
+  memory never made resident); mitigated by the 60 s age and the limit.
+- Backups: analysis/backups/main/arena-reclaim/. Laptop runs: forced-u2/u3/u1 (limit 600, age 20,
+  screenshots), default-u2 900 s, 780M u2.
+
+### 20 October 2026 (night): CPU savings confirmed on the NVIDIA GPU; 780M memory placement
+
+- fix-20oct-5 A/B on the NVIDIA GPU (U3, C: port), two pairs: GOW3_READBACK_POOL + GOW3_SKIP_COMPUTE_REBIND
+  on vs off: ~1,030 draws 54.5 vs 50.9 FPS (+7%); ~1,250 draws 65.3K vs 62.0K draws/s (+5%).
+- 780M (pq-on-1 log): sparse arenas allowed in type 0 (heap 0, 256 MiB, DeviceLocal), 1 (heap 1,
+  19.8 GB system, HostVisible|Coherent), 2 (heap 2, 256 MiB, DeviceLocal|HostVisible), 3 (heap 1,
+  +HostCached). The arenas went to the 256 MiB heap (overcommitted by 1-2 GB).
+  fix-20oct-7 (22:00, sha1 c7ebe32f): GOW3_IGPU_ARENAS=system (integrated GPUs, opt-in) picks the
+  largest HostVisible|Coherent heap (prefers HostCached), arena_host_mapped; reclaim limit there =
+  max(768, min(2048, heap/8)). GOW3_WAIT_PAGE_READ (on): with host-mapped arenas and no copy queue,
+  a CPU write fault waits for FetchableWindowTick then ReadFinishedGpuPage instead of a full
+  download. Also: SrtPlanFor memo (32 entries), StaticRangeBits 18 -> 16.
+- 780M U3 720p, fix-20oct-7 (same view, ~1,028 draws): default 43.9/45.1 FPS; GOW3_IGPU_ARENAS=system
+  47.2 (and 44.4 at 1,195 draws = 53.5K draws/s), GPU ticks 3-3.7% -> 0.1-0.5%, 181 direct page
+  reads/5 s, no faults -> made the default for integrated GPUs (22:21 build; =local: old).
+  System + multithreaded (UNCHARTED_MULTITHREADED_U3=1 UNCHARTED_U3_MULTITHREADED_TEST=1): 55.1 FPS
+  (min 53.9, worst 29 ms), stage B busy 62%, stage A waited 18%, no faults. 15-min MT soaks on
+  both GPUs requested before changing the U3 multithreading default (#51 freeze risk).
+- 780M U2 subtitle / pause menu flicker (user, watching): bis-1 system arenas yes, bis-2 local
+  arenas yes, bis-3 READBACK_POOL/SKIP_COMPUTE_REBIND off yes, bis-4 laptop's pre-20-Oct exe
+  (cc6f758b) yes = pre-existing, not today's work. bis-5 (NVIDIA GPU at 720p) / bis-6 (780M at 1080p)
+  split GPU vs render size. System arenas made the iGPU default again (23:04 build).
+- Desktop (user, 5080, usual build f0ec3cbf, U2, DLSS 4K render): aim blur back. Log: "Aim focus:
+  crosshair box centre 0.25 -> 0.5 (render 3840x2160)" applied, "Tiny image readbacks: ~300/5 s"
+  (last 0x1040340000). Read-only live check: scratchpad u2focus.py (global 0x13e42c0+0x35f8).
+- U2 aim blur (user, 5080, 4K DLAA): live read (u2focus.py) of the focus value: alternates between
+  2.06-2.18 (target, tracks aiming) and 5.637/5.641 (= the uncorrected box: the wall beside Nate,
+  16 Oct analysis). FixAimFocusCentre wrote the corrected centre through the backing view only
+  (not tracked): when another draw had uploaded the block earlier in the frame the GPU kept the
+  old centre. Now BufferCache::WriteThrough (guest + GPU copy in stream order), backing fallback.
+  Build 23:10 deployed to out/gow3-probe.exe for the user's U2 check (U3 uses the same path).
+- 780M flicker: bis-5 (NVIDIA GPU at 720p) no flicker -> 780M-specific, pre-existing.
+- U2 aim blur FIXED (user-confirmed 23:24, 4K DLAA): FixAimFocusCentre now writes through
+  (BufferCache::WriteThrough). New per-5 s line "Aim focus (5 s): N binds; skipped ...; N corrected
+  (N through to the GPU copy)": user session 300/300/300. Build 6a3bb583 (23:20) deployed.
+- U3 d-pad prompt (user screenshot, museum chapter): picture 256x256 BC1 hash e8a2f49b992621fc
+  (masks f63e4fb97d71d9ed / 31e0b53a6c874ec5), found with GOW3_PROMPTS_LOG=1 (test-env.txt, restored)
+  and scratchpad promptsheet.py (reads the logged pictures from the running game, read-only).
+  gow3_prompts.cpp Kind::Dpad + RedrawDpad: the bound key (GOW3_PROMPT_UP) on the lit orange arm,
+  keyboard set only (controllers keep the picture). prompts-test harness takes "dpad"; rendered OK.
+  Build 00718657 (23:39) deployed; user check pending.
+  User-confirmed fixed (23:50).
+- Laptop mt-soak-nv (fix-7, U3 MT, 15 min): FPS 60 most of the time (MT: GPU thread idle 23-27%)
+  but dips: compute variant storms (cs 8f067540 / 7d7e7206 / 0c936dd6 each 100+ variants, compute
+  pipelines 40 -> 733, a 918 ms frame with 136 compiles). 0c936dd6 had unmapped 1-3 GB V#s (bound
+  null, but specialised). Fix (fix-20oct-8, 23:53, sha1 34d1b37b): IsGarbageEffectBuffer for EVERY
+  shader (odd-looking V#s that BindBuffers would null read as null in GetSharp); effect family
+  (now incl. 0c936dd6, IsEffectShader) keeps the strict rule; "variant N buffers" diagnostics at
+  101-106 variants. f8 MT soaks (NVIDIA GPU, 780M) queued. Deployed on the desktop too.
+- U3 museum red carpet (user): pre-existing (the pre-20-Oct build shows it too). Frame capture
+  analysis/uncharted-user/captures/frame_20261020-235100_2.txt (scene pass #22: 98 draws, 125
+  textures); cause not found yet.
+
+### 21 October 2026 (night): U3 museum red floor = damaged shader cache pair (FIXED, verified)
+
+- Symptom: the room behind the guard's door (young Drake, museum) shows a flat red floor on the
+  desktop (RTX 5080) at any resolution/upscaler/draw distance; the laptop renders its green/yellow
+  tile pattern. Not vendor, not depth: GOW3_PIPELINE_CACHE=0 (fresh compile) renders it right.
+- Cause: mesh ib 0x119c453800 (96 indices), shading vs 91304408 (ps 34dde251). Shader metas are
+  named HashCombine(pgm, perm_idx), binaries <pgm>_<idx>.spv; two separate blobs, binary first.
+  20 Oct 08:14 a session rewrote 0x91304408_4.spv (another permutation's code, same as _5) but
+  the rename of 0x000009133abab9f5.meta failed (warm-up reading it): the only .meta.tmp in the
+  20,378-file cache. Every later start loaded meta(18 Oct spec) + wrong binary.
+- Fix (vk_pipeline_serialization.cpp, cache_storage.*; backups *.before-metahash): ShaderMetaVersion
+  13 = meta stores XXH3 of the binary written just before it; BinaryMatchesMeta rejects mismatches
+  (and removes both files via DataBase::Remove on the IO queue); v12 metas still load when
+  DataBase::WrittenTogether (no .tmp, mtimes <= 30 s apart). WriteVector retries the rename 20x5 ms
+  and drops the temp on failure. Verified on the original cache copy twice: run 1 rejected exactly
+  that pair, floor correct; run 2 no rejections, floor correct (build 5ecdab95).
+- Also: per-GPU cache swap (SwapCache, worker-reviewed + LRU fix); GOW3_SKIP_IB_DRAIN knob (MT only,
+  default off); invariant positions opt-in (GOW3_INVARIANT_POSITION=1, made no difference).
+- Diagnostics added (all env-gated): GOW3_SKIP_FILE accepts index-buffer addresses; depth probe
+  modes 3 (GEQUAL) and "4 n" (bias); GOW3_MESH_DUMP=<ib>[+_ALL]; capture "mesh" lines (worker).
+  Test scripts: analysis/test-tools/carpettest.sh, carpetlive.sh.
+
+### 21 October 2026: compile-storm leftovers in old shader caches (#92, #95)
+
+- Issue logs: caches built before the storm fix hold thousands of compute pipelines: #92 23,845
+  (RX 9070 XT; amdvlk64.dll read fault at 0x60 while warming up, 24,034 of 26,910 done), #95 9,942
+  (332 s warm-up), #109 8,282, #74 7,562, #29 7,052, #85 4,484 (89 s). Desktop cache: 8f067540 had
+  1,268 cached versions and 7d7e7206 383; no other shader above 35. The storm fix stops new ones but
+  the background warm-up still built every old version at every start.
+- Fix (vk_pipeline_serialization.cpp FindCrowdedShaders, cache_storage ForEachBlobName): before a
+  warm-up reads the store, binary names are counted per program; a program with >= 100 cached
+  versions is skipped by both warm-up paths (ReadWarmEntry, LoadPipelineStage) and its binaries,
+  metas and c_ pipeline keys (all named by HashCombine(program, index)) are removed through the IO
+  queue. On-demand compiles then start that program at index 0 again.
+- Verified (build 694e265e, desktop): U2 run 1 removed both (383 + 1,268), 82 compute pipelines
+  (was ~1,730), 60 FPS, no storm lines; cache files 6,894 -> 5,245 spv, each storm shader left with
+  its 1 new version. U2 run 2: nothing removed, 5,026 keys, 8.8 s warm-up, 60 FPS. U1 and U3 runs:
+  82 compute pipelines, 60 FPS, no faults. Backup of the removed files:
+  analysis/backups/crowded-before-1021. Laptop package pkg/fix-21oct-7.
+- Other issue findings 21 Oct: #102/#107/#94 = U1 0x64011f (CUE pretouch fix); #109 = the same crash
+  in U2 (0xd667ff, fill 0xd645f0 + 0x220f as in U1); #105/#74/#29 = 8f067540 storms; #103 =
+  AnkerGames repack without files.json; #104 exit 23 = guest debug exception (log needed); #77 movie
+  upscale costs 3.3 ms/frame at 4K here (not the cause; open).
+- 21 Oct ~13:45: laptop Q2 (U2, NVIDIA GPU, fix-21oct-6, the user playing) stopped at ~16 min on
+  image_info.cpp:191 ASSERT(!props.is_block) after "SurfaceFormat: Unknown data_format=36 and
+  num_format=13": a garbage T# (BC2 + Ubscaled) with a macro-tiled mode; ImageInfo's constructor
+  asserts before PlausibleImage runs. UpdateSize now returns with guest_size 0 for block +
+  macro-tiled (never a real texture: it always asserted), PlausibleImage drops it. Build 5cff3a16,
+  deployed (backup out/gow3-probe.before-blockmacro.exe = 694e265e), pkg fix-21oct-8; desktop
+  U1/U2/U3 regression 60 FPS, no faults. Q2 memory to the stop: RAM 5.1 -> 9.0 GB private, VRAM
+  1.7 -> 5.6 GB, arenas 320 -> 1,984 MiB (limit 1,989 MiB, none given back yet), images 1,374 ->
+  652 MiB after GC.
+- 21 Oct ~14:40, proof of the garbage-T# fix: test switch GOW3_TEST_GARBAGE_TSHARP=<s>[,<n>]
+  (vk_rasterizer.cpp TestGarbageTSharp, main bind path, off by default) turns the next n T#s into
+  BC2 + number format 13 + a macro-tiled mode. Build without the fix (9d586046) + switch: the exact
+  Q2 stop (SurfaceFormat warning, image_info.cpp:191 UpdateSize, STOP). Fixed build: dropped
+  ("Ignoring a garbage T#"), but a forced T# in a depth slot then stopped in PromoteFormatToDepth
+  (UNREACHABLE for Bc2UnormBlock): ImageInfo/ImageViewInfo now promote only promotable formats
+  (IsPromotableToDepth) and give the rest size 0. Final build 8b74cda0 + 3,000 forced: 60 FPS for
+  75 s, no stop; U1/U3 regression 60 FPS, shadows correct. Deployed (backup
+  out/gow3-probe.before-depthgarbage.exe = 5cff3a16), pkg fix-21oct-9. Test exes:
+  analysis/test-tools/bench/exe-garbage-old.exe, exe-garbage-fix2.exe.
+- 21 Oct ~16:25, cache swap (laptop T1): no cache went to the wrong GPU (folder profiles: active +
+  gpu-2 NVIDIA, gpu-3 AMD). Build 7 (no SwapCache, clears) ran at 13:23 on the NVIDIA GPU and deleted the
+  780M cache, leaving two NVIDIA GPU caches; t1c restored the first by folder order. SwapCache now
+  restores the newest matching cache (folder stamp) and removes older ones of the same GPU. Desktop
+  test (5080 + AMD iGPU, fake older NVIDIA duplicate named gpu-0): iGPU start restored its cache,
+  NVIDIA start restored the real one and removed the fake. Build f36c6f02 deployed (backup
+  out/gow3-probe.before-swapnewest.exe = 8b74cda0), pkg fix-21oct-10. Cache backup:
+  analysis/backups/cache-before-swaptest-1021 (13 GB). User's U3 session 14:5x-15:18 on 8b74cda0:
+  ~42 min, median 60, min 57, exit 0.
+- 21 Oct evening, new features (deployed 971e6a41, unreleased): surround sound (runtime_audio.c:
+  the games mix their 8-channel port for the layout GetPortState reports; port reported stereo so
+  only L/R had sound; dumps: told 8 -> all 8 channels active, told 6 -> L R C LFE + surrounds in
+  7-8; auto = device channels; launcher Advanced -> Speakers), controller light bar
+  (SDL_SetGamepadLED; colours 0000ff/202000/400000), trophies (saved per list in
+  user/trophy/trophyNN.txt, unlock state reported, PS5-style popup with the pack's TROPnnn.PNG +
+  chime, menu Trophies tab; label 1/2/3 = trophy01/02/03.trp, 54/53/59 trophies; names are in
+  encrypted ESFM and the dump has no npbind.dat, so not shown). Tests: services-test (trophy
+  logic), GOW3_TEST_TROPHY screenshots in all three games, audio dumps.
+
+## 21 October 2026 (night): upstream 0.5.0 merged
+
+Merge of upstream a77e0c6 (0.5.0) into claude/merge-upstream-0.5.0 (base 6318dfb1, ours 9adda9a).
+Decisions (ours = fork kept, theirs = upstream taken):
+- Compute IB drain: ours (default on, bit 4) plus upstream's GOW3_SKIP_IB_DRAIN ORed in. Same fix.
+- buffer_cache counters, FetchableWindowTick, readback state, GOW3_FETCH_NO_BLOCK: both (independent).
+- Frame dump / retexture / readback trigger files and swapchain clear: ours (background watcher, clear only when bars show). Upstream's 250 ms polls and GOW3_PRESENT_SKIP_CLEAR do the same.
+- vk_instance: both (present wait plus memory priority / pageable device-local #81).
+- Motion eligibility: both, `bound >= 5 || flat_scene || uncharted_gbuffer`. Character motion (stencil_gate) also needs !flat_source, so flat (default) keeps the fork's object motion; velocity mode gets upstream's character vectors.
+- Scheduler: both (SubmitLog times around upstream's try_lock; RecordSerial).
+- Staging buffer pool: ours (upstream's counter is not in the merged toggles.h; 128 MiB keep budget stays).
+- Pending GPU writes (NotePendingGpuWrite, PostDraw): theirs (uncommitted indices, stamps only noted entries) plus our NoteRingWrite and ring epochs. GOW3_PIPE_WRITE_END=0 now also turns off ours.
+- SyncSrtTables wait: both, ours first (SrtPendingWrites drain); theirs still guards when bit 512 is set.
+- Garbage V# at bind: ours, with ClassifyGarbageSharp using Shader::IsEffectShader. resource.h GetSharp filter: theirs, now gated by Shader::garbage_sharp_filter_on = !Disabled2(SpecGarbageSharps) (bit 1024 used to be ignored by it).
+- OnWriteFault, DepthCompareProbe, SkippedShader: combined (our pollers publish upstream's wider modes / mesh lists; timed fault path is theirs).
+- FixAimFocusCentre: upstream's write-through signature taken; the ring path passes nullptr (guest copy only, no GPU commands in stage A) and the next direct bind writes the corrected value through. Needs a U2/U3 4K aim check.
+- cache_storage / pipeline serialization: theirs (checksum, repair, purge); SwapCache uses our per-game cache_path.
+- driver.cpp, equeue, thread.cpp: theirs (HR timer, waits) plus the fork's PresentBeforeFlip / PrepareAtFlipPacket (see the hang below).
+- Launcher read_config: ours (v7 = MT on in all games; version stays 8; upstream's FSR 1 migration needs keys the fork lacks). MT row text and probe U1 multithreading: ours (U1 follows the launcher). Speakers, rewards, mouse aim factors, Install from .pkg, drive warning: theirs, auto-merged. Probe speakers block: theirs; its AA comment: dropped.
+- JOB_SLEEP_PATCHES: ours (extra 1 ms wait entry, no duplicate signature). runtime_kernel clock_read cache: ours (atomic). runtime_pad read_inject: both (replay= and record tokens).
+- tools/install_update.py: TITLE_ID from param.sfo must match [A-Z]{4}\d{5}, so a damaged SFO cannot point the .partial rmtree outside the chosen folder.
+- Rejected: upstream's separate Upscaling option and U3 MT-off migration.
+
+Toggle bits: unchanged, upstream added none. Disabled2: 1 FaultPrewait, 2 free, 4 ComputeNestedNoDrain, 8 PresentBeforeFlip, 16 PrepareAtFlipPacket, 32 RingPreciseWrites, 64 RingKeepOnCommands, 128 SrtPipeCheck, 256 DrainCopyShaders (inverted), 512 SrtPendingWrites, 1024 SpecGarbageSharps (now also gates upstream's GetSharp filter), 2048 RangeWritePrepare, 4096 free, 8192 PrewaitAlways, 16384 DlssPrecreate, 32768 FileReadDiscard. First word as in gow3_toggles.h.
+
+Boot hang found after the merge (U3 froze at the start of gameplay, 3 of 3 runs; U1 once stopped before "presenter ready"): thread stacks showed every GPU thread idle, guest threads in kernel_usleep, PresentThread in driver.cpp hr_wait. Env bisection: GOW3_HR_VBLANK=0 alone fixed it (HR_SLEEP, PIPE_WRITE_END, SRT_PENDING_DRAIN, PRESENT_QUEUE, ARENA_RECLAIM, PAGEABLE_MEMORY, COPY_WAIT_BLOCK=0 and MT off did not). Cause: upstream's HR vblank loop waited only for `!requests.empty()`, but the fork presents frames early (PresentBeforeFlip, the presents queue, requests marked presented and completed by CompletePresentedFlips). hr_wait returned at once for an already presented flip, receive_request did not take it, CompletePresentedFlips never ran, so the vblank thread spun in one tick: no vblanks, no flip completions, the guest waited forever. Early presents also never set the wake event. Fix in driver.cpp/.h: hr_wait waits on HasFlipWork(), the HR loop calls CompletePresentedFlips and skips presented flips, new VideoOutDriver::WakePresentThread() is called for early-present pushes and the flip push.
+
+Results: build.sh exit 0; unit tests motion-history, flat-camera, page-state, trigger-files exit 0; python unittests test_prepare, test_game_update, test_apply_update, test_save_backup pass. Boots of 30-45 s with GOW3_FRAME_STATS=1 and HR vblank on: U3 120 FPS, U1 and U2 run. U3 bench, chapter 2 meat market: 76.6 FPS (about 75 before the merge).
+
+Not verified: the single early U1 stall before "presenter ready" (seen once, not reproduced in 4 runs, not confirmed to be the same cause); frame pacing of the new vblank wait against GOW3_HR_VBLANK=0; MT flicker (#23) with the combined pending-write code; U2/U3 aim focus at 4K; velocity-mode character motion; pageable memory on a small card; VRAM trim over a long session; per-GPU cache swap with per-game folders; GOW3_FETCH_NO_BLOCK; the new features in a game (speakers, rewards, trophies, light bar, mouse aim after upstream's rewrite, Install from .pkg); the launcher GUI. No adversarial review of the merge was done (the Codex review was stopped by the user).
+
+## 21 October 2026 (night): DLAA texture LOD bias -1 (toggle bit 4096)
+
+DLSS Programming Guide 3.5 gives the texture LOD bias as log2(render / display) - 1. SceneMipBias() applied it only below native size and kept 0 at DLAA; at DLAA (render >= output, DLSS) it now returns -1 too. Disabled2 bit 4096 (DlaaMipBias, bit set = old 0) is read per draw (Rasterizer::BindSamplers path, sampler cache keyed by the bias bits), so it takes effect live from the toggle file; "Upscaler: scene texture LOD bias" is logged when the value changes. FSR, TAA and inactive keep their values.
+
+Measurements (U3 bar after Continue, 4K, frame dumps by GOW3_DUMP_TRIGGER, Laplacian variance x1e4 of the static wall crop 1650-2030 x 560-820; run-to-run noise ~9%):
+- Performance K (bias -2): 13.2 and 14.4 (two runs).
+- DLAA K bias 0: 5.3. DLAA K bias -1: 13.4 (+150%).
+- DLSS evaluate: 2.07 ms Performance K, 2.28 ms DLAA K, 2.27 ms DLAA K bias -1 (no cost).
+
+Same session, other findings:
+- Depth is conventional (near 0.875, far 0.971), so DepthInverted off is right.
+- Jitter: 32 phases at Performance, matches the guide.
+- The port's `sharpness` (RCAS) does nothing at <= 1; 1.4 gave +20% on the wall crop.
+- Model M gave 55% less high frequency than K at Performance and costs +0.85 ms.
+
+Not verified: flicker and moire in motion (the guide warns about them with a negative bias); U1 and U2 at DLAA; cost in heavy scenes (the finer mip raises texture bandwidth); one wall crop in one scene is the only sharpness evidence. Toggle bits: 4096 is no longer free.

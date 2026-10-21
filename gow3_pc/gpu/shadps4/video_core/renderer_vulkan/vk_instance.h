@@ -107,6 +107,11 @@ public:
         return sparse_queue;
     }
 
+    /// Array layers one image may have (Vulkan guarantees 256; 2048 on most GPUs).
+    u32 GetMaxImageArrayLayers() const {
+        return properties.limits.maxImageArrayLayers;
+    }
+
     /// Work groups one dispatch may have along X (Vulkan guarantees 65535).
     u32 GetMaxComputeWorkGroupCountX() const {
         return properties.limits.maxComputeWorkGroupCount[0];
@@ -119,6 +124,12 @@ public:
     /// gow3 diagnostics: VK_KHR_present_id and VK_KHR_present_wait are on (GOW3_DISPLAY_LOG).
     bool HasPresentWait() const {
         return present_wait;
+    }
+
+    /// gow3 20 Oct 2026: presents go to a third queue of the graphics family (when it has one),
+    /// so a blocking present does not hold the graphics queue's submit lock.
+    bool SeparatePresentQueue() const {
+        return present_queue != graphics_queue;
     }
 
     TracyVkCtx GetProfilerContext() const {
@@ -527,6 +538,7 @@ private:
 
     /// Creates the VMA allocator handle
     void CreateAllocator();
+    void HogVideoMemoryForTests();
 
     /// Collects various information from the device.
     void CollectDeviceParameters();
@@ -595,6 +607,8 @@ private:
     bool maintenance_5{};
     bool gpu_checkpoints{};
     bool device_fault{};
+    bool memory_priority{};
+    bool pageable_device_memory{};
     bool address_binding_report{};
     bool pipeline_binaries{};
     vk::PipelineBinaryKeyKHR pipeline_binary_global_key{};
