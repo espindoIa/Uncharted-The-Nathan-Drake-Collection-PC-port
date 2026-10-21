@@ -6,6 +6,26 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork 0.5.0 "Expedition")
 
+- **Fixed: the hitch at the very start of gameplay with DLSS (not DLAA) in Uncharted 3.** DLSS built
+  its internal setup (NVIDIA's "feature") when the first gameplay frame was drawn. With a scaling
+  preset that took 80-177 ms in our tests, so that frame lasted 90-190 ms, and in the player's log
+  230 ms (Performance preset, 4K). DLAA builds faster (about 40 ms). It happens once per session.
+  The port now builds it while you are still in the boot and menus, using the size and quality the
+  first gameplay frame will need; if the settings turn out different, it builds again then, as
+  before. In a test with the player's save and settings (4K) the setup took 63 ms during the menus
+  and the chapter start had no stall frame (95.6 FPS, no crash). Not tested in Uncharted 2 or 1, with
+  a custom render resolution (the likeliest case to still hitch), or after changing the upscaler in
+  the in-game menu.
+
+- **Diagnostic: a rare long stall inside the graphics driver is now logged in detail.** The player's
+  log had one 188 ms stall while sending work to the graphics card during a chapter load. It did not
+  happen in 3 test runs at the player's settings, so it is not fixed. When it happens again, the log
+  gets a "Slow submit detail:" line (for waits of 50 ms or more) with video memory use against its
+  budget, shader compiles running at that moment and the compile time of the last 5 seconds. That
+  tells whether the stall comes from video memory running out or from shader compiles competing with
+  the driver, so the next fix can aim at the right one. Nothing changes in play. Please send the log
+  if you see a stall like it.
+
 - **Improved: smoother play when the game writes next to data the graphics card just wrote.** The
   game does this about 1,700 times a second in Uncharted 3, and the port made the game thread wait
   for the graphics card on many of those writes even when they touched different bytes. It now waits
@@ -22,8 +42,9 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   almost entirely there, and one 5 second stretch at 39.9 FPS. The port now prepares the whole
   destination of a file read once instead. This removes the trap itself, but part of the cost is the
   work done for each page, so it only reduces this stutter, it does not remove it. Not fixed: stalls
-  from uploading large images (up to 230 ms) and a 188 ms driver stall seen in the same log. Not tested
-  on the player's own chapter load, nor in Uncharted 2 or 1.
+  of about 97 ms from uploading large images and a 188 ms driver stall seen in the same log (now
+  logged in detail). The 230 ms frame in that log was the DLSS start-up, see the entry above. Not
+  tested on the player's own chapter load, nor in Uncharted 2 or 1.
 
 - **Fixed: freezes of 1-6 seconds after some cutscenes in Uncharted 3 and 2.** After a cutscene the
   treasure effect (two compute shaders) read data from table slots that hold plain numbers instead of

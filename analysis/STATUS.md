@@ -2809,3 +2809,65 @@ buffer lock wait/under lock, write-fault page and RIP histograms. Always on: "DL
 
 Open: page fetch (~300 ms/5 s) and the queue to the GPU command thread (~250 ms/5 s) per GPU-page write
 fault. The ~1,500 other faults/5 s are cheap (~4 us).
+
+## 21 October 2026: first-gameplay-frame DLSS stall; slow-submit detail
+
+### Evidence
+
+- Player U3 log (21 Oct, preset=3 Performance, dlss_model=k, 4K output): a 230.2 ms frame right after
+  "DLSS: DLSS 1920x1080 -> 3840x2160, quality 3, preset 11, HDR input", i.e. the first gameplay frame of
+  the session. Cross-checked: it is the same frame the chapter-load entry listed as a 16.9 MB image
+  upload (boot.log line 349: "GPU thread on CPU 218.8 ms; 1 images registered, 16.9 MB image uploads").
+  It is one frame, directly after the DLSS line above, not two stalls.
+- Correction to the write-fault entry above ("not mainly DLSS creation; cause open"): that conclusion came
+  from the DLAA bench (creation 37-41 ms). At the player's Performance/model K settings creation takes
+  63-177 ms, so this frame was mostly DLSS creation. The older entry is left as written.
+- Reproduced with the player's save and settings: "DLSS: feature created in 176.5 ms" -> 189.4 ms frame
+  (1080p output run), "80.4 ms" -> 92.1 ms frame (4K run). DLAA creates in ~37-41 ms.
+- NGX CreateFeature is synchronous on the recording thread; the GPU command thread only waits
+  (LandDeferredFenceFor) during it. One creation per session.
+- Also seen in the reproduction (repo cache only, not the player's): 88-94 ms frames with the GPU thread
+  waiting in QueueShader capture_job.Wait for shaders missing from the repo cache. The player's cache has
+  them (0 compiles in their stalls), so this is not their stall.
+
+### Fix (DLSS)
+
+- TemporalUpscaler::PrecreateDlss runs at the first frame start (boot/menus) and creates the feature there.
+  It predicts the desc the first scene frame will need with the same DlssDesc builder as RecordDlss:
+  SceneSize, target size, hdr = !Scaled(), QualityForScale, TransformerPreset.
+- RecordDlss logs "pre-created feature used" or "did not match ..., recreating". A mismatch costs what it
+  cost before.
+- Toggle: second word bit 16384 (DlssPrecreate, gow3_toggles.h) restores the old behaviour.
+
+### Verified (DLSS)
+
+- Same save/settings, 4K: "DLSS: feature pre-created in 63.4 ms" during boot/menus (that frame 93.9 ms,
+  before gameplay), "DLSS: pre-created feature used" at the chapter start, no stall frame there; 95.6 FPS,
+  no crash.
+
+### Not tested
+
+- U1/U2.
+- GOW3_RENDER_RES sessions (the likeliest mismatch of the predicted desc).
+- Switching the upscaler in the menu.
+- A toggle A/B (bit 16384 on vs off) beyond the before/after runs above.
+
+### Slow submit: diagnostic only
+
+- Player log: one 188.2 ms vkQueueSubmit in the driver during the chapter load, in the same frame as 203 ms
+  of write faults, with async compile workers at 2,831 ms in that 5 s window. GPU: RTX 5070 12 GB.
+- Not reproduced in 3 runs at the player's settings. No behaviour change.
+- New: for submits >= 50 ms (vk_scheduler.cpp) a "Slow submit detail:" line with
+  - device-local heap usage/budget (VK_EXT_memory_budget; "heap budget unavailable" without it),
+  - compiles running right now (new g_gow3_compiles_running counter in the compiler workers,
+    vk_pipeline_cache.cpp),
+  - the 5 s window compile totals (async workers, GPU thread compiles), read without resetting them,
+  - submits not yet known complete and pending ops.
+- Hypotheses it separates: VRAM over budget (the driver pages inside the submit) vs. pipeline compiles
+  contending in the driver.
+
+### Open
+
+- Slow submit stays open until a player log shows the "Slow submit detail:" line.
+- The chapter-load entry's 230 ms frame is the DLSS one above (mostly DLSS creation, not the
+  16.9 MB image upload). The other stalls from that entry, 97 ms frames with 58-87 MB of image uploads, are not addressed here.
