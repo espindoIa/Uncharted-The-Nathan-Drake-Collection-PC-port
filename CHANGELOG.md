@@ -6,6 +6,15 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork 0.5.0 "Expedition")
 
+- **Improved: loading a new chapter in Uncharted 3 stutters less.** While a chapter loaded, the game
+  reading a file into memory the graphics side was watching made the port stop on one trap per 4 KB
+  page, thousands per second. A log from the player's install showed frames of 103 ms and 215 ms spent
+  almost entirely there, and one 5 second stretch at 39.9 FPS. The port now prepares the whole
+  destination of a file read once instead. This removes the trap itself, but part of the cost is the
+  work done for each page, so it only reduces this stutter, it does not remove it. Not fixed: stalls
+  from uploading large images (up to 230 ms) and a 188 ms driver stall seen in the same log. Not tested
+  on the player's own chapter load, nor in Uncharted 2 or 1.
+
 - **Fixed: freezes of 1-6 seconds after some cutscenes in Uncharted 3 and 2.** After a cutscene the
   treasure effect (two compute shaders) read data from table slots that hold plain numbers instead of
   buffer descriptions. The port already ignored those slots when drawing, but its shader cache still

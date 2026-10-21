@@ -2716,3 +2716,61 @@ loading screen before play.
 - Not tested: the player's own cutscene spots (the repo saves never reach the treasure effect; the repo
   cache has 1 permutation of 8f067540), so the stall removal is inferred from the replay, not seen
   in game. No performance A/B of the extra ClampRangeSize per guest buffer per specialization. U2.
+
+## 21 October 2026: chapter-load write faults from file reads
+
+### Symptom
+
+- Player report after the cutscene fix: the cutscene freezes got smaller, but loading a new chapter in
+  U3 had many stalls.
+- Player boot.log (21 Oct 10:19, U3, new build): 0 shader compiles in all 33 stalls. During the chapter
+  load 2,000-6,348 write faults/s, "writes into GPU-written memory 0". A 103 ms frame had 96.4 ms in
+  write-fault handlers and 1,049 one-page protect calls; a 215 ms frame had 203 ms in write faults; one
+  5 s window ran at 39.9 FPS.
+- Other stalls in the same log, not addressed here: a 230 ms frame uploading a 16.9 MB image, a 188 ms
+  "Slow submit" in the driver (1,076 images registered), 97 ms frames with 58-87 MB of image uploads.
+
+### Cause
+
+- runtime_file.c touch_for_write stores once per 4 KiB page of each read's destination (a kernel copy
+  into a protected page fails with EFAULT, so the pages must be writable first).
+- Every page the GPU tracks became one write fault (exception + handler) per page.
+
+### Fix
+
+- Before the touches, runtime_file.c calls gow3gpu_prepare_cpu_write (gow3gpu.cpp), which calls
+  Rasterizer::PrepareCpuWrite (vk_rasterizer.cpp).
+- PrepareCpuWrite: a lock-free check whether any page of the range is watched. If so: interrupt hold
+  (as the handler does on GPU-side threads), one drain, then for each touch address whose page is
+  write-watched only, the same per-address work the write fault does. That work is HandleWriteAt =
+  InvalidateMemory(addr, 8) + ExtendWriteFault + LandWatchedReadback, shared with OnWriteFault.
+- Read-watched pages are left to the touches: their load takes the read fault, which lands the readback
+  first.
+- The touches stay as a safety net.
+- Toggle: second word bit 2048 (RangeWritePrepare, gow3_toggles.h) restores the old behaviour, read
+  live. Fault stats line: "file-read ranges prepared N (X MB, P pages, Y ms)".
+- Rejected design (Codex review, 21 Oct): one InvalidateMemory over the whole range.
+  BufferCache::ReadMemory checks only the first page, then marks the whole range CPU-modified, and the
+  bulk readback cancellation rounds to pages. Both could lose GPU-written bytes. It also lacked the
+  interrupt hold.
+
+### Measured
+
+- Repo U3 bench, Continue into gameplay (earlier version of the walk): 76 reads, 28.8 MB, 470 per-page
+  calls in 34.7 ms (~74 us each). So the per-page work itself, not the exception, is most of the cost.
+  The gain on the player's chapter loads is expected to be partial.
+- Steady ~1,600 write faults/s while standing still in that bench come from game code, not file reads
+  (0 ranges prepared then).
+
+### Tested / not tested
+
+- Tested: build; short U3 bench runs from source: no crash.
+- Not tested: the player's chapter load, U2/U1, a toggle A/B (bit 2048 on vs off).
+
+### Open
+
+- Per-call cost: InvalidateMemory drains the draw pipe on each call (~74 us per page in the bench).
+  Batching it safely is not done.
+- Write faults from game code (~1,600/s at idle in the bench) are not addressed.
+- Image-upload stalls (230 ms for a 16.9 MB image, 97 ms frames with 58-87 MB) and the 188 ms "Slow
+  submit" in the driver with 1,076 images registered are not addressed.
