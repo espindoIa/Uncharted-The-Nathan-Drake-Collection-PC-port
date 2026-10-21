@@ -631,6 +631,29 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
                                        std::move(spv));
 }
 
+// gow3 21 Oct 2026: a cache entry that cannot be read (truncated by a game that ended during a
+// write, a bad disk sector) is a cache miss and the pipeline compiles at run time. The serializer's
+// assertion used to end the port with exit code 23 on it. Only the first one is logged; WarmUp and
+// the background warm-up print the total.
+static std::atomic<u32> g_corrupt_cache_entries{0};
+
+static void NoteCorruptCacheEntry(const std::string& name, const char* why) {
+    if (g_corrupt_cache_entries.fetch_add(1, std::memory_order_relaxed) == 0) {
+        std::printf("gow3: corrupt shader cache entry skipped (%s: %s)\n", name.c_str(), why);
+    }
+}
+
+static void ReportCorruptCacheEntries() {
+    if (const u32 count = g_corrupt_cache_entries.load(std::memory_order_relaxed)) {
+        std::printf("gow3: %u corrupt shader cache entries skipped\n", count);
+    }
+}
+
+/// A SPIR-V module starts with a 5-word header whose first word is the magic number.
+static bool LooksLikeSpirv(const std::vector<u32>& spv) {
+    return spv.size() >= 5 && spv[0] == 0x07230203u;
+}
+
 bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
                     std::optional<Shader::Gcn::FetchShaderData>& fetch_shader_data,
                     Shader::StageSpecialization& spec, size_t& perm_idx) {
@@ -830,10 +853,13 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     }
 
     std::vector<u32> spv{};
-    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
-                                       Serialization::ShaderBinaryName(program->info.pgm_hash, perm_idx),
-                                       spv);
+    const auto spv_name = Serialization::ShaderBinaryName(program->info.pgm_hash, perm_idx);
+    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary, spv_name, spv);
     if (spv.empty()) {
+        return false;
+    }
+    if (!LooksLikeSpirv(spv)) {
+        NoteCorruptCacheEntry(spv_name, "not SPIR-V");
         return false;
     }
 
@@ -945,27 +971,36 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
             ++num_total_pipelines;
             report();
 
-            Serialization::Archive ar{std::move(data)};
-            Serialization::Reader pldata{ar};
+            try {
+                Serialization::Archive ar{std::move(data)};
+                Serialization::Reader pldata{ar};
 
-            u32 version{};
-            pldata.Read(version);
-            if (version != Serialization::PipelineKeyVersion) {
-                return;
-            }
+                u32 version{};
+                pldata.Read(version);
+                if (version != Serialization::PipelineKeyVersion) {
+                    return;
+                }
 
-            u32 is_compute{};
-            pldata.Read(is_compute);
+                u32 is_compute{};
+                pldata.Read(is_compute);
 
-            bool result{};
-            if (is_compute) {
-                result = LoadComputePipeline(ar);
-            } else {
-                result = LoadGraphicsPipeline(ar);
-            }
+                bool result{};
+                if (is_compute) {
+                    result = LoadComputePipeline(ar);
+                } else {
+                    result = LoadGraphicsPipeline(ar);
+                }
 
-            if (result) {
-                ++num_pipelines;
+                if (result) {
+                    ++num_pipelines;
+                }
+            } catch (const std::exception& e) {
+                // Counts as a stale pipeline; the stages a half-read graphics entry had set stay
+                // out of the next one.
+                NoteCorruptCacheEntry("pipeline key", e.what());
+                sel.infos.fill(nullptr);
+                sel.modules.fill(nullptr);
+                sel.fetch_shader.reset();
             }
         });
 
@@ -994,6 +1029,7 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
                 num_total_pipelines,
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(),
                 warmup_threads);
+    ReportCorruptCacheEntries();
     LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines);
     ReportPipelineBinaryCache();
     if (num_total_pipelines > num_pipelines) {
@@ -1102,30 +1138,37 @@ void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data
     const auto entry_started = std::chrono::steady_clock::now();
     SCOPE_EXIT { warm.entry_ns += ElapsedNs(entry_started); ++warm.entries; };
     const auto skip = [&] { warm.done.fetch_add(1, std::memory_order_relaxed); };
-    Serialization::Archive ar{std::move(data)};
-    Serialization::Reader pldata{ar};
-    u32 version{};
-    pldata.Read(version);
-    if (version != Serialization::PipelineKeyVersion) {
-        return skip();
-    }
-    u32 is_compute{};
-    pldata.Read(is_compute);
-
     BackgroundWarmup::Entry entry{};
-    entry.compute = is_compute != 0;
     std::array<u64, MaxShaderStages> hashes{};
-    if (entry.compute) {
-        entry.compute_key.Deserialize(ar);
-        ComputePipeline::SerializationSupport sdata{};
-        sdata.Deserialize(ar);
-        hashes[0] = entry.compute_key.value;
-    } else {
-        entry.graphics_key.Deserialize(ar);
-        entry.sdata.Deserialize(ar);
-        for (u32 i = 0; i < MaxShaderStages; ++i) {
-            hashes[i] = entry.graphics_key.stage_hashes[i];
+    // This runs inside the store's read job: an exception that left it would stop the read of
+    // every entry after this one and leave `reading` set for good.
+    try {
+        Serialization::Archive ar{std::move(data)};
+        Serialization::Reader pldata{ar};
+        u32 version{};
+        pldata.Read(version);
+        if (version != Serialization::PipelineKeyVersion) {
+            return skip();
         }
+        u32 is_compute{};
+        pldata.Read(is_compute);
+
+        entry.compute = is_compute != 0;
+        if (entry.compute) {
+            entry.compute_key.Deserialize(ar);
+            ComputePipeline::SerializationSupport sdata{};
+            sdata.Deserialize(ar);
+            hashes[0] = entry.compute_key.value;
+        } else {
+            entry.graphics_key.Deserialize(ar);
+            entry.sdata.Deserialize(ar);
+            for (u32 i = 0; i < MaxShaderStages; ++i) {
+                hashes[i] = entry.graphics_key.stage_hashes[i];
+            }
+        }
+    } catch (const std::exception& e) {
+        NoteCorruptCacheEntry("pipeline key", e.what());
+        return skip();
     }
 
     auto& db = Storage::DataBase::Instance();
@@ -1144,21 +1187,30 @@ void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data
             std::vector<u8> meta_blob;
             db.Load(Storage::BlobType::ShaderMeta, fmt::format("{:#018x}", hashes[i]), meta_blob);
             if (!meta_blob.empty()) {
-                Serialization::Archive meta_ar{std::move(meta_blob)};
-                if (LoadShaderMeta(meta_ar, stage->program->info, stage->fetch, stage->spec,
-                                   stage->perm_idx)) {
-                    std::vector<u32> spv;
-                    db.Load(Storage::BlobType::ShaderBinary,
-                            Serialization::ShaderBinaryName(stage->program->info.pgm_hash,
-                                                            stage->perm_idx),
-                            spv);
-                    if (!spv.empty()) {
-                        const auto module_started = std::chrono::steady_clock::now();
-                        stage->module = CompileSPV(spv, stage->device);
-                        module_time = ElapsedNs(module_started);
-                        warm.module_ns += module_time;
-                        ++warm.modules;
+                // A throw leaves the stage without a module: unusable, as for any miss, and the
+                // entries that share it are skipped too.
+                try {
+                    Serialization::Archive meta_ar{std::move(meta_blob)};
+                    if (LoadShaderMeta(meta_ar, stage->program->info, stage->fetch, stage->spec,
+                                       stage->perm_idx)) {
+                        std::vector<u32> spv;
+                        const auto spv_name = Serialization::ShaderBinaryName(
+                            stage->program->info.pgm_hash, stage->perm_idx);
+                        db.Load(Storage::BlobType::ShaderBinary, spv_name, spv);
+                        if (!spv.empty()) {
+                            if (!LooksLikeSpirv(spv)) {
+                                NoteCorruptCacheEntry(spv_name, "not SPIR-V");
+                            } else {
+                                const auto module_started = std::chrono::steady_clock::now();
+                                stage->module = CompileSPV(spv, stage->device);
+                                module_time = ElapsedNs(module_started);
+                                warm.module_ns += module_time;
+                                ++warm.modules;
+                            }
+                        }
                     }
+                } catch (const std::exception& e) {
+                    NoteCorruptCacheEntry(fmt::format("{:#018x}.meta", hashes[i]), e.what());
                 }
             }
             warm.shader_io_ns += ElapsedNs(io_started) - module_time;
@@ -1318,6 +1370,7 @@ void PipelineCache::PumpWarmUp() {
     std::printf("Pipeline warm-up: %u of %u pipelines in %.2f s in the background (%u threads)\n",
                 warm.loaded, warm.total.load(),
                 std::chrono::duration<double>(now - warm.started).count(), warm.threads);
+    ReportCorruptCacheEntries();
     LOG_INFO(Render, "Preloaded {} pipelines in the background", warm.loaded);
     ReportPipelineBinaryCache();
     std::printf("Warm-up profile: reader wall %.3f s, entries %.3f s, shader IO/meta %.3f s, "
@@ -1425,8 +1478,10 @@ bool PersistentSrtInfo::Deserialize(Serialization::Archive& ar) {
     srt.Read(this, sizeof(*this));
 
     if (walker_func_size) {
-        walker_func = RegisterWalkerCode(ar.CurrPtr(), walker_func_size);
+        // Advance first: it throws on a size past the end, before the code is copied out of range.
+        const u8* code = ar.CurrPtr();
         ar.Advance(walker_func_size);
+        walker_func = RegisterWalkerCode(code, walker_func_size);
     }
 
     return true;
