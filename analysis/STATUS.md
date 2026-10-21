@@ -3406,3 +3406,20 @@ Boot hang found after the merge (U3 froze at the start of gameplay, 3 of 3 runs;
 Results: build.sh exit 0; unit tests motion-history, flat-camera, page-state, trigger-files exit 0; python unittests test_prepare, test_game_update, test_apply_update, test_save_backup pass. Boots of 30-45 s with GOW3_FRAME_STATS=1 and HR vblank on: U3 120 FPS, U1 and U2 run. U3 bench, chapter 2 meat market: 76.6 FPS (about 75 before the merge).
 
 Not verified: the single early U1 stall before "presenter ready" (seen once, not reproduced in 4 runs, not confirmed to be the same cause); frame pacing of the new vblank wait against GOW3_HR_VBLANK=0; MT flicker (#23) with the combined pending-write code; U2/U3 aim focus at 4K; velocity-mode character motion; pageable memory on a small card; VRAM trim over a long session; per-GPU cache swap with per-game folders; GOW3_FETCH_NO_BLOCK; the new features in a game (speakers, rewards, trophies, light bar, mouse aim after upstream's rewrite, Install from .pkg); the launcher GUI. No adversarial review of the merge was done (the Codex review was stopped by the user).
+
+## 21 October 2026 (night): DLAA texture LOD bias -1 (toggle bit 4096)
+
+DLSS Programming Guide 3.5 gives the texture LOD bias as log2(render / display) - 1. SceneMipBias() applied it only below native size and kept 0 at DLAA; at DLAA (render >= output, DLSS) it now returns -1 too. Disabled2 bit 4096 (DlaaMipBias, bit set = old 0) is read per draw (Rasterizer::BindSamplers path, sampler cache keyed by the bias bits), so it takes effect live from the toggle file; "Upscaler: scene texture LOD bias" is logged when the value changes. FSR, TAA and inactive keep their values.
+
+Measurements (U3 bar after Continue, 4K, frame dumps by GOW3_DUMP_TRIGGER, Laplacian variance x1e4 of the static wall crop 1650-2030 x 560-820; run-to-run noise ~9%):
+- Performance K (bias -2): 13.2 and 14.4 (two runs).
+- DLAA K bias 0: 5.3. DLAA K bias -1: 13.4 (+150%).
+- DLSS evaluate: 2.07 ms Performance K, 2.28 ms DLAA K, 2.27 ms DLAA K bias -1 (no cost).
+
+Same session, other findings:
+- Depth is conventional (near 0.875, far 0.971), so DepthInverted off is right.
+- Jitter: 32 phases at Performance, matches the guide.
+- The port's `sharpness` (RCAS) does nothing at <= 1; 1.4 gave +20% on the wall crop.
+- Model M gave 55% less high frequency than K at Performance and costs +0.85 ms.
+
+Not verified: flicker and moire in motion (the guide warns about them with a negative bias); U1 and U2 at DLAA; cost in heavy scenes (the finer mip raises texture bandwidth); one wall crop in one scene is the only sharpness evidence. Toggle bits: 4096 is no longer free.

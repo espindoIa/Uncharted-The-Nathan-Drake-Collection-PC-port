@@ -6,6 +6,13 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **DLAA: sharper textures (hair, walls).** DLSS at native resolution (DLAA) now uses NVIDIA's
+  recommended texture detail bias (-1, the same rule Performance and Quality already followed).
+  In the Uncharted 3 bar scene a wall's fine detail went from 5.3 to 13.4 on our sharpness measure,
+  with no change in DLSS cost (2.27 ms against 2.28 ms). NVIDIA warns that this can add shimmer or
+  moire in motion. Not tested: motion, Uncharted 1 and 2, heavy scenes. Toggle bit 4096 in
+  `disabled-optimizations.txt` (second number) restores the old look without a restart.
+
 - **Merged: BilalReloaded's 0.5.0 (21 October), with its new features.** Now in the fork: 5.1 and
   7.1 speakers (launcher Advanced -> Speakers), Unlock all rewards, trophies with a popup and a
   menu tab, the controller light bar, mouse aim options (sensitivity, up/down speed, invert

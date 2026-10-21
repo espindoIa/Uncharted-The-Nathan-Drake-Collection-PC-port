@@ -1454,9 +1454,15 @@ float TemporalUpscaler::SceneMipBias() const {
     if (!Active() || Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa) return 0.0f;
     const float render = float(Gow3Settings::Get().active_render_width.load());
     const float output = float(Scaled() ? target_width : SceneResolution::Native().width);
-    if (!(render > 0.0f && render < output)) return 0.0f;
-    // DLSS Programming Guide 3.5: log2(render / display) - 1 (Performance: -2). DLAA (render =
-    // display) keeps the game's bias: it was validated at 0 and has no detail to restore.
+    if (!(render > 0.0f)) return 0.0f;
+    // DLSS Programming Guide 3.5: log2(render / display) - 1 (Performance: -2). It applies at
+    // DLAA too (render = display: -1). 21 Oct 2026 U3 bar scene, DLAA K: bias -1 raised the
+    // high-frequency detail (Laplacian variance) of a static wall crop from 5.3 to 13.4 (+150%,
+    // run-to-run noise ~9%); DLSS evaluate unchanged (2.27 vs 2.28 ms). The guide warns about
+    // flicker/moire; toggle bit 4096 (Disabled2) restores 0.
+    if (render >= output) {
+        return UseDlss() && !Gow3Toggle::Disabled2(Gow3Toggle::DlaaMipBias) ? -1.0f : 0.0f;
+    }
     return std::log2(render / output) - (UseDlss() ? 1.0f : 0.0f);
 }
 

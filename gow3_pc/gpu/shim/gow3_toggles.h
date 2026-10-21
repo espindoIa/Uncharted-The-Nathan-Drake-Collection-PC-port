@@ -130,6 +130,8 @@ enum : std::uint64_t {
     /// Bit set: off. File reads into tracked memory fault once per 4 KiB page again (U3 chapter
     /// load, 21 Oct: thousands of write faults a second) instead of preparing the range once.
     RangeWritePrepare = 2048,
+    /// Bit set: old behaviour. 21 Oct U3: DLSS at DLAA uses the guide's texture LOD bias -1 (was 0).
+    DlaaMipBias = 4096,
     /// Bit set: old behaviour. 21 Oct U3: prewait even when the write misses GPU-written bytes
     /// (the shared-page path needs no wait: ~746 prewaits per 5 s, ~1.1 s waited).
     PrewaitAlways = 8192,
