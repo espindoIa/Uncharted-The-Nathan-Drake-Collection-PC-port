@@ -2774,3 +2774,38 @@ loading screen before play.
 - Write faults from game code (~1,600/s at idle in the bench) are not addressed.
 - Image-upload stalls (230 ms for a 16.9 MB image, 97 ms frames with 58-87 MB) and the 188 ms "Slow
   submit" in the driver with 1,076 images registered are not addressed.
+
+## 21 October 2026: write faults in gameplay: prewait for GPU-written pages
+
+Measurements (U3 bench, Continue, standing, `GOW3_FAULT_STATS=1`):
+- About 1,720 guest write faults/s. `buffer_cache.InvalidateMemory` took 1,880-2,100 ms per 5 s (~235 us/call).
+- Region lock wait 1.2 ms and work under the lock ~27 ms per 5 s: not the cause.
+- "Fault flush" = ~746 faults/5 s into GPU-written pages: `PrewaitPageWrites` waited 1,040-1,275 ms, page
+  fetch 280-370 ms, queue to the GPU thread ~260-350 ms, shared path 452 calls in 4.4 ms, downloads 0.
+- Top pages 0x103f239000 (~110/s) and neighbours. Top guest RIPs 0xd25dfd2 (`mov word [rbx+0xe7dc],0`)
+  and 0xd385251 (`or dword [rax+8],0x20`), guest base 0xc400000.
+
+Cause: the 19 Oct prewait (the guest thread waits for the page's GPU work before the GPU command thread
+fetches) predates the 17 Oct-era shared-page path being the common case. For writes that miss the
+GPU-written bytes the shared path needs no wait, so the prewait only added one.
+
+Fix: skip the prewait when the written range misses `gpu_modified_ranges` (`IsRangeGpuWrittenShared`,
+shared lock). Toggle `PrewaitAlways` = second word 8192 restores it. Result: prewait waits 0 ms, flush
+640-710 ms/5 s, buffer bucket 640-730 ms/5 s; GPU command thread blocked on GPU ticks unchanged at
+27-29%; FPS 69.7-70.1 (GPU 98% busy). Codex review: approve. Note `CopyFinishedGpuPage` may now wait on
+the GPU thread for submitted work in some cases (aggregate unchanged in the bench).
+
+Tried and dropped: a bounded hot-page set (rate admission >=16 faults/s, 64-page budget, 10 s retire).
+Faults -18% (8,550 -> 7,030 per 5 s) but only ~6 ms saved per 5 s and no FPS change; removed. Bit 4096
+left unused.
+
+DLSS: feature creation measured 41.1 ms (first evaluate 0.7 ms) in the bench, so the player's 230 ms
+frame at chapter start is not mainly DLSS creation; cause open.
+
+Slow submit 188 ms (`vkQueueSubmit` wall time in the NVIDIA driver): open, needs a GPUView/WPR trace.
+
+Diagnostics added (`GOW3_FAULT_STATS=1`): Write fault split, Fault flush (phases, prewait skipped),
+buffer lock wait/under lock, write-fault page and RIP histograms. Always on: "DLSS: feature created in X ms".
+
+Open: page fetch (~300 ms/5 s) and the queue to the GPU command thread (~250 ms/5 s) per GPU-page write
+fault. The ~1,500 other faults/5 s are cheap (~4 us).

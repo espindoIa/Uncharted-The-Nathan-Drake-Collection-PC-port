@@ -6,6 +6,16 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork 0.5.0 "Expedition")
 
+- **Improved: smoother play when the game writes next to data the graphics card just wrote.** The
+  game does this about 1,700 times a second in Uncharted 3, and the port made the game thread wait
+  for the graphics card on many of those writes even when they touched different bytes. It now waits
+  only when the write overlaps data the graphics card wrote. In the Uncharted 3 bench, standing in
+  gameplay, the port's handling of these writes took about 1.8-1.9 s of game-thread time per 5 s,
+  now about 0.65 s. The frame rate in that spot did not change (70 FPS, the graphics card is the
+  limit there); the gain is expected in CPU-heavy scenes and loads. Not tested at the player's own
+  spots, nor in Uncharted 2 or 1. Also new: `GOW3_FAULT_STATS=1` prints more diagnostic lines about
+  these writes, and the log now has a line with the time DLSS took to create its feature.
+
 - **Improved: loading a new chapter in Uncharted 3 stutters less.** While a chapter loaded, the game
   reading a file into memory the graphics side was watching made the port stop on one trap per 4 KB
   page, thousands per second. A log from the player's install showed frames of 103 ms and 215 ms spent
