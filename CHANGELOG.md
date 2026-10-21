@@ -4,6 +4,31 @@ Uncharted: The Nathan Drake Collection PC port, by **BilalReloaded**
 ([YouTube](https://www.youtube.com/@BilalReloaded/videos), [GitHub](https://github.com/bc160201983)).
 Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
+## Unreleased (fork, after 0.5.0)
+
+- **Fixed: Drake's Fortune "out of device memory" after about an hour, and the Uncharted 2 crash
+  reading a border colour table at address 0.** Ported from BilalReloaded's 0.4.1 (upstream #63 and
+  #56). Images with more layers than the GPU allows or over 1 GB are now skipped, and a border colour
+  table at 0 or unreadable gives transparent black. Tested: the build and 40 s boots of Uncharted 1
+  and 3 with no exception. Not tested: the hour-long Drake's Fortune session, Uncharted 2's crash
+  scene.
+
+- **Fixed: the common Drake's Fortune crash "execute access to 0".** Ported from BilalReloaded's 0.5.0
+  (upstream #27, #30, #42, #62; Uncharted 2 and 3 have the same code). The pages of the shader
+  constant table are now written once before the table is filled. `UNCHARTED_CUE_PRETOUCH=0` turns
+  it off. Tested: 40 s boots of Uncharted 1 and 3 (update 1.02), patch applied, no exception. Not
+  tested: Uncharted 2, and the crash itself (it needs the reporters' Windows 10 stack layout).
+
+- **Improved: idle job workers now also sleep on the other retail 1.02 build (EP9000-CUSA02344).**
+  Ported from BilalReloaded's upstream commit 64abc3f (Supermedo/uncharted_pc #346). Tested: boots of
+  Uncharted 1 and 3 on our dump patch the same offsets as before. Not tested: the EP9000 build
+  itself.
+
+- **Fixed: the screen wipe in Uncharted 2 and 3 left a band at the bottom below 720p (540p on Steam
+  Deck).** Ported from BilalReloaded's upstream commit 696bcb1. The wipe now uses the PS4's
+  1920x1080 when the resolution patch is on. Tested: the patch script parses. Not tested: a
+  sub-720p run (the boots did not apply the resolution patch).
+
 ## 21 October 2026 (fork 0.5.0, Expedition Edition)
 
 - **Not fixed yet: the frame rate drop in heavy Uncharted 3 areas (chapter 2, after the movie).** In

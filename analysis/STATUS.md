@@ -3016,3 +3016,31 @@ fault. The ~1,500 other faults/5 s are cheap (~4 us).
 ### Not tested
 
 - U1, U2; the player's own run; long soak with the SRT change.
+
+## 21 October 2026 (evening): upstream fixes ported (batch 1)
+
+Four commits taken from BilalReloaded's repo one by one (no merge).
+
+- 2959f6d gpu: impossible images skipped; border table at 0. Source: upstream 0.4.1 (512676a).
+  Files: vk_instance.h, vk_rasterizer.cpp, texture_cache/sampler.cpp. Test: build.sh exit 0; U1 and
+  U3 40 s boots, no exception. Not tested: the hour-long U1 session (#63), U2's crash scene (#56).
+- 220268e games: constant tables touched before the fill. Source: upstream 0.5.0 (3b23bf9). Files:
+  tools/probe_uncharted.py (CUE_PRETOUCH_PATCHES). Test: U1 and U3 (1.02) 40 s boots, 2 changes
+  each, no exception. Not tested: U2; the crash itself (needs the reporters' Windows 10 stack layout).
+- 63e0a9b games: idle job workers sleep on the other retail 1.02 build. Source: upstream 64abc3f.
+  Files: tools/probe_uncharted.py (JOB_SLEEP_PATCHES). Test: U1 and U3 boots on our dump, same
+  patch offsets. Not tested: the EP9000 build; our extra 1 ms wait patch still matches only the r15
+  form.
+- f8d8aa2 u3: screen wipe covers the whole screen below 720p. Source: upstream 696bcb1. Files:
+  tools/probe_uncharted.py. Test: the script parses. Not tested: a sub-720p run.
+
+### Not taken yet from upstream
+
+- Memory trimming, pageable fallback, nested command-list leak.
+- The multithreaded flicker fix (draws wait for the second-thread constant copy, #23).
+- Shader cache checksum and per-GPU cache.
+- Player features: 5.1/7.1, trophies, unlock rewards, light bar, .pkg install.
+- Character motion vectors (needs reconciling with our flat camera source).
+
+A full merge of upstream gives 19 conflicting files. Upstream has its own v0.5.0 tag on 3b23bf9
+(ours is dcae6ae).
