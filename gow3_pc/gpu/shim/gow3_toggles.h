@@ -117,6 +117,13 @@ enum : std::uint64_t {
     /// Draining the draw pipe for a queued command (guest fault downloads, readback landings,
     /// flips) keeps the ring epoch: those write only GPU-written memory, which is never copied.
     RingKeepOnCommands = 64,
+    /// Bit set: SRT walks skip waits for queued writes (A/B only).
+    SrtPipeCheck = 128,
+    /// Inverted sense, opt-in diagnostic: bit set drains the pipe before copy shaders
+    /// 2d215c3b, 6a6422a9 and c92150ba run.
+    DrainCopyShaders = 256,
+    /// Bit set: off. Use the old 256-range SRT pipe check, including overflow drains.
+    SrtPendingWrites = 512,
     /// Bit set: off. Shader specialization reads a garbage buffer V# (bound as null) as it is,
     /// so its random stride/format makes new permutations (21 Oct: U3 treasure effect freezes).
     SpecGarbageSharps = 1024,

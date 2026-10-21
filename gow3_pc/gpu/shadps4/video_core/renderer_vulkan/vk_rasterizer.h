@@ -129,6 +129,8 @@ public:
     /// Stage A: GPU work queued for the recording thread writes [address, address + size):
     /// constant ring copies of those bytes are not reused (NotePendingGpuWrite does this too).
     void NoteRingWrite(VAddr address, u64 size);
+    /// Stage A: a queued label write, separate from constant ring copy decisions.
+    void NotePendingLabel(VAddr address, u64 size);
     /// Stage A: a guest submission (graphics or a compute ring's new packets) starts, or a
     /// memory wait ends: the guest may have rewritten memory copied before.
     void NewGuestEpoch();
@@ -635,6 +637,9 @@ private:
         u64 position;
     };
     std::vector<PendingWrite> pending_writes;
+    std::deque<PendingWrite> pending_labels; ///< stage A: labels after their task's Commit
+    u64 pending_task_position = 0; ///< latest un-noted task; earlier tasks run before it
+    bool pending_complete = true; ///< all queued packets had their buffer writes noted
     VAddr pending_min = ~VAddr{0}, pending_max = 0; ///< bounds of pending_writes
     u32 pending_checks = 0;
     /// PostDraw: written ranges noted for the packet being built get the position after it.
@@ -698,6 +703,7 @@ private:
     float sampler_lod_bias = 0.0f; ///< gow3: extra bias of this draw's samplers
     bool scene_debug_frame = false; ///< GOW3_SCENE_DEBUG: this frame's passes are printed
     bool PendingWriteOverlaps(VAddr address, u64 size);
+    void PrunePendingLabels();
     /// Stage B: the ring bindings of the stages of the packet being recorded.
     struct RingStage {
         const Shader::Info* info;

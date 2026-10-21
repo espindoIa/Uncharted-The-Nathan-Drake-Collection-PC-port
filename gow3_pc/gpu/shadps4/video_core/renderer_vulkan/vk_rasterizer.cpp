@@ -969,10 +969,12 @@ void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
     }
     if (!stats) {
         draw_pipe->Drain(reason);
+        pending_complete = true;
         return;
     }
     const u64 before = draw_pipe->drain_cycles;
     draw_pipe->Drain(reason);
+    pending_complete = true;
     if (const u64 waited = draw_pipe->drain_cycles - before) {
         drain_sites[function][line] += waited;
     }
@@ -1015,6 +1017,20 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
     pending_writes.push_back({address, end, position});
     pending_min = std::min(pending_min, address);
     pending_max = std::max(pending_max, end);
+}
+
+void Rasterizer::PrunePendingLabels() {
+    while (!pending_labels.empty() && draw_pipe->Reached(pending_labels.front().position)) {
+        pending_labels.pop_front();
+    }
+}
+
+void Rasterizer::NotePendingLabel(VAddr address, u64 size) {
+    if (!draw_pipe || !size || !OnStageA()) {
+        return;
+    }
+    PrunePendingLabels();
+    pending_labels.push_back({address, address + size, draw_pipe->Head()});
 }
 
 void Rasterizer::NoteRingWrite(VAddr address, u64 size) {
@@ -1241,6 +1257,8 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
             if (constant_ring && !Gow3Toggle::Disabled(Gow3Toggle::ConstantRing)) {
                 building_packet = true;
                 CollectRingBindings(*stage, used_prepared, ring);
+            } else {
+                pending_complete = false;
             }
             ++num_stages;
             size += sizeof(PacketStage) +
@@ -1374,6 +1392,9 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
     *reinterpret_cast<TaskPacket*>(out) = {PacketKind::Task, size, task};
     std::memcpy(out + sizeof(TaskPacket), data, size);
     draw_pipe->Commit(total);
+    if (!writes_noted) {
+        pending_task_position = draw_pipe->Head();
+    }
     return true;
 }
 
@@ -2298,8 +2319,9 @@ void Rasterizer::DispatchDirect() {
     // gow3 18 Oct: GOW3_DRAIN_CS=<hex hash>[,<hash>...]: these dispatches run here after a drain
     // (diagnostics). Uncharted 2's train flashed white with multithreaded rendering: later draws
     // were prepared from constants its copy shaders had yet to write. SyncSrtTables now waits for
-    // the dispatches whose written buffers it reads (pipe_write_ranges); draining before the copy
-    // shaders 2d215c3b/6a6422a9 and c92150ba as well (toggle 1 << 62) cost 5.8% of this thread.
+    // queued writes to the buffers it reads; draining before the copy
+    // shaders 2d215c3b/6a6422a9 and c92150ba as well (DrainCopyShaders, second word) cost 5.8%
+    // of this thread. That diagnostic is opt-in: bit set means drain.
     static const std::vector<u64> drain_cs = [] {
         std::vector<u64> out;
         for (const char* env = std::getenv("GOW3_DRAIN_CS"); env && *env;) {
@@ -2311,7 +2333,7 @@ void Rasterizer::DispatchDirect() {
     }();
     const u64 cs_hash = pipeline->GetStage(Shader::SwStage::Compute).pgm_hash;
     if (pipelined && (std::ranges::find(drain_cs, cs_hash) != drain_cs.end() ||
-                      (Gow3Toggle::Disabled(1ull << 62) &&
+                      (Gow3Toggle::Disabled2(Gow3Toggle::DrainCopyShaders) &&
                        (cs_hash == 0x2d215c3b || cs_hash == 0x6a6422a9 || cs_hash == 0xc92150ba)))) {
         pipelined = false;
         DrainDrawPipe();
@@ -3050,10 +3072,50 @@ void Rasterizer::SyncSrtTables(const Shader::Info& info) {
     // GPU-written check below cannot see them: the walk read the tables before the GPU wrote
     // them (Uncharted 2's train still flashed white, rarely, after the copy shaders drained).
     // Reads overlapping a pending dispatch's written buffers drain the pipe first; draining
-    // before every walk cost 15% in U3's bar fight. Toggle 1 << 61 skips it (A/B).
-    const bool check_pipe = !Gow3Toggle::Disabled(1ull << 61);
+    // before every walk cost 15% in U3's bar fight. SrtPipeCheck (second word) skips it (A/B).
+    // gow3 20 Oct, U3 chapter 2: ~1,500 drains/s but only one download in 5 s; the 256-range
+    // overflow made almost every wait a false positive (18.8% of stage A). With the ring on,
+    // its pending writes cover every stage's buffers; labels and un-noted tasks cover the rest.
+    // Packets built without that tracking keep the old check until a full drain.
+    static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
+    static u64 pipe_reads = 0, pipe_drains = 0;
+    static std::array<u64, 5> pipe_reasons{};
+    const bool check_pipe = !Gow3Toggle::Disabled2(Gow3Toggle::SrtPipeCheck);
     const auto pipe_wait = [&](VAddr address, u64 size) {
-        if (!check_pipe || (pipe_write_ranges.empty() && !pipe_writes_overflow)) {
+        if (!check_pipe) {
+            return;
+        }
+        if (stats) {
+            ++pipe_reads;
+        }
+        if (draw_pipe && constant_ring && !Gow3Toggle::Disabled(Gow3Toggle::ConstantRing) &&
+            !Gow3Toggle::Disabled2(Gow3Toggle::SrtPendingWrites) && pending_complete) {
+            PrunePendingLabels();
+            u32 reason = 0;
+            bool overlap = PendingWriteOverlaps(address, size);
+            if (!overlap) {
+                reason = 1;
+                for (const auto& label : pending_labels) {
+                    if (address < label.end && label.begin < address + size) {
+                        overlap = true;
+                        break;
+                    }
+                }
+            }
+            if (!overlap) {
+                reason = 2;
+                overlap = !draw_pipe->Reached(pending_task_position);
+            }
+            if (overlap) {
+                if (stats) {
+                    ++pipe_drains;
+                    ++pipe_reasons[reason];
+                }
+                DrainDrawPipe();
+            }
+            return;
+        }
+        if (pipe_write_ranges.empty() && !pipe_writes_overflow) {
             return;
         }
         bool overlap = pipe_writes_overflow;
@@ -3061,6 +3123,10 @@ void Rasterizer::SyncSrtTables(const Shader::Info& info) {
             overlap = overlap || (address < base + bytes && base < address + size);
         }
         if (overlap) {
+            if (stats) {
+                ++pipe_drains;
+                ++pipe_reasons[pipe_writes_overflow ? 3 : 4];
+            }
             DrainDrawPipe();
         }
     };
@@ -3108,7 +3174,26 @@ void Rasterizer::SyncSrtTables(const Shader::Info& info) {
             std::fflush(stdout);
         }
     }
-    static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
+    if (stats) {
+        static auto report = std::chrono::steady_clock::now();
+        if (const auto now = std::chrono::steady_clock::now();
+            now - report >= std::chrono::seconds(5)) {
+            report = now;
+            std::printf("SRT pipe check (5 s): %llu reads checked, %llu drains "
+                        "(pending write %llu, "
+                        "label %llu, queued task %llu; old path: overflow %llu, overlap %llu)\n",
+                        static_cast<unsigned long long>(pipe_reads),
+                        static_cast<unsigned long long>(pipe_drains),
+                        static_cast<unsigned long long>(pipe_reasons[0]),
+                        static_cast<unsigned long long>(pipe_reasons[1]),
+                        static_cast<unsigned long long>(pipe_reasons[2]),
+                        static_cast<unsigned long long>(pipe_reasons[3]),
+                        static_cast<unsigned long long>(pipe_reasons[4]));
+            std::fflush(stdout);
+            pipe_reads = pipe_drains = 0;
+            pipe_reasons.fill(0);
+        }
+    }
     if (stats && srt_syncs) {
         static auto report = std::chrono::steady_clock::now();
         if (const auto now = std::chrono::steady_clock::now(); now - report >= std::chrono::seconds(5)) {

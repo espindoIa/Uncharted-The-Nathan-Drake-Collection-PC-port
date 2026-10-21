@@ -239,6 +239,12 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
     same way upstream did, and upstream's switch that turns it off for Uncharted 3 is not taken.
     Drake's Fortune keeps it on too.
 
+## 21 October 2026
+
+- Uncharted 3: busy areas with many effects (e.g. the Cartagena market in chapter 2) run about 5% faster
+  (about +3 FPS at 60-65 FPS): the GPU command thread no longer waits for the draw recording thread
+  before reading resource tables when nothing it reads is still being written.
+
 ## 19 October 2026 (fork 0.4.0, Expedition Edition)
 
 This fork ([espindoIa](https://github.com/espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port))

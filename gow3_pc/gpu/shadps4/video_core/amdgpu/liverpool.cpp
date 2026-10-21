@@ -1900,8 +1900,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (rasterizer &&
                     rasterizer->RunInOrder(&RunEventWriteEos, event_eos, sizeof(*event_eos),
                                            Gow3Toggle::PipelinedTasks, true)) {
+                    // gow3 21 Oct: a GDS store writes size dwords, not one label (SRT pending-write check).
+                    const u64 bytes =
+                        event_eos->command.Value() == PM4CmdEventWriteEos::Command::GdsStore
+                            ? u64{event_eos->size} * sizeof(u32)
+                            : sizeof(u64);
                     NotePendingFences(*event_eos);
-                    rasterizer->NoteRingWrite(event_eos->Address<VAddr>(), sizeof(u64));
+                    rasterizer->NoteRingWrite(event_eos->Address<VAddr>(), bytes);
+                    rasterizer->NotePendingLabel(event_eos->Address<VAddr>(), bytes);
                 }
                 break;
             }
@@ -1913,6 +1919,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         NotePendingFences(*event_eop);
                         rasterizer->NoteRingWrite(reinterpret_cast<VAddr>(event_eop->Address<u8>()),
                                                   sizeof(u64));
+                        rasterizer->NotePendingLabel(
+                            reinterpret_cast<VAddr>(event_eop->Address<u8>()), sizeof(u64));
                     }
                 } else {
                     SignalEop(*event_eop);
@@ -2552,7 +2560,12 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 ComputeRelease release{.packet = *release_mem, .pipe_id = queue.pipe_id};
                 if (rasterizer->RunInOrder(&RunComputeReleaseMem, &release, sizeof(release),
                                            Gow3Toggle::PipelinedTasks, true)) {
-                    rasterizer->NoteRingWrite(release_mem->Address<VAddr>(), sizeof(u64));
+                    // gow3 21 Oct: a GDS store writes num_dw dwords, not one label (SRT pending-write check).
+                    const u64 bytes = release_mem->data_sel.Value() == DataSelect::GdsMemStore
+                                          ? u64{release_mem->num_dw} * sizeof(u32)
+                                          : sizeof(u64);
+                    rasterizer->NoteRingWrite(release_mem->Address<VAddr>(), bytes);
+                    rasterizer->NotePendingLabel(release_mem->Address<VAddr>(), bytes);
                 }
                 break;
             }

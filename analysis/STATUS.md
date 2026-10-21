@@ -2972,3 +2972,47 @@ fault. The ~1,500 other faults/5 s are cheap (~4 us).
 - P2: short-read limit (a read failing after the discard leaves those pages without their GPU bytes) is a
   documented shortcut, not removed.
 - The unexplained bench run that ended during the chapter load.
+
+## 21 October 2026 (evening): chapter 2 CPU limit, SRT pipe drains
+
+### Evidence
+
+- Profile (meat market, GOW3_PROFILE=10, 5 ms): once stage A's ring memcpy was off it, stage A waited
+  37% on stage B, 22.8% at the SRT pipe check (SyncSrtTables operator()), ~1,400 rasterizer drains/s;
+  only 1 real SRT table download per 5 s.
+- The 256-range pipe_write_ranges list overflowed after 256 written buffers (~1,800 dispatches/frame),
+  and every later SRT walk drained the pipe: 4,715 of 4,722 drains per 5 s were overflow drains
+  (GOW3_FRAME_STATS "SRT pipe check").
+
+### Fix
+
+- Uncommitted 20 Oct work from another session (main checkout) ported and committed: SyncSrtTables
+  checks pending GPU writes (PendingWriteOverlaps), pending labels (NotePendingLabel) and un-noted
+  queued tasks instead; the old check stays while pending_complete is false.
+- Disabled2 bits SrtPipeCheck 128, DrainCopyShaders 256, SrtPendingWrites 512 (replace first-word
+  1<<61 / 1<<62, which collided with OneFrameStart / FullScreenPassJitter).
+
+### Measured
+
+- U3 ch2 chase save = Cartagena market, Continue, standing; player's ini preset=3 dlss_model=k, 4K, 120
+  cap, MT on; ab2walk.sh 3x10 s windows each state.
+- SrtPendingWrites on vs off: 65.01 vs 61.99 FPS, +3.03 [+1.17, +4.61]; median -0.78 ms [-1.16, -0.34];
+  p99 -0.65 ms [-1.10, -0.01]. With it on: 0 SRT drains.
+- Market landing: 1,710 draws/frame, ~60 FPS, GPU 63% busy, stage B 81% busy: CPU-bound.
+
+### Tried and dropped (not committed; patch kept outside the repo)
+
+- RewrittenClip (pending readbacks' rewritten sets get only the bytes inside their pieces) +
+  GpuRangesContained (skip icl add of an already GPU-modified range): meat market +0.25 [-0.78, +1.40];
+  market on top of the SRT fix +1.62 [-0.14, +3.82].
+- RingCopyThreads (stage A's guest constant-ring copies on the copy threads, one shared batch every
+  host-copy wait starts): meat market +0.64 [-0.24, +1.59]; market on top of the SRT fix +0.58
+  [-2.70, +5.62]. Reviews found three ordering defects (batch handed to the pool after unlocking;
+  stage-A guest writes without a host-copy wait; GpuIdle/flip signals without one), fixed before
+  measuring. Remaining gap: compute ring read_addr updates.
+- Neither stage alone is the limit: cutting stage A's memcpy moved its time into SRT drains; cutting
+  stage B's bookkeeping moved little. Stage B now 81-87% busy.
+
+### Not tested
+
+- U1, U2; the player's own run; long soak with the SRT change.
