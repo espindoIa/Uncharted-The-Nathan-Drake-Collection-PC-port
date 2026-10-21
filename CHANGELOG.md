@@ -6,6 +6,47 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork 0.5.0 "Expedition")
 
+- **Not fixed yet: the frame rate drop in heavy Uncharted 3 areas (chapter 2, after the movie).** In
+  the player's log the game ran at 52-80 FPS with 1,600-3,000 draws and 1,600-1,900 compute
+  dispatches per frame. The limit is the CPU: the thread that records the graphics work was 83% busy
+  and the graphics command thread, which feeds it, waited 20% for it and was idle only 0.2%. This is
+  the CPU limit already listed in the 20 October notes. A profile in the bench puts the time in the
+  per-dispatch work: binding buffers, bookkeeping of memory ranges, copying constants. One try
+  (skipping repeated bookkeeping of a memory range already recorded in the same step) was used 0.1%
+  of the time and gave no gain (75.68 FPS with it, 76.79 without, 3 + 3 windows of 10 s), so it was
+  dropped. A real gain needs bigger changes (batching that bookkeeping per submission, reusing
+  constant data across submissions, splitting the recording thread); none done. The stall detail
+  line also caught a 266.1 ms stall in the graphics driver in the bench: video memory was at 31%
+  (3423 of 11175 MB) and no shader compile was running, so it is neither of those. Still open; it
+  needs a Windows GPU trace.
+
+- **Improved: the stutter when an area loads in Uncharted 3 (the alley after the chase checkpoint).**
+  The player's log had frames of 100.7 and 80.3 ms, with 89.4 and 74.0 ms of them in write traps.
+  When the game read a file over memory the graphics card had also written, the port first fetched
+  the old graphics-card bytes of every 4 KB page, one queued job per page, although the read
+  replaces the whole page (that stretch: 239 file reads, 92.1 MB, 5,323 pages, 468.9 ms of
+  preparation). Now whole pages are dropped in one job per read. Pages where that is not safe (a
+  pending readback, an image the graphics card changed, the edge pages of a read) still use the old
+  way. In the bench (chapter 2 meat market save, Continue) the preparation of the file reads took
+  2.2 ms (57 reads, 20.4 MB, 427 pages, 339 dropped) instead of 50.1 ms (67 reads, 23.7 MB, 532
+  pages). Known limit: if a read fails or ends short after the pages were dropped, the part it did
+  not write loses its graphics-card bytes. One bench run ended during the chapter load without a
+  crash message (cause unknown; the next two runs passed). Not tested on the player's own alley
+  load, nor in Uncharted 2 or 1, nor with the new code switched off for comparison.
+
+- **Improved: the stall right after a pre-rendered movie in Uncharted 3.** In the player's log, the
+  first frame after a movie of about 60 s took 99.7 ms (63.1 ms of it refreshing 17 images, 21.3 MB)
+  and five more frames took 42-55 ms. During the movie the port freed all its large upload buffers
+  (14, 69 MB; it frees them after 3000 idle frames, about 25 s) and had to create 20 again. Creating
+  one is slow: in the bench 38.9 and 33.2 ms for 64 MiB, 30.2 ms for 32 MiB, 15.4 ms for 24 MiB, and
+  9-13 ms for a 16 MiB block. The chapter start, with buffers still kept, uploaded 105 MB with 4.7
+  ms of refresh. Now the most recently used idle large buffers are kept, up to 128 MiB per memory
+  type and 32 buffers (`GOW3_STAGING_KEEP_LARGE_MB`, 0 gives the old behaviour); that can use up to
+  128 MiB more memory per type. Not verified at the player's movie (no save before it). Also new in
+  the stall log line: the refresh time split into staging allocations, image copies and detiling;
+  "Slow staging allocation" lines (5 ms or more); and the Windows "us/draw" in the frame stats is now
+  real (it printed 0.00).
+
 - **Fixed: the hitch at the very start of gameplay with DLSS (not DLAA) in Uncharted 3.** DLSS built
   its internal setup (NVIDIA's "feature") when the first gameplay frame was drawn. With a scaling
   preset that took 80-177 ms in our tests, so that frame lasted 90-190 ms, and in the player's log

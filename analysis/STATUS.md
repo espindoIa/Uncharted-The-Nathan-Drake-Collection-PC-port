@@ -2871,3 +2871,104 @@ fault. The ~1,500 other faults/5 s are cheap (~4 us).
 - Slow submit stays open until a player log shows the "Slow submit detail:" line.
 - The chapter-load entry's 230 ms frame is the DLSS one above (mostly DLSS creation, not the
   16.9 MB image upload). The other stalls from that entry, 97 ms frames with 58-87 MB of image uploads, are not addressed here.
+
+## 21 October 2026 (afternoon): post-movie stall, alley-load stalls, chapter 2 FPS
+
+### Evidence
+
+- Player report: the chapter-start stall is almost gone; the stall after the cutscene is smaller but still
+  there; then a big FPS drop.
+- Player log 21 Oct 12:51, 297 s of frame times. U3 chapter 2, DLSS Performance 1080p -> 4K, model K, 120
+  cap, MT on, RTX 5070, window 2560x1440.
+- P1, post-movie stall: at 203 s, right after a ~60 s pre-rendered movie, a 99.7 ms frame with "image
+  refresh 63.1 ms" (17 images, 21.3 MB), then five frames of 42-55 ms.
+  - During the movie the staging pool's large buffers went from 14 (69 MB) to 0 (trim after 3000 idle
+    frames, ~25 s); 20 were created again after it.
+  - Chapter-start frames by contrast uploaded 105 MB with 4.7 ms of refresh (buffers still cached).
+- P2, alley-load stalls (278-280 s): 100.7 and 80.3 ms frames with 89.4 / 74.0 ms in write faults. Window
+  stats: "file-read ranges prepared 239 (92.1 MB, 5323 pages, 468.9 ms)" (~88 us/page), 5,681 page fetches
+  on the GPU command thread (485.7 ms) plus 398.2 ms queued to it.
+  - Cause: a file read replacing a whole page first fetched the page's old GPU bytes, one GPU-thread
+    command per page.
+- P3, FPS drop: after the movie 52-80 FPS at 1,600-3,000 draws plus 1,600-1,900 dispatches per frame. GPU
+  command thread idle 0.2%, stage B 83% busy, stage A waits 20% for it, ~285k pipe items/s. This is the
+  known CPU limit ("Remaining CPU limit (profile)", 20 Oct).
+
+### Fixes
+
+- 27da750, diagnostics (no behaviour change):
+  - The stall line splits image refresh into staging allocations, inline image copies, detile (pipelines).
+  - New lines: "Slow staging allocation" (>= 5 ms) and "Detiler pipeline ... created in X ms" (bench:
+    0.1-6.0 ms each, not the cause).
+  - The old "staging" / "waiting for host copies" columns were never incremented (always 0.0).
+  - Windows "us/draw" in Frame stats is now real (GetThreadTimes on the GPU command thread).
+- 06fdcac, P1: TrimLarge keeps the most recently used idle large staging buffers up to
+  GOW3_STAGING_KEEP_LARGE_MB (default 128) and 32 per memory type; 0 = old trim. Memory cost: up to 128
+  MiB per memory type kept.
+- 999e363, P2: a file read discards whole pages in one GPU-thread command per read instead of fetching
+  each page's old GPU bytes.
+  - Discarded: gpu ranges, page tick, page_writes, lazy/shared records; region marked CPU-modified;
+    texture invalidate.
+  - Refused pages keep the old path: pending readback piece, overlapping GPU-modified or
+    download-queued image (new TextureCache::PageHasGpuImageAuthority), edge pages, read-watched pages.
+  - runtime_file.c clips the prepared range at EOF.
+  - Disabled2 bit 32768 (FileReadDiscard) restores the old path. The fault stats line counts discarded
+    pages.
+  - Codex static review: buffer paths, drain and lock order OK. It found the image case (now refused)
+    and the short-read limit. Documented shortcut: a read that fails after the discard leaves those
+    pages without their GPU bytes.
+
+### Measured
+
+- Bench, creating one large staging buffer (new diagnostics): 38.9 and 33.2 ms (64 MiB DeviceLocal), 30.2
+  ms (32 MiB HostUncached), 15.4 ms (24 MiB DeviceLocal). A 16 MiB DeviceLocal ring block 9-13 ms. The
+  movie stall itself was not reproduced in the bench.
+- Bench, chapter 2 meat market save, Continue, file reads: "57 (20.4 MB, 427 pages, 339 discarded, 2.2
+  ms)" vs "67 (23.7 MB, 532 pages, 50.1 ms)" before.
+- Bench standing at the meat market: 67-75 FPS at ~700 draws/frame with 19 us/draw of GPU-thread CPU
+  time (1,862 dispatches/frame). Walking into the next area: 49-57 FPS at 2,000-2,750 draws/frame.
+- Sampling profile, current build, meat market, 10 s windows, 5 ms:
+  - Stage B: RunDrawPacket 73-77%, DispatchRecord 44-49%, BindBuffers 27-29%, ObtainBuffer 20.4-20.8%,
+    GpuRangesAdd 9.9-10.1% (boost::icl 8.5%), CompleteReadbacks 8.7-8.8%, LandGuarded 5-6%,
+    NoteGpuWriteWindows 3.5-3.9%.
+  - Stage A: ProcessCompute 54-60%, CollectRingBindings 33% (memcpy of guest constants via
+    CopySparseMemory 18-19%), DrainDrawPipe (waiting for B) 15-19.5%, GetComputePipeline 12-13.6%
+    (RefreshFlatBuf 8.7-10.9%), SyncSrtTables 8-10.5%.
+
+### Tried and dropped
+
+- Not committed: a memo that skipped GpuRangesAdd and the per-readback rewritten adds for a range already
+  recorded in the same scheduler tick.
+  - Hit rate ~0.1% (about 2,400 hits vs 2.0 million misses per 5 s): each dispatch writes different
+    ranges.
+  - A/B 3+3 windows of 10 s: on 75.68 vs off 76.79 FPS, diff -1.10 [-2.15, +0.01]. Removed.
+- The FPS limit remains. A real gain needs structural work (batching the GPU-range bookkeeping per
+  submission, constant-ring reuse across submissions, splitting stage B). Not done.
+
+### Slow submit
+
+- Reproduced in the bench: "Slow submit: 266.1 ms in the driver (0 wait semaphores, 1 signal); 295 images
+  registered since the last slow one".
+- Detail line: heap 0 3423/11175 MB (31%), compiles running 0, no compile work in the window. That frame
+  took 283 ms; GPU command thread kernel time 109.4 ms.
+- So neither VRAM over budget nor compile contention. Still open: kernel time inside vkQueueSubmit after
+  many new images; needs a GPUView/WPR trace.
+
+### Not tested
+
+- U1 and U2.
+- The player's own movie moment (no save before it): P1 fix not seen on the real case.
+- The player's own alley load.
+- A toggle A/B for bit 32768 (FileReadDiscard).
+- One bench run ended during the chapter load without a crash message (play.py saw no process, then
+  killed it); cause unknown. The next two runs passed.
+
+### Open
+
+- P3: the CPU limit of stage B / stage A in heavy U3 areas (52-80 FPS at 1,600-3,000 draws). Needs the
+  structural work listed above.
+- Slow submit (266.1 ms in the bench): cause open, GPUView/WPR trace needed.
+- P1: memory use with up to 128 MiB per type kept, over a long session, is not measured.
+- P2: short-read limit (a read failing after the discard leaves those pages without their GPU bytes) is a
+  documented shortcut, not removed.
+- The unexplained bench run that ended during the chapter load.
