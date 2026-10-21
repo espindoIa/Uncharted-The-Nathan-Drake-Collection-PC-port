@@ -54,6 +54,11 @@ namespace VideoCore {
 constexpr size_t PM_PAGE_SIZE = 4_KB;
 constexpr size_t PM_PAGE_BITS = 12;
 
+// gow3 21 Oct 2026: file-read ranges prepared by Rasterizer::PrepareCpuWrite (count, bytes, ns),
+// reported by the 5 s fault stats line; taken (and cleared) there.
+std::atomic<u64> g_range_prepares{0}, g_range_prepare_bytes{0}, g_range_prepare_ns{0},
+    g_range_prepare_pages{0};
+
 struct PageManager::Impl {
     using PageState = VideoCore::PageState;
 
@@ -68,6 +73,34 @@ struct PageManager::Impl {
         self = this;
     }
     virtual ~Impl() = default;
+
+    static bool AnyWatched(VAddr addr, u64 size) {
+        if (!self) {
+            return false;
+        }
+        const u64 last = (addr + size - 1) >> PM_PAGE_BITS;
+        if (last >= NUM_ADDRESS_PAGES) {
+            return false;
+        }
+        for (u64 page = addr >> PM_PAGE_BITS; page <= last; ++page) {
+            const auto& state = self->cached_pages[page];
+            if (__atomic_load_n(&state.num_write_watchers, __ATOMIC_RELAXED) |
+                __atomic_load_n(&state.num_read_watchers, __ATOMIC_RELAXED)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Write-watched and not read-watched: a store faults on the write branch alone.
+    static bool OnlyWriteWatched(VAddr addr) {
+        if (!self || (addr >> PM_PAGE_BITS) >= NUM_ADDRESS_PAGES) {
+            return false;
+        }
+        const auto& state = self->cached_pages[addr >> PM_PAGE_BITS];
+        return __atomic_load_n(&state.num_write_watchers, __ATOMIC_RELAXED) != 0 &&
+               __atomic_load_n(&state.num_read_watchers, __ATOMIC_RELAXED) == 0;
+    }
 
     virtual void OnMap(VAddr address, size_t size) {
         // No-op
@@ -132,9 +165,14 @@ struct PageManager::Impl {
             return sorted;
         };
         std::printf("Fault stats (5 s): guest-thread read faults %llu (%.1f ms), GPU-side %llu (%.1f ms), "
-                    "writes into GPU-written memory %llu (%.1f ms)\n",
+                    "writes into GPU-written memory %llu (%.1f ms), file-read ranges prepared %llu "
+                    "(%.1f MB, %llu pages, %.1f ms)\n",
                     (unsigned long long)count[0], ns[0] / 1e6, (unsigned long long)count[1], ns[1] / 1e6,
-                    (unsigned long long)write_count, write_ns / 1e6);
+                    (unsigned long long)write_count, write_ns / 1e6,
+                    (unsigned long long)g_range_prepares.exchange(0),
+                    g_range_prepare_bytes.exchange(0) / 1048576.0,
+                    (unsigned long long)g_range_prepare_pages.exchange(0),
+                    g_range_prepare_ns.exchange(0) / 1e6);
         for (const auto& [n, key] : top(by_rip)) {
             std::printf("  %s rip %#llx: %u\n", key >> 63 ? "write" : "read",
                         (unsigned long long)(key & ~(1ULL << 63)), n);
@@ -535,6 +573,16 @@ void PageManager::OnGpuMap(VAddr address, size_t size) {
 
 void PageManager::OnGpuUnmap(VAddr address, size_t size) {
     impl->OnUnmap(address, size);
+}
+
+// gow3 21 Oct 2026: true when any page of the range is write- or read-watched (protected); the
+// cheap test of Rasterizer::PrepareCpuWrite for file reads. Lock-free hint, like IsReadWatched.
+bool Gow3AnyPageWatched(VAddr addr, u64 size) {
+    return SignalImpl::AnyWatched(addr, size); // (Impl is private: a friend names it)
+}
+
+bool Gow3PageOnlyWriteWatched(VAddr addr) {
+    return SignalImpl::OnlyWriteWatched(addr);
 }
 
 bool PageManager::IsReadWatched(VAddr addr) const {

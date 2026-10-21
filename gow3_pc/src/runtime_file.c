@@ -6,6 +6,7 @@
 #define _GNU_SOURCE
 #include <time.h>
 #include "runtime.h"
+#include "gpu/gow3gpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -472,6 +473,10 @@ static ssize_t host_write(int h,const void *buffer,uint64_t size) { return write
  * goes through the handler, which unprotects it (and records the upcoming write). */
 static void touch_for_write(void *buffer,uint64_t size) {
     if (!size) return;
+    /* 21 Oct: player's U3 chapter load: up to 6,348 write faults/s from these touches, 1,049
+     * one-page protects in a 103 ms frame. The range is prepared in one call first; the touches
+     * stay as the safety net (then they fault nowhere). */
+    gow3gpu_prepare_cpu_write(buffer,size);
     uintptr_t p=(uintptr_t)buffer & ~(uintptr_t)4095, end=(uintptr_t)buffer+size;
     for (; p<end; p+=4096) {
         volatile unsigned char *b=(volatile unsigned char *)(p<(uintptr_t)buffer ? (uintptr_t)buffer : p);

@@ -40,7 +40,24 @@
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
+#include <optional>
+#include "core/platform.h"
+
+// page_manager.cpp: the cheap protected-pages test and the stats of Rasterizer::PrepareCpuWrite.
+namespace VideoCore {
+bool Gow3AnyPageWatched(VAddr addr, u64 size);
+bool Gow3PageOnlyWriteWatched(VAddr addr);
+extern std::atomic<u64> g_range_prepares, g_range_prepare_bytes, g_range_prepare_ns,
+    g_range_prepare_pages;
+} // namespace VideoCore
+
 namespace Vulkan {
+using VideoCore::g_range_prepare_pages;
+using VideoCore::Gow3PageOnlyWriteWatched;
+using VideoCore::Gow3AnyPageWatched;
+using VideoCore::g_range_prepares;
+using VideoCore::g_range_prepare_bytes;
+using VideoCore::g_range_prepare_ns;
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
@@ -5760,11 +5777,66 @@ bool Rasterizer::OnWriteFault(VAddr addr, bool assume_locks) {
     }
     DrainDrawPipe();
     WaitDrawPipeForCapture();
+    return HandleWriteAt(addr, assume_locks);
+}
+
+bool Rasterizer::HandleWriteAt(VAddr addr, bool assume_locks) {
     if (!InvalidateMemory(addr, 8, assume_locks)) {
         return false;
     }
     buffer_cache.ExtendWriteFault(addr);
     LandWatchedReadback(addr, assume_locks);
+    return true;
+}
+
+// gow3 21 Oct 2026: the player's U3 chapter load: up to 6,348 write faults/s from the game's file
+// reads (touch_for_write: one store per 4 KiB page), 1,049 one-page protects in a 103 ms frame
+// (96.4 ms in write-fault handlers), a 215 ms frame with 203 ms in them. The faults the touches
+// would cause, minus the exception dispatch: the same per-address work (HandleWriteAt) at the
+// touch addresses whose page is still protected, one drain before the loop (InvalidateMemory
+// drains per call anyway). One InvalidateMemory over the whole range was rejected (21 Oct review):
+// BufferCache::ReadMemory fetches only the first page's GPU bytes before marking the whole range
+// CPU-modified, and the bulk readback cancellation rounds out to pages, dropping GPU authority
+// for untouched boundary bytes.
+bool Rasterizer::PrepareCpuWrite(VAddr addr, u64 size) {
+    if (!size) {
+        return true;
+    }
+    if (!Gow3AnyPageWatched(addr, size)) {
+        return true; // Nothing protected: the copy faults nowhere, and no GPU bytes to bring back.
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const bool assume_locks = IsGpuSideThread();
+    // As in the fault handler (page_manager.cpp): interrupts landed here wait for this thread's
+    // next safe point, it may hold cache locks the interrupt handlers take.
+    std::optional<Platform::IrqController::HoldScope> hold_interrupts;
+    if (assume_locks) {
+        hold_interrupts.emplace();
+    }
+    DrainDrawPipe();
+    WaitDrawPipeForCapture();
+    const VAddr end = addr + size;
+    u64 pages = 0;
+    // The touch addresses of touch_for_write: the buffer itself, then each page base after it.
+    for (VAddr at = addr; at < end; at = Common::AlignDown(at, VAddr{4096}) + 4096) {
+        if (!Gow3PageOnlyWriteWatched(at)) {
+            // Unprotected (maybe by an earlier window): the touch would not fault. Read-watched:
+            // left to the touches (21 Oct review: their load takes the read fault, which lands
+            // the readback, before any write fault).
+            continue;
+        }
+        if (!HandleWriteAt(at, assume_locks)) {
+            return false; // The page touches handle what faults.
+        }
+        ++pages;
+    }
+    g_range_prepare_pages.fetch_add(pages, std::memory_order_relaxed);
+    g_range_prepares.fetch_add(1, std::memory_order_relaxed);
+    g_range_prepare_bytes.fetch_add(size, std::memory_order_relaxed);
+    g_range_prepare_ns.fetch_add(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
+            .count(),
+        std::memory_order_relaxed);
     return true;
 }
 

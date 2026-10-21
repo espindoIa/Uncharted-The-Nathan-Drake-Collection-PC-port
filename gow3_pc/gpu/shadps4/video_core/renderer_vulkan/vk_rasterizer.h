@@ -177,6 +177,12 @@ public:
     bool IsGpuSideThreadId(u32 tid) const;
     /// A guest write hit a protected page.
     bool OnWriteFault(VAddr addr, bool assume_locks);
+    /// gow3: the runtime is about to write [addr, addr + size) itself (file reads): everything an
+    /// OnWriteFault does per page, once for the range. True when the range was prepared (also when
+    /// nothing in it is tracked), false when the caller must fall back to touching pages.
+    bool PrepareCpuWrite(VAddr addr, u64 size);
+    /// The per-address work of a write fault (after the drain), shared by both.
+    bool HandleWriteAt(VAddr addr, bool assume_locks);
     /// gow3: a guest instruction keeps faulting on one page (see BufferCache::ReleaseStuckPage).
     void ReleaseStuckPage(VAddr page, bool is_write, bool assume_locks);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);

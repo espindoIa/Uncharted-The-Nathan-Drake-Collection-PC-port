@@ -23,6 +23,9 @@ int gow3gpu_init(const Gow3GpuConfig *config);
 uintptr_t gow3gpu_resolve(const char *scoped_nid);
 /* Called first by the loader's SIGSEGV handler: 1 when a GPU page-tracking fault was handled. */
 int gow3gpu_handle_fault(void *ucontext, void *address);
+/* The runtime is about to write [addr, addr+size) of guest memory itself (file reads): prepares
+ * the range for a CPU write once, as a write fault does per page. 1 done, 0 not available. */
+int gow3gpu_prepare_cpu_write(void *addr, uint64_t size);
 /* GOW3_WRITE_LOG=1: prints the logged GPU-side writes to guest memory near the fault. */
 void gow3gpu_dump_guest_writes(void *ucontext);
 /* Keyboard text entry through the game window (IME dialog). begin returns 0 when

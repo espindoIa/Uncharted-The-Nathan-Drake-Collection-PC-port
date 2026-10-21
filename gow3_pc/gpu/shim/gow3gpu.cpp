@@ -513,6 +513,17 @@ extern "C" int gow3gpu_handle_fault(void* ucontext, void* address) {
     return Core::Signals::Instance()->DispatchAccessViolation(ucontext, address) ? 1 : 0;
 }
 
+// gow3 21 Oct 2026: guest file reads (runtime_file.c) prepare their destination range for a CPU
+// write once, instead of one write fault per 4 KiB page (Rasterizer::PrepareCpuWrite).
+extern "C" int gow3gpu_prepare_cpu_write(void* addr, uint64_t size) {
+    if (Gow3Toggle::Disabled2(Gow3Toggle::RangeWritePrepare)) {
+        return 0;
+    }
+    auto* memory = Core::Memory::Instance();
+    auto* rasterizer = memory ? memory->GetRasterizer() : nullptr;
+    return rasterizer && rasterizer->PrepareCpuWrite(reinterpret_cast<VAddr>(addr), size) ? 1 : 0;
+}
+
 extern "C" unsigned gow3gpu_symbol_count(void) {
     return unsigned(g_symbols.size());
 }
