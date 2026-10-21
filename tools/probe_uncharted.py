@@ -236,6 +236,62 @@ FOCUS_NAN_PATCHES = {
     ],
 }
 
+# The most common Drake's Fortune crash (GitHub #27, #30, #42, #62: "execute access to 0", called
+# from 0x64011f; Uncharted 2 and 3 have the same code). For each shader the constant-update code
+# fills a table (a 0x28-byte header, then 0x30-byte entries whose 16-bit word picks the member
+# function a draw calls later) in a leaf function (U1 1.02 0x63df10, U2 0xd645f0, U3 0x12d6cf0)
+# that keeps its running entry indices in the 128 bytes below rsp. The tables lie in a ring next
+# to GPU data, so one can cross into a page the GPU tracker has write-protected, and the store
+# there faults in the middle of the function. Windows builds the exception frame on the same stack
+# and its x64 ABI promises nothing below rsp (the 26300 build on our test PC happens to leave
+# 1.6 KB free, which is why it never crashed here; a reporter runs Windows 10). An index then
+# reads 0, an entry is written over another, and the walk calls the null member its stale word
+# selects. The function's start now jumps to a stub that writes each page of the table once
+# (lock or byte [p], 0: no value changes) before anything lives below rsp, then carries on: a
+# protected page faults there, harmlessly. The stub sits in a dead assert path nearby, which
+# still starts with int 0x41, so that assert still stops the game. UNCHARTED_CUE_PRETOUCH=0: off.
+CUE_TABLE_FILL = "55 41 57 41 56 41 55 41 54 53 49 b9 00 24 00 0d 10 00 00 00 48 c7 07 00 00 00 00 45 31 f6"
+
+
+def cue_pretouch_variant(cave, original):
+    """The table fill's first 5 bytes (push rbp; push r15; push r14) become a jump to the stub at
+    `cave` (from the start of the function), which replaces the 53-byte assert path `original`."""
+    stub = bytes.fromhex(
+        "cd41"            # int 0x41 (the assert path's end, now its start)
+        "89d0"            # mov eax, edx                 entries
+        "486bc030"        # imul rax, rax, 0x30
+        "488d440727"      # lea rax, [rdi + rax + 0x27]  the table's last byte
+        "4889f9"          # mov rcx, rdi
+        "f0800900"        # touch: lock or byte [rcx], 0
+        "6681c9ff0f"      # or cx, 0xfff
+        "48ffc1"          # inc rcx                      the next page
+        "4839c1"          # cmp rcx, rax
+        "76ef"            # jbe touch
+        "55 4157 4156".replace(" ", ""))  # the moved instructions
+    stub += b"\xe9" + struct.pack("<i", 5 - (cave + len(stub) + 5))  # jmp to the function's 6th byte
+    original = bytes.fromhex(original)
+    assert len(stub) <= len(original) == 53
+    return (CUE_TABLE_FILL, [
+        (cave, original, stub + b"\xcc" * (len(original) - len(stub))),
+        (0, bytes.fromhex("5541574156"), b"\xe9" + struct.pack("<i", cave + 2 - 5)),
+    ])
+
+
+CUE_PRETOUCH_PATCHES = {  # 1.02: the assert path (r14d < 0x10000 in U1, line 0xae4 in U2/U3)
+    "eboot.bin": [("constant tables: pages written before the fill (no fault inside it)", [
+        cue_pretouch_variant(0xfd7a, "488b056780a6004885c07427488d3de3671d00488d35f8671d00488d1524681d00"
+                                     "488d0dca671d0041b8ad0100004531c9ffd0cd41"),
+    ])],
+    "big2-ps4_Shipping.elf": [("constant tables: pages written before the fill (no fault inside it)", [
+        cue_pretouch_variant(-0xa850, "488b05d14181004885c07427488d3dac8e1500488d35e9801500488d15b28e1500"
+                                      "488d0daca5090041b8e40a00004531c9ffd0cd41"),
+    ])],
+    "big3-ps4_Shipping.elf": [("constant tables: pages written before the fill (no fault inside it)", [
+        cue_pretouch_variant(-0xb690, "488b05517192004885c07427488d3d4c841b00488d35b4761b00488d1552841b00"
+                                      "488d0dc80b0e0041b8e40a00004531c9ffd0cd41"),
+    ])],
+}
+
 # Everything unlocked (launcher -> Advanced -> Unlock all chapters, UNCHARTED_UNLOCK=1): the three
 # games keep Bluepoint's tweak flags "Unlock Chapter Select by default" and "Unlock Brutal
 # difficulty by default" (debug menu; +2/+1 after the Crushing flag, which the Collection already
@@ -857,6 +913,8 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         patches.extend(UNLOCK_PATCHES.get(executable, []))
     if os.environ.get("UNCHARTED_FOCUS_RESET", "1") != "0":
         patches.extend(FOCUS_NAN_PATCHES.get(executable, []))
+    if os.environ.get("UNCHARTED_CUE_PRETOUCH", "1") != "0":
+        patches.extend(CUE_PRETOUCH_PATCHES.get(executable, []))
     for cheat in cheat_names(executable):
         patches.extend(CHEAT_PATCHES.get(executable, {}).get(cheat, []))
     # Ultrawide render sizes (the launcher's aspect ratio): the wider view (HOR_PLUS_PATCHES).
