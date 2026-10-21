@@ -133,9 +133,9 @@ AIM_RANGE_PATCHES = {
         ("Uncharted 1 aim sensitivity above 1 (aim speed range check)", [
             ("c5f82e05 ???????? 763d c5fa1145f4", 8, bytes.fromhex("763d"), bytes.fromhex("eb3d")),
         ]),
-        ("Uncharted 1 aim sensitivity slider up to 5", [
+        ("Uncharted 1 aim sensitivity slider up to 10", [
             ("488d0dd5738000 48894818 48c740200a000000 48b9 0000003f0000803f 48894828", 21,
-             bytes.fromhex("0000003f0000803f"), bytes.fromhex("000020400000a040")),
+             bytes.fromhex("0000003f0000803f"), bytes.fromhex("0000a04000002041")),
         ]),
     ],
     # Uncharted 2: the check in 0x719d80; the slider item (0x5d25b1) takes its max from a constant
@@ -144,9 +144,9 @@ AIM_RANGE_PATCHES = {
         ("Uncharted 2 aim sensitivity above 1 (aim speed range check)", [
             ("c5f82e05 ???????? 7649 488b05", 8, bytes.fromhex("7649"), bytes.fromhex("eb49")),
         ]),
-        ("Uncharted 2 aim sensitivity slider up to 5", [
+        ("Uncharted 2 aim sensitivity slider up to 10", [
             ("81f9d6c2ba1a 0f85???????? 4989ff 4c8d35???????? c5fa1005 75fa8800", 26,
-             bytes.fromhex("75fa8800"), bytes.fromhex("21fa8800")),
+             bytes.fromhex("75fa8800"), bytes.fromhex("4de08800")),
         ]),
     ],
     # Uncharted 3: the check in UpdateAiming3Settings (0x927fe5). The slider's value -> notch
@@ -158,15 +158,15 @@ AIM_RANGE_PATCHES = {
         ("Uncharted 3 aim sensitivity above 1 (aim speed range check)", [
             ("c5fa1015???????? c5f82ed0 7351 488b05", 12, bytes.fromhex("7351"), bytes.fromhex("eb51")),
         ]),
-        ("Uncharted 3 aim sensitivity slider up to 4 (value -> notch)", [
+        ("Uncharted 3 aim sensitivity slider up to 10 (value -> notch)", [
             ("81f9d6c2ba1a7547 488d05dd63190148630048c1e006488d0dcfd71c01488d440120eb2b", 8,
              bytes.fromhex("488d05dd63190148630048c1e006488d0dcfd71c01488d440120eb2b"),
-             bytes.fromhex("6b05dd631901404898488d0df4d71c014801c80f58c90f58c9eb2c90")),
+             bytes.fromhex("6b05dd63190140488d0df6d71c014801c8f30f590d13c1b4ffeb2c90")),
         ]),
-        ("Uncharted 3 aim sensitivity slider up to 4 (notch -> value)", [
+        ("Uncharted 3 aim sensitivity slider up to 10 (notch -> value)", [
             ("3dd6c2ba1a7520 488d0da662190148630948c1e106488d1598d61c01488d4c0a20c5f828daeb36", 7,
              bytes.fromhex("488d0da662190148630948c1e106488d1598d61c01488d4c0a20c5f828daeb36"),
-             bytes.fromhex("6b0da6621901404863c9488d15bcd61c014801d1c5f828da0f58c90f58c9eb36")),
+             bytes.fromhex("6b0da662190140488d15bfd61c014801d1c5f828daf30f590dd8bfb4ffeb3790")),
         ]),
     ],
 }
@@ -322,6 +322,62 @@ CHEATS = {
 # it were set (1.02 code; the lea's displacement makes each pattern unique).
 def _ammo_reader(pattern, jne_at):
     return (pattern, jne_at, b"\x75", b"\xeb")
+
+
+# Unlock all rewards (launcher -> Advanced, UNCHARTED_UNLOCK_REWARDS=1): Naughty Dog's debug menu
+# switches "Give all Store Items" and "Give All Movies" (the menu itself is unreachable), kept set
+# like the cheats (GOW3_POKE): the games' unlock checks treat every reward (skins, weapons, render
+# modes, art galleries, tweaks) and every story cutscene as unlocked while they are set. Nothing
+# is written to the save: without them the Bonuses menus show the player's own progress again
+# (21 Oct, Uncharted 3: Rewards 81/81, 47/47, 3/3, 6/6, 7/7 with them; 1/81 ... from the same save
+# without). Update 1.02 image offsets.
+REWARD_POKES = {
+    "big2-ps4_Shipping.elf": ["1114178", "1114179"],
+    "big3-ps4_Shipping.elf": ["17b2a94", "17b2a95"],
+}
+# Drake's Fortune keeps each reward's status in its own record (bit 0 unlocked) and its debug
+# switch also writes them, so its checks are patched instead: every reward reads as unlocked,
+# usable and counted ("Unlocked 47 of 47"), and the Story Cutscenes list skips no chapter. The
+# status bytes are not touched (nothing saved; earned rewards are still recorded). 1.02 code.
+REWARD_PATCHES = {
+    # Uncharted 2 and 3 let some rewards (tweaks, render modes) be enabled only once the game was
+    # finished on the current difficulty or a harder one: the reward screen's item info sets
+    # "needs the game finished" (+0xe) to 1 and clears it from the save's finished-difficulty bits.
+    # It is now set to 0 (the user, 21 Oct: "cannot enable until you beat the game").
+    "big2-ps4_Shipping.elf": [
+        ("Uncharted 2 rewards can be enabled before the game is finished", [
+            ("7441c6430e01833d401fa800", 5, bytes.fromhex("01"), bytes.fromhex("00"))]),
+    ],
+    "big3-ps4_Shipping.elf": [
+        ("Uncharted 3 rewards can be enabled before the game is finished", [
+            ("74054c39f0725c41c6450e01488d05", 11, bytes.fromhex("01"), bytes.fromhex("00"))]),
+    ],
+    "eboot.bin": [
+        # IsUnlocked(item): `and al, 1` on status bit 0 -> `mov al, 1`
+        ("Uncharted 1 rewards unlocked (item check)", [
+            ("b001803f00750d4885f674098a86880000002401", 18, bytes.fromhex("24"), bytes.fromhex("b0"))]),
+        # IsUnlocked(category, id)
+        ("Uncharted 1 rewards unlocked (id check)", [
+            ("75134d85e4740c418a8424880000002401eb02", 15, bytes.fromhex("24"), bytes.fromhex("b0"))]),
+        # the "Unlocked N of 47" counter: `je skip` -> `je +0`
+        ("Uncharted 1 rewards unlocked (counter)", [
+            ("4c89f275154885c07422f68088000000017419", 18, bytes.fromhex("19"), bytes.fromhex("00"))]),
+        # usable-by-id check: `je not` -> `je +0`
+        ("Uncharted 1 rewards unlocked (usable by id)", [
+            ("41803e00750af684088800000001741e488d55d4", 15, bytes.fromhex("1e"), bytes.fromhex("00"))]),
+        # CanEnable: `test [item+0x88],1; sete dl` (dl = locked) -> `setb dl` (0: test clears CF)
+        ("Uncharted 1 rewards unlocked (enable check)", [
+            ("41f68688000000010f94c24584ff0f95c184c0", 9, bytes.fromhex("94"), bytes.fromhex("92"))]),
+        # CanEnable's "finish the game on this difficulty first" reason (bit 1, the menu's
+        # STORE_REQUIREMENT_CURRENT_DIFFICULTY_ENABLING): `mov r13b, 1` before the finished-
+        # difficulty loop -> `mov r13b, 0` (the user, 21 Oct: a problem with rewards in U1)
+        ("Uncharted 1 rewards can be enabled before the game is finished", [
+            ("448bb87848000041b5014183ff067338", 9, bytes.fromhex("01"), bytes.fromhex("00"))]),
+        # Story Cutscenes list: `cmp [node+0x50], 0; js skip` (chapter not reached) -> `js +0`
+        ("Uncharted 1 story cutscenes unlocked", [
+            ("488b7840837f50000f88880000004c8b4210", 10, bytes.fromhex("88"), bytes.fromhex("00"))]),
+    ],
+}
 
 
 def cheat_names(executable):
@@ -523,8 +579,17 @@ def game_executable():
     this name), copied from the build output whenever that is newer."""
     built = ROOT / "gow3_pc/out/gow3-probe.exe"
     game_exe = ROOT / "gow3_pc/out/Uncharted.exe"
+    if os.environ.get("UNCHARTED_TEST_PROBE_EXE") == "1":  # test: not under the game's name
+        return built
+    # Tests of another build (UNCHARTED_PROBE_EXE=<file>) run it as Uncharted.exe and leave the
+    # deployed build alone; any difference to the deployed build (not only a newer one) is copied
+    # back at the next normal start.
+    if override := os.environ.get("UNCHARTED_PROBE_EXE"):
+        built = Path(override)
     try:
-        if not game_exe.exists() or built.stat().st_mtime > game_exe.stat().st_mtime:
+        built_stat = built.stat()
+        if not game_exe.exists() or built_stat.st_mtime != game_exe.stat().st_mtime or \
+                built_stat.st_size != game_exe.stat().st_size:
             shutil.copy2(built, game_exe)
     except OSError as error:  # still running from a previous start: use the build output
         print(f"Using {built.name}: {error}")
@@ -819,6 +884,8 @@ def run_once(args, executable, guest_args, loadexec):
         return run_game(args, base, executable, guest_args, loadexec)
     print(f"Update {sfo_value(update, 'APP_VER') or '?'}: {update}")
     try:
+        if os.environ.get("UNCHARTED_TEST_OVERLAY") == "1":  # test: the drive-without-links path
+            raise SystemExit("UNCHARTED_TEST_OVERLAY=1")
         view = game_view(base, update)
     except SystemExit as error:
         # exFAT/FAT32 drives (USB sticks) hold no links ([WinError 1] Incorrect function): the
@@ -927,6 +994,8 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         patches.extend(FRAME_BEGIN_WAIT_PATCHES.get(executable, []))
     if os.environ.get("UNCHARTED_UNLOCK", "0") == "1":
         patches.extend(UNLOCK_PATCHES.get(executable, []))
+    if os.environ.get("UNCHARTED_UNLOCK_REWARDS", "0") == "1":
+        patches.extend(REWARD_PATCHES.get(executable, []))
     if os.environ.get("UNCHARTED_FOCUS_RESET", "1") != "0":
         patches.extend(FOCUS_NAN_PATCHES.get(executable, []))
     if os.environ.get("UNCHARTED_CUE_PRETOUCH", "1") != "0":
@@ -988,20 +1057,26 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         extra_mib = 0
     env = os.environ.copy()
     wanted = cheat_names(executable)
-    if wanted and "GOW3_POKE" not in env:
+    rewards = os.environ.get("UNCHARTED_UNLOCK_REWARDS", "0") == "1"
+    if (wanted or rewards) and "GOW3_POKE" not in env:
         if (game_version(game) or "") >= "01.02":
             pokes = [CHEATS[executable][name] for name in wanted if name in CHEATS.get(executable, {})]
+            if wanted:
+                print(f"Cheats: {', '.join(n for n in wanted if n in CHEATS.get(executable, {}))}")
+            if rewards and REWARD_POKES.get(executable):
+                pokes += REWARD_POKES[executable]
+                print("Unlock all rewards: on")
             if pokes:
                 env["GOW3_POKE"] = ",".join(pokes)
-                print(f"Cheats: {', '.join(n for n in wanted if n in CHEATS.get(executable, {}))}")
         else:
-            print("Cheats: need update 1.02 (not used)")
+            print("Cheats and unlocked rewards: need update 1.02 (not used)")
     # Measurement logging and live trigger files (frame/fault/wait statistics every 5 s, GPU
     # checkpoints, capture/readback/DMA triggers). On unless the launcher turns it off.
     diagnostics = env.get("UNCHARTED_DIAGNOSTICS", "1") != "0"
     msys = Path(env.get("MSYS2_ROOT", "C:/msys64"))
     env["PATH"] = str(msys / "clang64/bin") + os.pathsep + env.get("PATH", "")
-    env["GOW3_GPU_USER_DIR"] = str(user)
+    # UNCHARTED_TEST_GPU_USER_DIR: GPU caches in another folder (tests from an empty shader cache).
+    env["GOW3_GPU_USER_DIR"] = env.get("UNCHARTED_TEST_GPU_USER_DIR") or str(user)
     settings = user / f"probe-{game_key}.ini"
     if not settings.exists() and (user / "probe.ini").exists():
         shutil.copy2(user / "probe.ini", settings)  # earlier versions shared one file
@@ -1072,6 +1147,11 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     language = os.environ.get("UNCHARTED_LANGUAGE", "").strip()
     if language.isdigit():
         env.setdefault("GOW3_LANGUAGE", language)
+    # Speakers (launcher -> Advanced): the layout the games mix their sound for (runtime_audio.c);
+    # auto = the Windows output device's (stereo, 5.1 or 7.1), or 2, 6, 8.
+    speakers = os.environ.get("UNCHARTED_SPEAKERS", "").strip().lower()
+    if speakers in ("auto", "2", "6", "8"):
+        env.setdefault("GOW3_AUDIO_SPEAKERS", speakers)
     # Temporal anti-aliasing and upscaling (in-game menu -> Image -> Anti-aliasing: TAA, FSR 3.1,
     # FSR 4, DLSS; launcher -> Display) is always prepared, so the menu switches it on and off
     # live. It runs on the lit scene before the post processing starts (compute aec539f0, the

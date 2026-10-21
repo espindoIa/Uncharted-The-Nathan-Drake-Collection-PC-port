@@ -3,6 +3,7 @@
 
 #include "gow3_toggles.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <bit>

@@ -628,6 +628,11 @@ void PipelineCache::PublishShaders(bool wait) {
 }
 
 void PipelineCache::PublishGraphics(bool wait) {
+    // gow3: called for every draw and dispatch. begin() of a robin map scans its buckets, and
+    // the map never shrinks after a loading burst: nothing to do when no build is pending.
+    if (pending_graphics.empty()) {
+        return;
+    }
     for (auto it = pending_graphics.begin(); it != pending_graphics.end();) {
         auto build = it.value();
         if (wait) {
@@ -639,6 +644,13 @@ void PipelineCache::PublishGraphics(bool wait) {
                 LOG_ERROR(Render_Vulkan, "gow3: pipeline {:#x} compilation failed: {}",
                           std::hash<GraphicsPipelineKey>{}(it.key()), build->job.Error());
                 build->failure_logged = true;
+            }
+            if (build->job.Failed()) {
+                // gow3: kept out of pending_graphics (so it can become empty) and never queued
+                // again, as when it stayed there; a synchronous draw compiles it itself.
+                failed_graphics.emplace(it.key(), std::move(build));
+                it = pending_graphics.erase(it);
+                continue;
             }
             ++it;
             continue;
@@ -1018,7 +1030,10 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
             return nullptr;
         }
     }
-    const auto it = graphics_pipelines.find(prepared.key);
+    // gow3 21 Oct 2026 (GOW3_CPU_TRIMS=1): with the hash the worker computed (key_hash is 0 when
+    // the switch is off).
+    const auto it = prepared.key_hash ? graphics_pipelines.find(prepared.key, prepared.key_hash)
+                                      : graphics_pipelines.find(prepared.key);
     return it != graphics_pipelines.end() && !it->second->Failed() ? it->second.get() : nullptr;
 }
 
@@ -1054,7 +1069,9 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         if (found != graphics_pipelines.end()) {
             return found->second->Failed() ? nullptr : found->second.get();
         }
-        if (!pending_graphics.contains(sel.graphics_key) && compiler->HasCapacity()) {
+        if (!pending_graphics.contains(sel.graphics_key) &&
+            (failed_graphics.empty() || !failed_graphics.contains(sel.graphics_key)) &&
+            compiler->HasCapacity()) {
             PhaseTimer capture{g_gow3_snapshot_ns};
             auto build = std::make_shared<AsyncGraphicsCompilation>();
             build->selection = sel;
@@ -1152,6 +1169,37 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
             auto& m = sel.modules[0];
             module_related_pipelines[m].emplace_back(compute_key);
         }
+        // gow3 20 Oct 2026 (GitHub #95): a shader that keeps making pipeline variants is named
+        // in the log. In 0.4.1 two effect shaders built ~10,000 compute pipelines over a U2
+        // session (RAM and video memory rising, the frame rate falling); the port normally holds
+        // ~30. Logged at 100, 1,000 and 10,000 variants of one shader.
+        static std::unordered_map<u64, u32> variants_per_shader;
+        const u64 shader = sel.infos[0]->pgm_hash;
+        const u32 variants = ++variants_per_shader[shader];
+        if (variants == 100 || variants == 1000 || variants == 10000) {
+            std::printf("GPU: compute shader %016llx has built %u pipeline variants (far more than "
+                        "usual: memory use grows with each; a log with this line helps)\n",
+                        static_cast<unsigned long long>(shader), variants);
+            std::fflush(stdout);
+        }
+        // What the next new variants were made for (their buffer V#s), to find what varies.
+        if (variants > 100 && variants <= 106) {
+            const auto& info = *sel.infos[0];
+            std::string text;
+            for (u32 i = 0; i < info.buffers.size() && i < 12; ++i) {
+                const auto& desc = info.buffers[i];
+                if (desc.IsSpecial()) {
+                    continue;
+                }
+                const auto sharp = desc.GetSharp(info);
+                text += fmt::format(" [{}{} {:#x} stride {} records {} fmt {}/{}]", i,
+                                    desc.is_written ? "w" : "", sharp.base_address, sharp.GetStride(),
+                                    sharp.num_records, u32(sharp.GetDataFmt()), u32(sharp.GetNumberFmt()));
+            }
+            std::printf("GPU: compute shader %016llx variant %u buffers:%s\n",
+                        static_cast<unsigned long long>(shader), variants, text.c_str());
+            std::fflush(stdout);
+        }
     }
     return it->second.get();
 }
@@ -1209,8 +1257,15 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
             regs.depth_buffer.z_info.format == AmdGpu::DepthBuffer::ZFormat::Z32Float &&
             // Not the half-resolution passes (pitches are tile-aligned: 1920 -> 2048).
             regs.depth_buffer.Pitch() * 4 >= SceneResolution::Native().width * 3;
+        // Uncharted: its G-buffer passes draw one target with the scene depth and write the
+        // stencil (characters set bit 1); the rasterizer picks the character draws.
+        const bool uncharted_gbuffer = Shader::MotionVectors::stencil_gate && bound >= 1 &&
+                                       regs.depth_control.stencil_enable &&
+                                       regs.depth_control.depth_write_enable;
+        // Uncharted, velocity camera (stencil_gate, upstream 0.5.0): the character draws. Never
+        // together with flat_scene: stencil_gate is set only in the velocity mode.
         motion_possible = Shader::MotionVectors::positions_address != 0 &&
-                          (bound >= 5 || flat_scene) &&
+                          (bound >= 5 || flat_scene || uncharted_gbuffer) &&
                           !regs.color_buffers[Shader::MotionVectors::Output] &&
                           regs.depth_buffer.DepthValid() &&
                           regs.depth_buffer.NumSamples() == 1 && !regs.IsClipDisabled() &&
@@ -1245,7 +1300,9 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
     }
     if (motion_possible && !flat_scene) {
         const auto* vs = sel.infos[static_cast<u32>(Shader::SwStage::Vertex)];
-        if (vs) {
+        if (vs && Shader::MotionVectors::stencil_gate) {
+            sel.motion = true; // Uncharted: per draw (the stencil value it writes)
+        } else if (vs) {
             // Shaders with a bone palette (motion_history.h). Small skeletons (weapons,
             // props) also include static world pieces: the rasterizer gives those
             // history only while their constants change.
@@ -1354,7 +1411,21 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
 bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
     const auto& regs = (*sel.regs);
     auto& key = sel.graphics_key;
-    sel.fetch_shader = std::nullopt;
+    // gow3: a stage's fetch shader data is assigned to sel.fetch_shader in place (GetProgram),
+    // not reset here and copied anew for every draw; it is reset only when no stage has one,
+    // before it is read below and on every early return.
+    struct FetchReset {
+        PipelineSelection& sel;
+        bool assigned = false;
+        void Apply() {
+            if (!assigned) {
+                sel.fetch_shader.reset();
+            }
+        }
+        ~FetchReset() {
+            Apply();
+        }
+    } fetch_reset{sel};
     sel.compilation_pending = false;
 
     Shader::Backend::Bindings binding{};
@@ -1375,17 +1446,15 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
         }
 
         const auto params = AmdGpu::GetParams(*pgm);
-        std::optional<Shader::Gcn::FetchShaderData> fetch_shader_;
-        std::tie(sel.infos[stage_out_idx], sel.modules[stage_out_idx], fetch_shader_,
+        bool has_fetch = false;
+        std::tie(sel.infos[stage_out_idx], sel.modules[stage_out_idx], has_fetch,
                  key.stage_hashes[stage_out_idx]) =
-            GetProgram(sel, stage_in, stage_out, params, binding);
+            GetProgram(sel, stage_in, stage_out, params, binding, sel.fetch_shader);
         if (!sel.infos[stage_out_idx]) {
             sel.compilation_pending = true;
             return false;
         }
-        if (fetch_shader_) {
-            sel.fetch_shader = fetch_shader_;
-        }
+        fetch_reset.assigned |= has_fetch;
         return true;
     };
 
@@ -1468,6 +1537,7 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
         return false;
     }
 
+    fetch_reset.Apply();
     const auto* vs_info = sel.infos[static_cast<u32>(SwStage::Vertex)];
     if (vs_info && sel.fetch_shader && !instance.IsVertexInputDynamicState()) {
         // Without vertex input dynamic state, the pipeline needs to specialize on format.
@@ -1490,8 +1560,12 @@ bool PipelineCache::RefreshComputeKey() {
     Shader::Backend::Bindings binding{};
     const auto& cs_pgm = liverpool->GetCsRegs();
     const auto cs_params = AmdGpu::GetParams(cs_pgm);
-    std::tie(sel.infos[0], sel.modules[0], sel.fetch_shader, compute_key.value) =
-        GetProgram(sel, HwStage::Compute, SwStage::Compute, cs_params, binding);
+    bool has_fetch = false;
+    std::tie(sel.infos[0], sel.modules[0], has_fetch, compute_key.value) =
+        GetProgram(sel, HwStage::Compute, SwStage::Compute, cs_params, binding, sel.fetch_shader);
+    if (!has_fetch) {
+        sel.fetch_shader.reset();
+    }
     return sel.infos[0] != nullptr;
 }
 
@@ -1531,10 +1605,25 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     return module;
 }
 
+// gow3: see Result: copied in place, so the attribute vector keeps its allocation.
+static bool AssignFetch(std::optional<Shader::Gcn::FetchShaderData>& to,
+                        const std::optional<Shader::Gcn::FetchShaderData>& from) {
+    if (!from) {
+        return false;
+    }
+    if (to) {
+        *to = *from;
+    } else {
+        to = *from;
+    }
+    return true;
+}
+
 PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage hw_stage,
                                                 SwStage sw_stage,
                                                 const Shader::ShaderParams& params,
-                                                Shader::Backend::Bindings& binding) {
+                                                Shader::Backend::Bindings& binding,
+                                                std::optional<Shader::Gcn::FetchShaderData>& fetch) {
     auto runtime_info = BuildRuntimeInfo(sel, hw_stage, sw_stage);
     if (sel.worker) {
         // gow3: draw-preparation worker: look up only, with the worker's own Info copy.
@@ -1572,7 +1661,8 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         const size_t perm_idx = std::distance(program->modules.begin(), it);
         worker.stages.push_back(
             {program, params.hash, hw_stage, info.pgm_base, &info.flattened_ud_buf});
-        return std::make_tuple(&info, it->module, it->spec.fetch_shader_data,
+        // (copied while the programs lock is held: the GPU thread may add permutations)
+        return std::make_tuple(&info, it->module, AssignFetch(fetch, it->spec.fetch_shader_data),
                                HashCombine(params.hash, perm_idx));
     }
 
@@ -1639,7 +1729,8 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
             std::unique_lock lk{programs_mutex};
             program_cache.emplace(params.hash, std::move(new_program));
         }
-        return std::make_tuple(&program->info, module, program->modules[0].spec.fetch_shader_data,
+        return std::make_tuple(&program->info, module,
+                               AssignFetch(fetch, program->modules[0].spec.fetch_shader_data),
                                perm_hash);
     }
 
@@ -1698,7 +1789,8 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         perm_hash = HashCombine(params.hash, perm_idx);
     }
     return std::make_tuple(&program->info, module,
-                           program->modules[perm_idx].spec.fetch_shader_data, perm_hash);
+                           AssignFetch(fetch, program->modules[perm_idx].spec.fetch_shader_data),
+                           perm_hash);
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,
@@ -1780,6 +1872,6 @@ namespace Vulkan {
 std::string PipelineCache::DebugSizes() const {
     return std::format("{} graphics and {} compute pipelines, {} programs, {} pending compiles",
                        graphics_pipelines.size(), compute_pipelines.size(), program_cache.size(),
-                       pending_graphics.size());
+                       pending_graphics.size() + failed_graphics.size());
 }
 } // namespace Vulkan
