@@ -578,6 +578,11 @@ void RegisterPipelineData(const GraphicsPipelineKey& key, u64 hash,
     if (!Storage::DataBase::Instance().IsOpened()) {
         return;
     }
+    // gow3 21 Oct 2026: motion-vector vertex stages are never loaded from disk (LoadShaderMeta
+    // rejects them), so their keys only failed on every start.
+    if (key.motion_vectors) {
+        return;
+    }
 
     Serialization::Archive ar{};
     Serialization::Writer pldata{ar};
