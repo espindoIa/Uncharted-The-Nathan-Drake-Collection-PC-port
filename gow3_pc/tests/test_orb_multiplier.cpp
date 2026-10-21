@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include "gow3_settings.h"
 #ifdef _WIN32
 #include <windows.h>
@@ -99,9 +100,12 @@ int main(int argc, char** argv) {
 #else
     setenv("GOW3_CONFIG", config.string().c_str(), 1);
 #endif
-    settings.red_orb_multiplier = 0.125f;
-    settings.cheats[0] = true;
-    settings.cheats[2] = true;
+    // 20 Oct 2026 audit: Save no longer writes the God of War keys; it keeps the ones already in
+    // the file, so they are put there first and must survive the Save.
+    {
+        std::ofstream out(config);
+        out << "red_orb_multiplier=0.125\ncheat_health=1\ncheat_item=1\n";
+    }
     Gow3Settings::Save();
     settings.red_orb_multiplier = 1;
     settings.cheats[0] = false;

@@ -15,6 +15,7 @@
 #include "gow3_overlay.h"
 #include "gow3_settings.h"
 #include "gow3_graphics.h"
+#include "gow3_trigger_files.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_warmup_inbox.h"
@@ -611,9 +612,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // gow3: GOW3_FRAME_DUMP_TRIGGER=<file>: when the file exists it is removed and this frame's
     // guest display buffer and presented image are written to GOW3_DUMP_DIR (default out/dump)
     // as raw 32-bit pixels (menus and movies included; the upscaler dumps scene frames only).
-    static const char* frame_dump_trigger = std::getenv("GOW3_FRAME_DUMP_TRIGGER");
+    // The file is polled off this thread (gow3_trigger_files.cpp; a remove() here every frame).
+    static const int frame_dump_trigger = Gow3TriggerFiles::Watch("GOW3_FRAME_DUMP_TRIGGER");
     static int frame_dump_index = 0;
-    const bool frame_dump = frame_dump_trigger && std::remove(frame_dump_trigger) == 0;
+    const bool frame_dump = Gow3TriggerFiles::Take(frame_dump_trigger).has_value();
     // gow3: scaled upscaler presets: the output-size display buffer drawn by the port.
     TemporalUpscaler::Display display{};
     const bool upscaled = rasterizer->GetUpscaler().DisplayOverride(cpu_address, display);
@@ -624,6 +626,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         texture_cache.UpdateImage(image_id);
     }
 
+    // 20 Oct audit: warm-up was pumped only on pipeline lookups (U1: entries waited ~4.8 s); PrepareFrame
+    // runs on the GPU command thread once per flip, like the lookups.
+    rasterizer->GetPipelineCache().PumpWarmUp();
     SubmitLog::Event("F0", "%llx", static_cast<unsigned long long>(cpu_address));
     Frame* frame = GetRenderFrame();
     SubmitLog::Event("F1", "%u", frame->id);
@@ -657,7 +662,15 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     if (frame_dump) {
         const char* dir = std::getenv("GOW3_DUMP_DIR");
         const auto request = std::filesystem::path(dir ? dir : "out/dump") / "guest-images.trigger";
-        if (FILE* f = std::fopen(request.string().c_str(), "r")) {
+        // 20 Oct 2026 audit: fopen on every frame while frame_dump is on; poll 4 times a second. The
+        // file holds several lines (Gow3TriggerFiles::Take returns only the first), so no watcher.
+        static std::chrono::steady_clock::time_point checked{};
+        const auto now = std::chrono::steady_clock::now();
+        const bool poll = now - checked > std::chrono::milliseconds(250);
+        if (poll) {
+            checked = now;
+        }
+        if (FILE* f = poll ? std::fopen(request.string().c_str(), "r") : nullptr) {
             std::vector<std::pair<unsigned long long, unsigned long long>> requests;
             char line[256];
             constexpr size_t MaxRequests = 256;
@@ -1212,18 +1225,26 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
                                vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
                                {}, {}, pre_barriers);
-        const vk::ClearColorValue black{std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}};
-        cmdbuf.clearColorImage(swapchain_image, vk::ImageLayout::eTransferDstOptimal, black, color_range);
-        const vk::MemoryBarrier clear_done{
-            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
-            .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
-        };
-        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer,
-                               vk::DependencyFlagBits::eByRegion, clear_done, {}, {});
+        const vk::ImageBlit blit =
+            MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height);
+        // 20 Oct audit: the 4K clear cost GPU time every present; only letterbox bars need it.
+        const bool covers = blit.dstOffsets[0].x == 0 && blit.dstOffsets[0].y == 0 &&
+                            blit.dstOffsets[1].x == s32(extent.width) &&
+                            blit.dstOffsets[1].y == s32(extent.height);
+        if (!covers) {
+            const vk::ClearColorValue black{std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}};
+            cmdbuf.clearColorImage(swapchain_image, vk::ImageLayout::eTransferDstOptimal, black,
+                                   color_range);
+            const vk::MemoryBarrier clear_done{
+                .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+                .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+            };
+            cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                                   vk::PipelineStageFlagBits::eTransfer,
+                                   vk::DependencyFlagBits::eByRegion, clear_done, {}, {});
+        }
         cmdbuf.blitImage(frame->image, vk::ImageLayout::eTransferSrcOptimal, swapchain_image,
-                         vk::ImageLayout::eTransferDstOptimal,
-                         MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height),
-                         vk::Filter::eLinear);
+                         vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
         // gow3: the settings menu / FPS counter over the frame, at display resolution.
         const bool overlay = Gow3Overlay::Visible();
         const std::array post_barriers{

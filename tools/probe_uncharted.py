@@ -445,7 +445,9 @@ def apply_patches(image, patches):
             _, offset, original, replacement = variant
             at = found[0] + offset
             if original is not None and data[at:at + len(original)] != original:
-                raise SystemExit(f"Patch '{description}': unexpected bytes at {at:#x}")
+                # 20 Oct 2026 audit: skip like the multi-change path; aborting the start on another game build contradicted the comment below.
+                print(f"Patch '{description}' skipped: unexpected bytes at {at:#x}")
+                continue
             data[at:at + len(replacement)] = replacement
             print(f"Patched: {description} (image offset {at:#x})")
             break
@@ -756,7 +758,15 @@ def run_once(args, executable, guest_args, loadexec):
         except OSError as copy_error:
             print(f"Update files not copied ({copy_error}): starting the game without its update")
             return run_game(args, base, executable, guest_args, loadexec)
+        except ValueError as error:
+            print(f"Update not used ({error}): starting the game without it")
+            return run_game(args, base, executable, guest_args, loadexec)
         return run_game(args, boot, executable, guest_args, loadexec, app0=base, overlays=[update])
+    except ValueError as error:
+        # 20 Oct 2026 audit: an update remembered for another title (US 1.02 kept after switching to
+        # the EU copy) made create_view raise ValueError, a traceback and no game.
+        print(f"Update not used ({error}): starting the game without it")
+        return run_game(args, base, executable, guest_args, loadexec)
     try:
         return run_game(args, view, executable, guest_args, loadexec)
     finally:
@@ -1022,7 +1032,16 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
                 text = config.read_text(encoding="utf-8", errors="replace") if config.exists() else ""
                 if text and not text.endswith("\n"):
                     text += "\n"
-                config.write_text(text + "upscaler=off\n", encoding="utf-8")
+                # Through a temporary file (20 Oct 2026 audit): the in-game menu may save this ini at
+                # the same moment, and a cut-off write must not leave it partial.
+                temporary = config.with_name(f"{config.name}.{os.getpid()}.tmp")
+                try:
+                    temporary.write_text(text + "upscaler=off\n", encoding="utf-8")
+                    os.replace(temporary, config)
+                except OSError:
+                    # Windows refuses the swap while another process holds the file: in place.
+                    temporary.unlink(missing_ok=True)
+                    config.write_text(text + "upscaler=off\n", encoding="utf-8")
             except OSError:
                 env.setdefault("GOW3_UPSCALER", "off")
     if extra_mib:
@@ -1173,6 +1192,7 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     env.setdefault("GOW3_PIPELINE_BINARIES", "1")
     env["GOW3_TOGGLE_FILE"] = str(user / "disabled-optimizations.txt")
     env["GOW3_LOADEXEC_FILE"] = str(loadexec)
+    env["GOW3_RESTART_EXECUTABLE"] = "/app0/" + executable
     if args.capture:
         capture=out / "captures" / str(time.time_ns())
         capture.mkdir(parents=True)
@@ -1272,6 +1292,34 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     return result
 
 
+def _tree_signature(folder):
+    return sorted((str(p.relative_to(folder)), p.stat().st_size, int(p.stat().st_mtime))
+                  for p in folder.rglob("*") if p.is_file())
+
+
+def backup_saves(user_dir, keep=5):
+    """20 Oct 2026 audit: the game writes straight into <user>/savedata and the launcher's STOP is
+    taskkill /F, so a kill during an autosave could corrupt it. Copy it to <user>/save-backups/<stamp>
+    before each launch, keep the newest `keep`. save-backups is a sibling of savedata, which is all the
+    game mounts. Never fails the launch."""
+    try:
+        source = Path(user_dir) / "savedata"
+        if not source.is_dir() or not any(p.is_file() for p in source.rglob("*")):
+            return
+        backups = Path(user_dir) / "save-backups"
+        old = sorted(p for p in backups.iterdir() if p.is_dir()) if backups.is_dir() else []
+        if old and _tree_signature(old[-1]) == _tree_signature(source):
+            return
+        target = backups / time.strftime("%Y%m%d-%H%M%S")
+        if not target.exists():
+            shutil.copytree(source, target, copy_function=shutil.copy2)
+            old.append(target)
+        for stale in old[:-keep]:
+            shutil.rmtree(stale, ignore_errors=True)
+    except Exception as error:
+        print(f"Save backup failed (launch continues): {error}", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     # The US copy (CUSA02320) first, then Europe's (CUSA02344), each with or without uroot.
@@ -1294,6 +1342,7 @@ def main():
         parser.error("--seconds must be nonnegative")
     user = ROOT / "analysis/uncharted-user"
     user.mkdir(parents=True, exist_ok=True)
+    backup_saves(user)
     loadexec = user / "loadexec.txt"
     executable = args.executable
     guest_args = args.guest_arg

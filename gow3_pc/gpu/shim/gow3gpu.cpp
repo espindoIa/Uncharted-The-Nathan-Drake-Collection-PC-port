@@ -85,6 +85,8 @@ public:
         auto& info = Common::ElfInfo::Instance();
         info.initialized = true;
         info.game_serial = config.serial ? config.serial : "UNKNOWN";
+        // 20 Oct audit: the Collection shares a serial but each executable has different pipelines.
+        info.cache_id = config.cache_id ? config.cache_id : "";
         info.title = config.title ? config.title : "";
         info.sdk_ver = config.sdk_version;
         info.psf_attributes.raw = config.psf_attributes;
@@ -282,6 +284,7 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
 namespace {
 std::mutex g_keep_writable_mutex;
 std::map<VAddr, VAddr> g_keep_writable; // page-aligned start -> end
+std::map<VAddr, u32> g_keep_count; // keeps per start (under g_keep_writable_mutex)
 std::atomic<bool> g_keep_writable_any{false};
 } // namespace
 
@@ -310,10 +313,14 @@ void KeepWritable(const void* address, u64 size, bool keep) {
     }
     {
         std::scoped_lock lock{g_keep_writable_mutex};
+        // 20 Oct 2026 audit: a stack handed to a new fiber before the old one is finalized keeps its
+        // protection; count keeps per start, erase at 0.
         if (keep) {
             auto& stored = g_keep_writable[start];
             stored = std::max(stored, end);
-        } else {
+            ++g_keep_count[start];
+        } else if (auto count = g_keep_count.find(start); count != g_keep_count.end() && --count->second == 0) {
+            g_keep_count.erase(count);
             g_keep_writable.erase(start);
         }
         g_keep_writable_any = !g_keep_writable.empty();
@@ -506,6 +513,17 @@ extern "C" int gow3gpu_handle_fault(void* ucontext, void* address) {
     return Core::Signals::Instance()->DispatchAccessViolation(ucontext, address) ? 1 : 0;
 }
 
+// gow3 21 Oct 2026: guest file reads (runtime_file.c) prepare their destination range for a CPU
+// write once, instead of one write fault per 4 KiB page (Rasterizer::PrepareCpuWrite).
+extern "C" int gow3gpu_prepare_cpu_write(void* addr, uint64_t size) {
+    if (Gow3Toggle::Disabled2(Gow3Toggle::RangeWritePrepare)) {
+        return 0;
+    }
+    auto* memory = Core::Memory::Instance();
+    auto* rasterizer = memory ? memory->GetRasterizer() : nullptr;
+    return rasterizer && rasterizer->PrepareCpuWrite(reinterpret_cast<VAddr>(addr), size) ? 1 : 0;
+}
+
 extern "C" unsigned gow3gpu_symbol_count(void) {
     return unsigned(g_symbols.size());
 }
@@ -530,11 +548,12 @@ static void KernelServiceThread(std::stop_token stoken) {
         {
             std::unique_lock lock{m_asio_req};
             cv_asio_req.wait(lock, stoken, [] { return asio_requests != 0; });
+            // 20 Oct 2026 audit: a request between run() returning and the reset was lost; clear before run().
+            asio_requests = 0;
         }
         if (stoken.stop_requested()) break;
         io_context.run();
         io_context.restart();
-        asio_requests = 0;
     }
 }
 

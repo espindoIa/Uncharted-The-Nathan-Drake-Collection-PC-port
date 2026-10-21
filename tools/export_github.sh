@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copies the port's source into a separate Git repository (default: ../uncharted-github) and commits
 # it, for the private GitHub repository that builds the Windows package (GitHub Actions).
-#   gow3_pc/   the runtime: its tracked and new files (not out/, user/ or other ignored files); the
+#   gow3_pc/   the runtime: its tracked files (not out/, user/ or other ignored files); the
 #              submodules are pinned as gitlinks at the commits checked out here
 #   tools/ launcher/ Start-Uncharted.cmd analysis/STATUS.md
 # Nothing from the game or a player is copied: no game/, *.pkg, analysis/ binaries, dumps, saves,
@@ -27,14 +27,15 @@ copy() {  # copy <relative path>
 submodules=$(git -C gow3_pc config -f .gitmodules --get-regexp '\.path$' | awk '{print $2}')
 # Material of the runtime's original game stays out (its docs, launcher, patches, packaging, run
 # scripts and helpers); tools/github-overlay replaces its READMEs with this project's.
-git -C gow3_pc ls-files -co --exclude-standard | while read -r path; do
+# 20 Oct 2026 audit: tracked files only (-o shipped local test files such as stat-multipliers-test.ini).
+git -C gow3_pc ls-files -c | while read -r path; do
     case $path in
         .github/*|.gitmodules|README.md|README.*.md|docs/*|launcher/*|patches/*|run.py|run.sh) continue ;;
         packaging/linux/*|packaging/appimage.sh|packaging/default.nix|packaging/gow3-entry.c) continue ;;
         packaging/windows/README*|packaging/windows/package.sh|packaging/windows/build_dlss.sh) continue ;;
         packaging/windows/make_icon.py|tests/test_launcher_*|tests/test_button_icons.py) continue ;;
         scripts/steam_shortcut.py|scripts/save_backup.py|tools/gow3_frame_map.py) continue ;;
-        tests/test_steam_shortcut.py|tests/test_mod_conflicts.py|tests/test_patches.py) continue ;;
+        tests/test_steam_shortcut.py) continue ;;
     esac
     grep -qxF -- "$path" <<< "$submodules" && continue
     [[ -f gow3_pc/$path ]] && copy "gow3_pc/$path"
@@ -59,7 +60,8 @@ done <<< "$submodules"
 forbidden=$(cd "$dest" && find . -path ./.git -prune -o \( -iname eboot.bin -o -iname '*.elf' \
     -o -iname sce_sys -o -iname savedata -o -iname '*.log' -o -iname 'probe*.ini' -o -iname '*.pkg' \
     -o -iname '*.psarc' -o -iname '*.pak' -o -iname 'boot*.bin' -o -iname '*.spv' -o -iname '*.dmp' \
-    -o -iname 'content.bin' -o -iname 'entry.bin' -o -iname '*.sav' \) -print)
+    -o -iname 'content.bin' -o -iname 'entry.bin' -o -iname '*.sav' \
+    -o -iname window_icon.bmp \) -print)  # 20 Oct 2026 audit: generated from Sony's icon0.png
 if [[ -n $forbidden ]]; then
     echo "The export holds files that must not be pushed:" >&2
     echo "$forbidden" >&2

@@ -7,6 +7,7 @@
 
 #include "common/types.h"
 #include "shader_recompiler/backend/bindings.h"
+#include "shader_recompiler/buffer_filter.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/profile.h"
@@ -114,7 +115,9 @@ struct StageSpecialization {
                          });
         }
         u32 binding{};
-        ForEachSharp(binding, buffers, info->buffers,
+        // gow3 21 Oct: a garbage V# is bound as null (vk_rasterizer.cpp), so it must not
+        // specialize either: its random stride/format made a new permutation per dispatch.
+        ForEachBufferSharp(binding, buffers, info->buffers,
                      [](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
                          spec.stride = sharp.GetStride();
                          spec.is_formatted = desc.is_formatted;
@@ -180,6 +183,21 @@ struct StageSpecialization {
             auto& spec = spec_list.emplace_back();
             const auto sharp = desc.GetSharp(*info);
             if (!sharp) {
+                binding++;
+                continue;
+            }
+            bitset.set(binding++);
+            func(spec, desc, sharp);
+        }
+    }
+
+    // Like the binding ForEachSharp, but a guest buffer the filter calls garbage counts as null.
+    void ForEachBufferSharp(u32& binding, auto& spec_list, auto& desc_list, auto&& func) {
+        const BufferSharpFilter filter = g_garbage_buffer_filter.load(std::memory_order_relaxed);
+        for (const auto& desc : desc_list) {
+            auto& spec = spec_list.emplace_back();
+            const auto sharp = desc.GetSharp(*info);
+            if (!sharp || (filter && !desc.IsSpecial() && filter(sharp, info->pgm_hash))) {
                 binding++;
                 continue;
             }

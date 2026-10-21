@@ -11,3 +11,5 @@
 /Uncharted.lnk
 __pycache__/
 *.pyc
+# 20 Oct 2026 audit: generated at launch from the game icon0.png (Sony artwork), must not be tracked or exported
+/launcher/assets/window_icon.bmp

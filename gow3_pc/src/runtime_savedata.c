@@ -15,7 +15,9 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <ftw.h>
 #endif
 
@@ -89,11 +91,33 @@ static int valid_name(const char *name, size_t max) {
     for (size_t i=0;i<n;++i) if (name[i]=='/' || name[i]=='\\' || (name[i]=='.' && (i==0 || name[i-1]=='.'))) return 0;
     return 1;
 }
-static void write_param(const char *meta, const Param *p) {
-    char path[700]; snprintf(path,sizeof(path),"%s/param.bin",meta);
-    FILE *f=fopen(path,"wb");
-    if (f) { Param copy=*p; copy.mtime=time(NULL); fwrite(&copy,sizeof(copy),1,f); fclose(f); }
+/* 20 Oct 2026 audit: metadata went straight into param.bin, so a full disk or a kill mid-write left
+ * a short file and the save list showed a blank title/date. Write <path>.tmp, then replace; 0 on success. */
+static int write_file_atomic(const char *path, const void *data, size_t size) {
+    char tmp[720]; snprintf(tmp,sizeof(tmp),"%s.tmp",path);
+    FILE *f=fopen(tmp,"wb");
+    if (!f) return -1;
+    int ok=fwrite(data,1,size,f)==size;
+    if (fclose(f)) ok=0;
+    if (ok) {
+#ifdef _WIN32
+        wchar_t wtmp[720], wpath[720];
+        ok=MultiByteToWideChar(CP_UTF8,0,tmp,-1,wtmp,720) && MultiByteToWideChar(CP_UTF8,0,path,-1,wpath,720) &&
+           MoveFileExW(wtmp,wpath,MOVEFILE_REPLACE_EXISTING);
+#else
+        ok=!rename(tmp,path);
+#endif
+    }
+    if (!ok) remove(tmp);
+    return ok ? 0 : -1;
 }
+static int write_param(const char *meta, const Param *p) {
+    char path[700]; snprintf(path,sizeof(path),"%s/param.bin",meta);
+    Param copy=*p; copy.mtime=time(NULL);
+    return write_file_atomic(path,&copy,sizeof(copy));
+}
+/* 20 Oct 2026 audit: the title came from the game unchecked and went into the path (remove_tree on delete). */
+static int title_ok(const char *t) { return !t || !t[0] || valid_name(t,sizeof(((TitleId *)0)->data)); }
 static int read_param(const char *meta, Param *p) {
     char path[700]; snprintf(path,sizeof(path),"%s/param.bin",meta);
     memset(p,0,sizeof(*p));
@@ -138,6 +162,7 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     if (!initialized) return ERR_NOT_INITIALIZED;
     if (user<0) return ERR_INVALID_USER;
     if (!dir || !result || !valid_name(dir->data,sizeof(dir->data))) return ERR_PARAMETER;
+    if (!title_ok(title)) return ERR_PARAMETER;
     char base[600], host[640], meta[680];
     root(user,title,base,sizeof(base));
     snprintf(host,sizeof(host),"%s/%s",base,dir->data);
@@ -154,7 +179,7 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     }
     if (slot<0) { pthread_mutex_unlock(&lock); return ERR_MOUNT_FULL; }
     if (!exists && (make_dirs(host) || make_dirs(meta))) { pthread_mutex_unlock(&lock); return ERR_INTERNAL; }
-    if (!exists) { Param empty={0}; write_param(meta,&empty); }
+    if (!exists) { Param empty={0}; if (write_param(meta,&empty)) { pthread_mutex_unlock(&lock); return ERR_INTERNAL; } }
     slots[slot].used=1;
     snprintf(slots[slot].host,sizeof(slots[slot].host),"%s",host);
     snprintf(slots[slot].meta,sizeof(slots[slot].meta),"%s",meta);
@@ -206,9 +231,9 @@ static ABI int32_t save_set_param(const MountPoint *point, uint32_t type, const 
     case 4: if (size<4) goto bad; memcpy(&p.user_param,buffer,4); break;
     default: goto bad;
     }
-    write_param(slots[slot].meta,&p);
+    int failed=write_param(slots[slot].meta,&p);
     pthread_mutex_unlock(&lock);
-    return 0;
+    return failed ? ERR_INTERNAL : 0;
 bad:
     pthread_mutex_unlock(&lock);
     return ERR_PARAMETER;
@@ -221,9 +246,7 @@ static ABI int32_t save_icon(const MountPoint *point, const Icon *icon) {
     int32_t r=ERR_NOT_MOUNTED;
     if (slot>=0) {
         char path[700]; snprintf(path,sizeof(path),"%s/icon0.png",slots[slot].meta);
-        FILE *f=fopen(path,"wb");
-        r=f && fwrite(icon->buffer,1,icon->data_size,f)==icon->data_size ? 0 : ERR_INTERNAL;
-        if (f) fclose(f);
+        r=write_file_atomic(path,icon->buffer,icon->data_size) ? ERR_INTERNAL : 0;
     }
     pthread_mutex_unlock(&lock);
     return r;
@@ -231,6 +254,7 @@ static ABI int32_t save_icon(const MountPoint *point, const Icon *icon) {
 static ABI int32_t save_delete(const Delete *d) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     if (!d || !d->dir || !valid_name(d->dir->data,sizeof(d->dir->data))) return ERR_PARAMETER;
+    if (d->title && !title_ok(d->title->data)) return ERR_PARAMETER;
     char base[600], host[640], meta[680];
     root(d->user,d->title ? d->title->data : NULL,base,sizeof(base));
     snprintf(host,sizeof(host),"%s/%s",base,d->dir->data);
@@ -260,6 +284,7 @@ static int compare(const void *a, const void *b) {
 static ABI int32_t save_search(const SearchCond *cond, SearchResult *result) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     if (!cond || !result) return ERR_PARAMETER;
+    if (cond->title && !title_ok(cond->title->data)) return ERR_PARAMETER;
     char base[600];
     root(cond->user,cond->title ? cond->title->data : NULL,base,sizeof(base));
     Entry *entries=NULL; size_t count=0, capacity=0;

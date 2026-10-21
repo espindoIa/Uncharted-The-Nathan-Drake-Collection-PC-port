@@ -469,7 +469,7 @@ GraphicsPipeline::GraphicsPipeline(
     };
 
     const auto binary_directory = Common::FS::GetUserPath(Common::FS::PathType::CacheDir) /
-        Common::ElfInfo::Instance().GameSerial() / "pipeline-binaries";
+        Common::ElfInfo::Instance().CacheId() / "pipeline-binaries";
     auto [pipeline_result, pipe] =
         CreateCachedGraphicsPipeline(device, pipeline_cache, pipeline_info, key,
                                      instance.GetPipelineBinaryGlobalKey(), binary_directory);

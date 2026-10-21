@@ -6,6 +6,196 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork 0.5.0 "Expedition")
 
+- **Not fixed yet: the frame rate drop in heavy Uncharted 3 areas (chapter 2, after the movie).** In
+  the player's log the game ran at 52-80 FPS with 1,600-3,000 draws and 1,600-1,900 compute
+  dispatches per frame. The limit is the CPU: the thread that records the graphics work was 83% busy
+  and the graphics command thread, which feeds it, waited 20% for it and was idle only 0.2%. This is
+  the CPU limit already listed in the 20 October notes. A profile in the bench puts the time in the
+  per-dispatch work: binding buffers, bookkeeping of memory ranges, copying constants. One try
+  (skipping repeated bookkeeping of a memory range already recorded in the same step) was used 0.1%
+  of the time and gave no gain (75.68 FPS with it, 76.79 without, 3 + 3 windows of 10 s), so it was
+  dropped. A real gain needs bigger changes (batching that bookkeeping per submission, reusing
+  constant data across submissions, splitting the recording thread); none done. The stall detail
+  line also caught a 266.1 ms stall in the graphics driver in the bench: video memory was at 31%
+  (3423 of 11175 MB) and no shader compile was running, so it is neither of those. Still open; it
+  needs a Windows GPU trace.
+
+- **Improved: the stutter when an area loads in Uncharted 3 (the alley after the chase checkpoint).**
+  The player's log had frames of 100.7 and 80.3 ms, with 89.4 and 74.0 ms of them in write traps.
+  When the game read a file over memory the graphics card had also written, the port first fetched
+  the old graphics-card bytes of every 4 KB page, one queued job per page, although the read
+  replaces the whole page (that stretch: 239 file reads, 92.1 MB, 5,323 pages, 468.9 ms of
+  preparation). Now whole pages are dropped in one job per read. Pages where that is not safe (a
+  pending readback, an image the graphics card changed, the edge pages of a read) still use the old
+  way. In the bench (chapter 2 meat market save, Continue) the preparation of the file reads took
+  2.2 ms (57 reads, 20.4 MB, 427 pages, 339 dropped) instead of 50.1 ms (67 reads, 23.7 MB, 532
+  pages). Known limit: if a read fails or ends short after the pages were dropped, the part it did
+  not write loses its graphics-card bytes. One bench run ended during the chapter load without a
+  crash message (cause unknown; the next two runs passed). Not tested on the player's own alley
+  load, nor in Uncharted 2 or 1, nor with the new code switched off for comparison.
+
+- **Improved: the stall right after a pre-rendered movie in Uncharted 3.** In the player's log, the
+  first frame after a movie of about 60 s took 99.7 ms (63.1 ms of it refreshing 17 images, 21.3 MB)
+  and five more frames took 42-55 ms. During the movie the port freed all its large upload buffers
+  (14, 69 MB; it frees them after 3000 idle frames, about 25 s) and had to create 20 again. Creating
+  one is slow: in the bench 38.9 and 33.2 ms for 64 MiB, 30.2 ms for 32 MiB, 15.4 ms for 24 MiB, and
+  9-13 ms for a 16 MiB block. The chapter start, with buffers still kept, uploaded 105 MB with 4.7
+  ms of refresh. Now the most recently used idle large buffers are kept, up to 128 MiB per memory
+  type and 32 buffers (`GOW3_STAGING_KEEP_LARGE_MB`, 0 gives the old behaviour); that can use up to
+  128 MiB more memory per type. Not verified at the player's movie (no save before it). Also new in
+  the stall log line: the refresh time split into staging allocations, image copies and detiling;
+  "Slow staging allocation" lines (5 ms or more); and the Windows "us/draw" in the frame stats is now
+  real (it printed 0.00).
+
+- **Fixed: the hitch at the very start of gameplay with DLSS (not DLAA) in Uncharted 3.** DLSS built
+  its internal setup (NVIDIA's "feature") when the first gameplay frame was drawn. With a scaling
+  preset that took 80-177 ms in our tests, so that frame lasted 90-190 ms, and in the player's log
+  230 ms (Performance preset, 4K). DLAA builds faster (about 40 ms). It happens once per session.
+  The port now builds it while you are still in the boot and menus, using the size and quality the
+  first gameplay frame will need; if the settings turn out different, it builds again then, as
+  before. In a test with the player's save and settings (4K) the setup took 63 ms during the menus
+  and the chapter start had no stall frame (95.6 FPS, no crash). Not tested in Uncharted 2 or 1, with
+  a custom render resolution (the likeliest case to still hitch), or after changing the upscaler in
+  the in-game menu.
+
+- **Diagnostic: a rare long stall inside the graphics driver is now logged in detail.** The player's
+  log had one 188 ms stall while sending work to the graphics card during a chapter load. It did not
+  happen in 3 test runs at the player's settings, so it is not fixed. When it happens again, the log
+  gets a "Slow submit detail:" line (for waits of 50 ms or more) with video memory use against its
+  budget, shader compiles running at that moment and the compile time of the last 5 seconds. That
+  tells whether the stall comes from video memory running out or from shader compiles competing with
+  the driver, so the next fix can aim at the right one. Nothing changes in play. Please send the log
+  if you see a stall like it.
+
+- **Improved: smoother play when the game writes next to data the graphics card just wrote.** The
+  game does this about 1,700 times a second in Uncharted 3, and the port made the game thread wait
+  for the graphics card on many of those writes even when they touched different bytes. It now waits
+  only when the write overlaps data the graphics card wrote. In the Uncharted 3 bench, standing in
+  gameplay, the port's handling of these writes took about 1.8-1.9 s of game-thread time per 5 s,
+  now about 0.65 s. The frame rate in that spot did not change (70 FPS, the graphics card is the
+  limit there); the gain is expected in CPU-heavy scenes and loads. Not tested at the player's own
+  spots, nor in Uncharted 2 or 1. Also new: `GOW3_FAULT_STATS=1` prints more diagnostic lines about
+  these writes, and the log now has a line with the time DLSS took to create its feature.
+
+- **Improved: loading a new chapter in Uncharted 3 stutters less.** While a chapter loaded, the game
+  reading a file into memory the graphics side was watching made the port stop on one trap per 4 KB
+  page, thousands per second. A log from the player's install showed frames of 103 ms and 215 ms spent
+  almost entirely there, and one 5 second stretch at 39.9 FPS. The port now prepares the whole
+  destination of a file read once instead. This removes the trap itself, but part of the cost is the
+  work done for each page, so it only reduces this stutter, it does not remove it. Not fixed: stalls
+  of about 97 ms from uploading large images and a 188 ms driver stall seen in the same log (now
+  logged in detail). The 230 ms frame in that log was the DLSS start-up, see the entry above. Not
+  tested on the player's own chapter load, nor in Uncharted 2 or 1.
+
+- **Fixed: freezes of 1-6 seconds after some cutscenes in Uncharted 3 and 2.** After a cutscene the
+  treasure effect (two compute shaders) read data from table slots that hold plain numbers instead of
+  buffer descriptions. The port already ignored those slots when drawing, but its shader cache still
+  treated every random value as a new variant, so almost every frame compiled a new one on the
+  graphics thread (about 20 ms each). Logs from the player's install showed a 6.1 s freeze (263
+  compute pipelines), then 4.0 s, 2.2 s and 1.8 s ones in Uncharted 3, and 2.2 s and 1.0 s ones in
+  Uncharted 2, every session. Such slots now count as empty for the shader cache too, so one variant
+  is enough. Variants already in your cache still match, so nothing is recompiled and the cache does
+  not need to be cleared; the old extra variants stay in the file and load in the background without
+  a freeze. Not tested at the player's own cutscene spots, and not in Uncharted 2.
+
+- **Fixed: Uncharted 3 chapter 2 no longer gets stuck at a lower frame rate after the alley
+  checkpoint.** A buffer the port uses for small per-draw data could fill up and stay full for the
+  rest of the session. The drawing thread then copied every small piece of data again, and a log of a
+  session in the chase section stayed at 41-49 FPS for over 4 minutes (55-63 FPS before the
+  checkpoint). In a test walk to the meat market exit the old build got stuck in 3 of 5 sessions and
+  the fixed one in 0 of 3 (few sessions). There the difference was 3-5 FPS, about run-to-run noise,
+  because that view is light. In the heavier chase views the gain is estimated at about 6-9 FPS, not
+  measured. The chapter is still limited by the CPU in busy streets (62-73 FPS at 4K with DLSS
+  Performance); that part is not fixed.
+- **Each game keeps its own shader cache.** Uncharted 1, 2 and 3 share one title ID, so all three
+  used one cache folder (U3's warm-up read 2351 entries, kept 576 and took 30.85 s). Each game now
+  uses `analysis\uncharted-user\cache\CUSA02320-<executable>`. **Each game copies the old shared
+  folder into its own once, the first time it opens, so it does not rebuild its shaders.** The old
+  shared folder `analysis\uncharted-user\cache\CUSA02320` is left in place; delete it if you want
+  the space, after each game has been opened once.
+- **Shaders compiled in earlier versions are kept after the update.** The first time a game opens
+  its own shader cache, the old shared one is copied into it once (only if the game has no cache
+  folder yet). This removes the first-play freezes of up to 5 seconds that the empty cache caused,
+  for example right after the museum cutscene in Uncharted 3 chapter 2.
+- **Small CPU and GPU savings.** Game clock reads and mutexes no longer take shared locks, a
+  memory-protect call that changes nothing no longer stalls the other threads, and each frame skips
+  clearing the whole 4K image when the picture already covers it. The shader warm-up now advances
+  every frame instead of only when the game asks for a pipeline (before, U1's entries waited
+  about 4.8 s; not re-measured). In a 4K DLAA A/B in U3 the gain
+  (+2.8 FPS on average) was within run-to-run noise.
+- **Streaming reads run in parallel again.** Reads at an offset on one file no longer wait for
+  each other, so the streaming threads load level data at the same time.
+- **No long stalls from the log.** The game log is buffered and written every 250 ms. Before, each
+  line was written under a lock, and the graphics thread once waited 548 ms for it in a level load.
+  If a thread dies holding that lock, some last log lines can be lost.
+- **Fixed: "Apply and restart" in the in-game menu now works.** The button was always disabled. It
+  now relaunches the game in the same launcher process and log, with the new settings (for
+  example a new resolution). Not tried live; if the restarted game never shows, the old settings
+  are not restored.
+- **Fixed: menu keys no longer stick or repeat.** Closing the menu left keys held, a key held
+  while opening it repeated Enter or Escape, and saving on close froze the frame. Input is now
+  cleared on close, key repeat is ignored in dialogs, and the save runs in the background.
+- **Your saves are backed up on every launch.** Before the game starts, `savedata` is copied to
+  `analysis\uncharted-user\save-backups\<date-time>`. The newest 5 are kept, and nothing is copied
+  if nothing changed. Killing the game with STOP during an autosave could leave a broken save with
+  nothing to restore.
+- **Hardening from the second audit.** Save data files (`param.bin`, `icon0.png`) are written
+  atomically and save titles with path separators are refused; threads free their memory and file
+  handles close safely while another thread reads; memory ranges near the end of the pool are
+  bounds-checked; movie slots 17 and up recycle the oldest one; a corrupt `param.sfo` is bounded;
+  a locked game ini is no longer overwritten with the shared one; linking a module without
+  `DT_INIT` stops with an error; the DLSS SDK download is pinned to one commit and hash-checked;
+  the package stops on a DLL with no known license owner; the export no longer lists two deleted
+  tests.
+
+- **Fixed: the DLSS check no longer calls a genuine `nvngx_dlss.dll` unsigned when the folder name
+  has an apostrophe.** In a folder such as `C:\Users\D'Angelo\...` the signature check failed to
+  run, so the launcher rejected a genuine NVIDIA DLL. The path is now passed outside the check's
+  script text.
+- **Fixed: a movie of a different size or format no longer corrupts memory.** The video decoder
+  kept the picture conversion it built for the first movie, so a decoder reused for a movie with
+  another size or pixel format wrote rows past the end of its frame buffer. The conversion is now
+  rebuilt when the size or format changes, and a failed buffer allocation now stops with a clear error instead of corrupting memory.
+- **Fixed: a game build with different bytes at a patch site no longer stops the start.** A patch
+  whose bytes did not match was refused with an error for some patches; the game now starts
+  without that patch and the log says "Patch '...' skipped: unexpected bytes at ...".
+- **Fixed: a mod path with `..` between backslashes could reach files outside the user folder.**
+  Such a path is now refused. Only matters if you use mods.
+
+- **Fixed: a failed update no longer loses the installed version when your antivirus holds a
+  file.** If an update failed and the antivirus kept one of the new files locked for 15 seconds,
+  the installer gave up restoring the old files, and the next launcher start deleted the folder
+  that held them (including your `nvngx_dlss.dll`). Each item is now restored on its own. If one
+  cannot be restored, the old files stay in `update\old` with a `RESTORE-INCOMPLETE` file that
+  lists them, so you can copy them back. Starting another update still clears that folder.
+- **Diagnostic modes no longer freeze or stall the game.** With `GOW3_PROFILE_STALLS=1` the
+  profiler could deadlock the game while it recorded a sample, and `GOW3_RETEXTURE_FILE` looked
+  for its trigger file on every game submission (25-50 ms stalls, as in the entry below). The
+  sample is now stored after the game thread resumes, and the trigger file is checked by the
+  background thread. Only matters if you set these variables.
+
+- **Fixed: your upscaler choice is no longer overwritten when it cannot run.** If DLSS could not
+  start (no `nvngx_dlss.dll`, or a driver without it) or FSR 4 is not supported by the graphics
+  card, the game used FSR 3.1 for that launch, and closing the in-game menu saved FSR 3.1 as your
+  setting. The menu now keeps what you chose; the fallback lasts only for that launch.
+- **Fixed: settings no longer go back to defaults after a crash or a kill.** The launcher, the
+  start script and the in-game menu wrote the settings file in place, so ending the game or
+  launcher at the wrong moment (or both writing at once) could leave it empty or cut off. They
+  now write a temporary file and swap it in.
+- **Fixed: a possible hang in timers the game waits for.** A timer request that arrived at the
+  wrong instant could be dropped, so a game thread waiting for that timer never woke. Not shown to
+  happen in Uncharted and not reproduced; the request is now kept.
+- **Fixed: the game no longer fails to start with an update folder from another version.** After
+  switching copies (for example from the US 1.02 update to the Europe CUSA02344 copy), the old
+  update folder crashed the start with a ValueError. The game now starts without the update and
+  the log says "Update not used (...)".
+
+- **Fewer hitches from the port's diagnostic files.** With the performance log on (the default),
+  the graphics threads looked on disk for four "trigger" files (frame capture, frame dump,
+  readback and DMA switches) on every frame or game submission. While Windows was busy with
+  files, one look could hold the frame for 25-50 ms (measured in Uncharted 3). One background
+  thread now looks for them four times a second; writing a trigger file works as before.
+
 - **New Ultra Quality upscaling mode, between DLAA and Quality.** The scene is drawn at 71% of
   the width and height (2742x1542 for 4K), and DLSS or FSR rebuild the full picture. In
   Uncharted 3 at 4K with DLSS model M: about 24% faster than DLAA (68.6 -> 85.2 FPS in the bar
@@ -48,6 +238,12 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   - **Multithreaded rendering** stays on for Uncharted 3. The fork fixed its freeze (#51) the
     same way upstream did, and upstream's switch that turns it off for Uncharted 3 is not taken.
     Drake's Fortune keeps it on too.
+
+## 21 October 2026
+
+- Uncharted 3: busy areas with many effects (e.g. the Cartagena market in chapter 2) run about 5% faster
+  (about +3 FPS at 60-65 FPS): the GPU command thread no longer waits for the draw recording thread
+  before reading resource tables when nothing it reads is still being written.
 
 ## 19 October 2026 (fork 0.4.0, Expedition Edition)
 

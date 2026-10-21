@@ -57,26 +57,42 @@ int compat_errno_from_win32(unsigned long error) {
     }
 }
 
-/* Positioned I/O on a synchronous handle moves the file pointer: it is restored afterwards.
- * A concurrent read() on the same descriptor would race, as with a shared offset anyway. */
+int compat_open_positioned(const char *path, int flags) {
+    DWORD access = (flags & O_RDWR) ? GENERIC_READ | GENERIC_WRITE :
+                   (flags & O_WRONLY) ? GENERIC_WRITE : GENERIC_READ;
+    DWORD creation = (flags & O_CREAT) ? ((flags & O_EXCL) ? CREATE_NEW :
+                     (flags & O_TRUNC) ? CREATE_ALWAYS : OPEN_ALWAYS) :
+                     (flags & O_TRUNC) ? TRUNCATE_EXISTING : OPEN_EXISTING;
+    HANDLE h = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL, creation, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
+    if (h == INVALID_HANDLE_VALUE) { errno = compat_errno_from_win32(GetLastError()); return -1; }
+    int fd = _open_osfhandle((intptr_t)h, flags & (O_WRONLY | O_RDWR | O_BINARY | O_NOINHERIT));
+    if (fd < 0) { int saved = errno; CloseHandle(h); errno = saved; }
+    return fd;
+}
+/* 20 Oct audit: explicit offsets and a private completion event remove the archive cursor race. */
 static ssize_t positioned(int fd, void *buffer, size_t size, int64_t offset, int write) {
     HANDLE h = (HANDLE)_get_osfhandle(fd);
     if (h == INVALID_HANDLE_VALUE) { errno = EBADF; return -1; }
-    if (offset < 0) { errno = EINVAL; return -1; }
-    LARGE_INTEGER zero = {0}, saved;
-    if (!SetFilePointerEx(h, zero, &saved, FILE_CURRENT)) { errno = compat_errno_from_win32(GetLastError()); return -1; }
+    if (offset < 0 && write != 2) { errno = EINVAL; return -1; }
+    HANDLE event = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (!event) { errno = compat_errno_from_win32(GetLastError()); return -1; }
     size_t done = 0;
     while (done < size) {
         DWORD chunk = size - done > 0x40000000u ? 0x40000000u : (DWORD)(size - done), n = 0;
         OVERLAPPED at = {0};
         uint64_t position = (uint64_t)offset + done;
+        if (write == 2) position = UINT64_MAX;
         at.Offset = (DWORD)position; at.OffsetHigh = (DWORD)(position >> 32);
+        at.hEvent = event;
+        ResetEvent(event);
         BOOL ok = write ? WriteFile(h, (const char *)buffer + done, chunk, &n, &at)
                         : ReadFile(h, (char *)buffer + done, chunk, &n, &at);
+        if (!ok && GetLastError() == ERROR_IO_PENDING) ok = GetOverlappedResult(h, &at, &n, TRUE);
         if (!ok) {
             DWORD e = GetLastError();
             if (e == ERROR_HANDLE_EOF) break;
-            SetFilePointerEx(h, saved, NULL, FILE_BEGIN);
+            CloseHandle(event);
             if (done) return (ssize_t)done;
             errno = compat_errno_from_win32(e);
             return -1;
@@ -84,11 +100,12 @@ static ssize_t positioned(int fd, void *buffer, size_t size, int64_t offset, int
         done += n;
         if (n < chunk) break;
     }
-    SetFilePointerEx(h, saved, NULL, FILE_BEGIN);
+    CloseHandle(event);
     return (ssize_t)done;
 }
 ssize_t compat_pread(int fd, void *buffer, size_t size, int64_t offset) { return positioned(fd, buffer, size, offset, 0); }
 ssize_t compat_pwrite(int fd, const void *buffer, size_t size, int64_t offset) { return positioned(fd, (void *)buffer, size, offset, 1); }
+ssize_t compat_append(int fd, const void *buffer, size_t size) { return positioned(fd, (void *)buffer, size, 0, 2); }
 
 long compat_utc_offset(time_t t) {
     struct tm local, utc;

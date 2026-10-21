@@ -2197,3 +2197,822 @@ Not verified:
 - Other GPUs and CPUs.
 - Long sessions with the change.
 - U1's gain (its scene drifted).
+
+## 20 October 2026: model M's own cost (same model, same input and output)
+
+The user asked for a cheaper model M at the same sizes: 4K DLAA, no model or resolution change.
+
+Tool: `dlss-bench` (gow3_pc/tools/dlss_bench.cpp, CMake target `dlss-bench`). It loads the
+bridge and nvngx_dlss.dll (310.9.16, the player's) from out/, creates the feature like
+RecordDlss (MVLowRes, inverted depth, HDR + auto-exposure, preset by name) and times Evaluate
+with GPU timestamps. One configuration takes 2-9 s instead of a game boot (1-2 min). Options:
+`--in/--out WxH --model jklm --hdr --bias --color rgba16f|r11g11b10|rgba8 --queue compute
+--load N --game-images 1 --frames N`. It is linked statically and runs from any shell
+(PowerShell: `& gow3_pc\out\gpu\dlss-bench.exe --model m`). Interleaved
+sweeps: run each variant alternately, order flipped every round.
+
+Measurements (RTX 5070, 3840x2160 -> 3840x2160, model M):
+- Short runs (150 frames): 7.51 ms; model K 1.99 ms.
+- Sustained (1000 frames): 7.90 ms median. The GPU reaches its 250 W limit and the clock drops
+  2940 -> 2850 MHz (nvidia-smi). In U3 (GOW3_GPU_PROFILE, bar fight, 342 frames) "DLSS evaluate
+  (NGX)" is 7.87 ms at ~210 W board power. So the game adds nothing to NGX's time: the earlier
+  7.9 vs 7.5 difference is the clock under sustained load.
+- Variants, each against the default in the same sweep:
+
+  | Variant | Evaluate | Change |
+  |---|---|---|
+  | Default (HDR, auto-exposure, bias mask, RGBA16F colour) | 7.51 ms | — |
+  | No bias mask | 7.50 | none |
+  | R11G11B10 colour | 7.51 | none |
+  | Colour and depth with the texture cache's flags (mutable format, extended usage, storage) | 7.51 | none |
+  | DLSS on the async compute queue, alone | 7.48-7.51 | none |
+  | 4.2 ms of graphics-queue load at the same time, DLSS on async compute | frame 11.66 vs 11.74 in series | -0.7%: DLSS M fills the GPU |
+  | LDR input (no IsHDR / auto-exposure), sustained 600 frames | 7.43 vs 7.72 | -0.29 ms (-3.8%) |
+
+- NVIDIA's guide: auto-exposure costs ~0.02 ms, and preset L (M in practice) ignores an exposure
+  texture. So the LDR saving is NGX's own HDR handling.
+
+What this leaves: the LDR path is the only saving, at most 0.29 ms (~2% of a 14.6 ms frame).
+U3's scene colour is HDR (RGBA16F), so LDR input needs a reversible tonemap before DLSS and its
+inverse after. The inverse could ride in the merge pass, which already reads the output. The
+forward pass would cost a 4K read and write, ~0.1-0.2 ms judging by the 0.24 ms motion-vector
+pass. That leaves ~0.1-0.2 ms (~1%) net, with a quality risk in highlights. Not implemented.
+
+Ruled out (do not reinvestigate without new data): the port's integration (barriers, image flags,
+formats, bias mask), async compute overlap, and the in-game vs standalone gap (clock under power
+limit).
+
+Not verified: other GPUs (the power limit decides the sustained clock), other DLSS DLL versions,
+and the LDR path's picture.
+
+## 20 October 2026: freezes before cutscenes and with multithreading (U3), upstream's fixes
+
+User: "travamentos logo antes de uma cutscene" and freezes with multithreading in U3; check
+whether BilalReloaded's fixes apply.
+
+Upstream's fixes and this fork:
+- #52 (freezes of 1.6 s, up to 33 s under Proton, before cutscenes): every unmap rebuilt the whole
+  neighbouring view (carve_host, ~23 ms each). Upstream 0.4.0 maps guest ranges as views of at most
+  2 MiB. Merged here on 19 Oct at 15:31 (4ecc8fd), unchanged.
+- #51 (U3 permanent freeze with MT): compute RELEASE_MEM label written by the Vulkan recording
+  thread into a protected page. The fork already had the same fix (labels always through the
+  backing view) before the merge. Upstream's other step, MT off for U3, was not taken.
+- Upstream since 0.4.0 (0.4.1, kuraeow's job-sleep patch for another 1.02 build): nothing about
+  these freezes.
+
+The player's own logs (Uncharted\analysis\big3-ps4_Shipping):
+- The installed Uncharted.exe is from 19 Oct 14:05, before the 0.4.0 merge (15:31). So it does
+  not have #52's fix.
+- 19 Oct 15:17 session (attempts/boot-1792433849725852700): chapter 1 start, ~200 "mapped direct
+  memory" (1 MiB each) lines, then "Videodec2 FFmpeg decoder created" and a 1476.7 ms frame.
+- 20 Oct 08:42 session: gameplay at 120 FPS, 204 maps, then the movie and a 2069.0 ms frame.
+- Both match #52: the map/unmap burst the game makes before a movie.
+
+Current build, same cutscene (New Game, chapter 1 intro movie, player's settings, MT on):
+- "memory map time: 65 maps 17.8 ms, 63 unmaps 2.2 ms; Windows carves 129 (2.3 ms)".
+- Worst frame at the movie start 109.9 ms (was 1476.7 ms on the installed build).
+- Stall profile (GOW3_PROFILE_STALLS=1) of that frame: the GPU command, draw recording and Vulkan
+  recording threads idle; the game's flip thread in a guest cond_wait. The game waits for its own
+  movie start (decoder thread, first frames), not for the port's GPU work. Not reduced.
+
+Trigger files on the GPU threads (fixed):
+- Stall profiles in the bar fight and museum (current build, MT on, 4K) caught one
+  std::filesystem::exists of a missing trigger file taking 25-50 ms: readback.trigger on the GPU
+  command thread (OnSubmit, 50 of 62 samples in a 73 ms frame; 31 of 40 in a 65 ms frame) and
+  dma.trigger on the draw recording thread (25 of 31 in a 53 ms frame).
+- The launcher sets these for every player (diagnostics on): capture.trigger (exists on every
+  flip), dumps/trigger (a remove() on every presented frame), readback.trigger (every
+  submission), dma.trigger (every 500 ms).
+- gpu/shim/gow3_trigger_files.cpp: one thread polls them every 250 ms; the GPU threads read an
+  atomic flag. Test: trigger-files-test. In game: dma.trigger ("pointers 256") and
+  readback.trigger ("range clear") were taken and logged within a second.
+- Not verified: how much this removes without the profiler. The profiler suspends the sampled
+  threads every millisecond, which may lengthen such waits.
+
+Seen, not fixed:
+- One 880 ms frame during a level load: the GPU command thread waited 548 ms for the stdout lock
+  in a printf (stdout is unbuffered, probe.c). The holder was not sampled. It may be the profiler
+  suspending a thread that held the lock.
+- "Slow submit: 107.7 / 225.1 ms in the driver" during level loads (vkQueueSubmit in nvoglv64).
+- New shaders: the GPU command thread waits for the shader's capture (QueueShader
+  capture_job.Wait, 24 of 37 samples in a 64 ms frame) even with async compiles.
+- The hang watchdog fired once (hang-20261020-101453.txt) during a 46.7 s level load with
+  UNCHARTED_HANG_SECONDS=20: a load, not a freeze.
+
+Multithreading soak (current build with the trigger watcher): U3 chapter 3 Cartagena street
+(bench save), 4K, DLAA model M, 120 FPS cap, MT on, hang watchdog at 20 s; 15 min of scripted
+walking, looking and Cross (57 loops). No freeze, no hang report, no assert; lowest 5 s window
+48.2 FPS, worst frame 99.5 ms. The user's MT freezes were not reproduced. The installed build
+(19 Oct 14:05) is older than this one, so it is not known whether they happen on this build.
+
+## 20 October 2026: repo audit fixes
+
+Four fixes from an audit of the working tree. None changes the picture or the frame rate.
+
+1. Upscaler fallback saved over the player's choice (gpu/shim/gow3_settings.cpp,
+   SyncUpscalerFallback, called from ConfigureUpscalerSupport and ConfigureDlssSupport).
+   - Cause: when DLSS is missing (no nvngx_dlss.dll, or a driver without it) or FSR 4 is not
+     supported by the GPU, the runtime switches to FSR 3.1 for that launch. Closing the in-game menu
+     then ran Save(), which wrote upscaler=fsr3 into the ini.
+   - Failure case: a player with DLSS chosen starts once without the DLL; the next launch (DLL back)
+     still has FSR 3.1.
+   - Now the fallback also updates the snapshot Save() compares against (synced), so Save() keeps the file's upscaler value unless the player changes the upscaler in the menu.
+2. Settings files written in place (gow3_settings.cpp Save(); launcher write_text_safely and
+   write_config in launcher/uncharted_launcher.pyw; the upscaler=off write in
+   tools/probe_uncharted.py run_game).
+   - Cause: the file was opened for writing (truncated) and then filled. A kill or crash in
+     between, or the launcher and the in-game menu writing at once, left an empty or partial
+     probe-uN.ini, and the settings read back as defaults.
+   - Now: write a temp file, then replace (MoveFileExW with MOVEFILE_REPLACE_EXISTING in C++,
+     os.replace in Python). If Windows refuses the swap, the old in-place write is the fallback
+     ("Settings: cannot replace ...; writing in place" in the log).
+3. Kernel service thread lost wake-up (gpu/shim/gow3gpu.cpp, KernelServiceThread).
+   - Cause: asio_requests = 0 ran after io_context.run() returned. A timer request that arrived
+     between the return and the reset was cleared, so the equeue timer never fired.
+   - Failure case: a game thread waiting for that timer hangs. The reset now runs before run().
+   - Not shown that Uncharted hits this. Not reproduced.
+4. Update folder remembered for another title (tools/probe_uncharted.py, run_once).
+   - Cause: the launcher keeps the update folder (US 1.02) after the player switches to the EU
+     CUSA02344 copy. Applying it raised ValueError and the start ended with a traceback.
+   - Now the error is caught: the game starts without the update and logs "Update not used (...)".
+
+Verified: build ok.
+graphics-settings-test: PASS, with a new case (ini upscaler=dlss, DLSS unavailable, another key changed in the menu, Save() keeps upscaler=dlss and leaves no .tmp).
+That test no longer built (PresentLimit's signature, FPS limit and restart rules changed since the God of War 3 import); its stale asserts were updated to the current rules in a separate commit.
+
+Not verified: fix 3 and fix 4 were not exercised at run time (3 has no repro; 4 needs a mismatched
+update folder in the ini). Fixes 1 and 2 were not checked in a game session either.
+
+### Fixes 5-8
+
+5. Profiler deadlock (gpu/shim/gow3_profiler.cpp, sampler loop in Start, GOW3_PROFILE_STALLS=1).
+   - Cause: in stall mode the sampler pushed into the `recent` std::deque (allocates, frees blocks)
+     while the sampled GPU thread was suspended.
+   - Failure case: the suspended thread held the CRT heap lock; the sampler waited for the same
+     lock and the game froze for good.
+   - Now the stack walk stays inside the suspend window, and the deque is filled after
+     ResumeThread. Diagnostic mode only.
+6. Dead test (gow3_pc/tests/test_save_backup.py, deleted).
+   - It imported save_backup, removed in 2872d75, so it failed on import. No behaviour change.
+7. Retexture trigger on the GPU thread (gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp,
+   Rasterizer::OnSubmit, GOW3_RETEXTURE_FILE).
+   - Cause: std::filesystem::exists on every GPU submission, the 25-50 ms stall class of d026d97.
+   - Now Gow3TriggerFiles::Watch/Take: the trigger-file thread polls it. Only when the variable is
+     set.
+8. Updater rollback (tools/apply_update.py apply; launcher/updater.py cleanup).
+   - Cause: in the failure path, one retry(remove_item) that raised after 15 s (antivirus lock on a
+     new item) aborted the handler before the restore loop ran.
+   - Failure case: the old items stayed in update\old, and the next launcher start deleted that
+     folder (cleanup), losing the installed version and the player's nvngx_dlss.dll.
+   - Now each remove and each restore has its own try. Items not restored are listed in
+     update\old\RESTORE-INCOMPLETE, and cleanup skips update\old while that file exists.
+   - Known limit: the next update start still clears update\old (rmtree at the top of apply()).
+
+Verified: build ok. gow3_pc/tests/test_apply_update.py passes (2 tests: rollback with a locked item
+restores the other item and writes the marker; cleanup keeps update\old only with the marker).
+
+Not verified: a profiler run with GOW3_PROFILE_STALLS (the deadlock is timing-dependent, not
+reproduced), the retexture trigger in game, a real failed update on a live install.
+
+### Fixes 9-20
+
+9. DLSS signature check (launcher/uncharted_launcher.pyw ngx_signature_ok).
+   - Cause: the DLL path sat inside the PowerShell -Command text between single quotes.
+   - Failure case: a folder with a ' (C:\Users\D'Angelo\...) broke parsing, so a genuine NVIDIA DLL
+     was called unsigned; a crafted folder name could run commands.
+   - Now the path goes in the NGX_DLL environment variable; the script reads -LiteralPath $env:NGX_DLL.
+10. Video decoder (gpu/shim/videodec2/videodec2_impl.cpp, VdecDecoder::ConvertNV12Frame).
+   - Cause: m_sws_context was built once (sws_getContext when null) and never checked against the
+     frame. av_frame_get_buffer's result was ignored.
+   - Failure case: a decoder reused for a movie of another size or format converted with the old
+     plan and overran the new frame buffer.
+   - Now sws_getCachedContext every frame (same context while the parameters match); a failed
+     buffer or context frees the frame and returns nullptr.
+11. Settings Save() (gpu/shim/gow3_settings.cpp).
+   - Cause: the present thread (restart prompt) and the window thread (menu close) can both call
+     Save(); unlocked they raced on `synced` and wrote the same .tmp.
+   - Now one static std::mutex held for the whole Save().
+12. File paths (src/runtime_file.c, resolve).
+   - Cause: the ".." component check accepted only "/" around it; Windows also takes "\".
+   - Failure case: a guest path like /data/..\..\x reached host files outside the user folder.
+     Only matters with mods.
+   - Now "\" counts as a separator on both sides, so such a path returns EACCES.
+13. window_icon.bmp (launcher/assets, .gitignore, tools/export_github.sh).
+   - Cause: probe_uncharted.py generates it from the game's icon0.png (Sony artwork); it had been
+     tracked since 6036c2a and the export copies launcher/*.
+   - Now untracked (kept on disk, ignored); the export refuses any window_icon.bmp. It stays in past commits.
+14. GitHub export (tools/export_github.sh).
+   - Cause: ls-files -co listed untracked files of gow3_pc, so local files such as
+     stat-multipliers-test.ini went to the public repository.
+   - Now ls-files -c (tracked only).
+15. orb-multiplier-test and stat-multipliers-test (gow3_pc/tests/test_orb_multiplier.cpp,
+    test_stat_multipliers.cpp).
+   - Cause: Save() only keeps the God of War keys already in the file (it stopped writing them on
+     purpose since 6036c2a); the tests expected them written from memory.
+   - Now the orb test writes the keys into the file first; the stat test expects the file's own
+     values. No product change.
+16. Patch mismatch (tools/probe_uncharted.py, apply_patches).
+   - Cause: a multi-change variant with unexpected bytes was skipped, but a single-change one raised
+     SystemExit, against the "unknown game version: start without it" rule.
+   - Failure case: a build whose bytes differ inside a matched pattern (U2 focus and 1 ms wait
+     patterns check literal bytes inside wildcards) would not start.
+   - Now it prints "Patch '...' skipped: unexpected bytes at ...", tries the next variant, then the
+     usual "NOT applied" line.
+17. Timed rwlocks (src/runtime_rwlock.c, acquire and rw_timedread/rw_timedwrite).
+   - Cause: the guest argument was treated as a pointer to {seconds, nanoseconds}; PS4 takes
+     relative microseconds (shadPS4 issue #5175). On contention the value was dereferenced as a pointer.
+   - Now the argument is uint32 microseconds turned into an absolute CLOCK_REALTIME deadline; zero
+     still tries once, then times out. The three games do not import these functions.
+18. pthread keys (src/runtime_kernel.c, key_create/key_delete/key_set/key_get,
+    runtime_thread_keys_cleanup).
+   - Cause: per-thread values were kept by slot only. A deleted and re-created key reused the slot
+     with other threads' old values.
+   - Failure case: key_get returned another thread's stale value, and the new destructor ran on it
+     at thread exit.
+   - Now each slot has a generation, bumped at create; a thread's value is valid only for the
+     generation it was set under. Get and set are lock-free (atomics); cleanup checks under key_lock.
+19. sceKernelMprotect (src/runtime_memory.c, protect_locked).
+   - Cause: the end was start + align_up(size) with start unaligned, so the last page of the
+     interval was missed; huge sizes wrapped.
+   - Now the end is align_up(start + size) and both additions are checked; an overflow returns INVALID.
+20. God of War III script helpers (tools/graphics_options.py, most of mods.py and patches.py, their
+    tests).
+   - Cause: nothing in the Uncharted launch chain called them, but they shipped in the zip.
+   - Now ~900 lines removed. mods.py keeps LINKED, make_link, is_link; patches.py keeps game_sfo,
+     game_title_id, EBOOT_BASE, eboot_image, find_pattern. patches/*.xml left in place.
+
+Verified: build.sh ok. runtime-test passes (all, plus new key-reuse, mprotect range and overflow,
+and rwlock microsecond cases); file-mods-test passes (backslash traversal). Each new test failed with
+its fix reverted (17, 18, 19, 12). orb-multiplier-test, stat-multipliers-test and
+graphics-settings-test pass. Python tests game_update, prepare, content, apply_update, probe pass.
+U3 1 min boot and play at 4K, MT on (build with all of 9-20): alive at end, no hang report, no patch skipped, lowest 5 s window 53.7 FPS, worst frame 149.1 ms (loading).
+
+Not verified: a movie of another size, two threads saving at once, a genuine signed DLL in a quoted
+path, a run of the export, a game build that hits a patch mismatch, the rwlock, key and mprotect
+paths in game.
+
+## 20 October 2026: audit leftovers, second audit, performance quick wins
+
+19 commits, 978ab58..1d0593a. Evidence is from the commit messages unless marked.
+
+### Audit leftovers (978ab58, e8b2620, 1233adb, aadc151, 3d18ab7)
+
+- 978ab58 tools: fetch_aa_files.sh pinned the DLSS SDK to commit 9981c635 (the v310.9.16 tag's peeled
+  commit; a tag can be moved) and checks 3 binaries and 23 headers against stored SHA-256 values, on
+  download and for files already in downloads/. A mismatch deletes the file and fails. The .lib and
+  headers are compiled into the shipped gow3_dlss.dll. Tested: bash -n; all 26 hashes match; the .lib
+  and DLL match C:\dev\DLSS; fetch() passes a right hash, fails a wrong one, replaces a corrupted cached
+  file. Not tested: a full script run (MSVC bridge build). The FSR4 files are pinned but not hash-checked.
+- e8b2620 package: package_windows.sh read owners per DLL from pacman -Qo; an unowned DLL (other than
+  gow3_dlss.dll) or an empty owner list fails the package. Before, `2>/dev/null || true` shipped such a
+  DLL with no license entry. Tested: bash -n only. Not tested: a package build, the CI runner.
+- 1233adb tools: export_github.sh no longer lists tests/test_patches.py and tests/test_mod_conflicts.py
+  (deleted). bash -n only; the export was not run.
+- aadc151 launcher: ini_lines fell back to the shared probe.ini on any OSError, so a per-game ini
+  held open by another process was overwritten with the shared contents. Now the shared file is used
+  only when the game ini does not exist; other read errors retry once, then read_ini returns defaults
+  and write_ini skips the write (one log line each). Tested: ast parse; a PermissionError read. Not
+  tested: the launcher UI.
+- 3d18ab7 tools: probe_uncharted.py copies savedata to save-backups/<YYYYMMDD-HHMMSS> before each
+  start, keeps the newest 5, skips when nothing changed or there is no save, never fails the launch.
+  Cause: the launcher's STOP is taskkill /F and the game writes straight into savedata. Tested:
+  test_save_backup (creates, keeps 5, skips unchanged, skips missing/empty). Not tested: a launch from
+  the installed package.
+
+### Second audit (7092d9e, 35fff41, f6abb5d, 1c50cf9, 79f06f2, 1b3e4b1, d57a704, 15b2bba, b7f7e47)
+
+- 7092d9e runtime: param.bin and icon0.png go through write_file_atomic (.tmp then MoveFileExW);
+  write_param, set_param, icon and mount return ERR_INTERNAL on failure; title_ok checks the title in
+  mount, delete and search (path separators refused). Tested: build.sh, runtime-test, U3 1-minute
+  boot. Not tested: a save/load cycle in game, a forced write failure.
+- 35fff41 runtime: range_within guards direct release, discard, find_free and the low window (start +
+  size could wrap past the pool). Joined threads are freed at join, detached ones reaped on the next
+  create; runtime_low_map reuses freed ranges. Files are reference-counted with a per-File lock
+  (close() could free a host fd under a reader; Windows pread restored the file pointer under a
+  concurrent read()). Tested: runtime-test (plus --direct-bounds, --thread-reclaim), file-mods-test
+  (plus --close-race, --position-race), each failing with its fix reverted (per the coder); U3
+  1-minute boot. Not tested: Linux stack unmapping. A detached thread is reclaimed only when another is
+  created. 47c9aeb later removed the pread serialization.
+- f6abb5d gpu: TAA_DIAGNOSTICS and FixedRenderSession getenv cached; PRESET_FILE, SKIP_FILE and
+  DEPTH_PROBE read by poller threads; guest-images.trigger polled at most every 250 ms. Tested:
+  build.sh, graphics-settings-test, U3 1-minute boot (lowest 5 s 72.1 FPS). Not tested: each trigger
+  file by hand; no frame-time A/B.
+- 1c50cf9 gpu: the 16 movie scratch slots recycle least-recently-used (a 17th overwrote a slot in
+  use); KeepWritable has a reference count (g_keep_count) so nested calls keep protection. Tested:
+  build.sh, movie-hook-test, U3 1-minute boot. Not tested: a cutscene sequence with more than 16 movies.
+- 79f06f2 gpu: SetOpen saves on a detached thread; input keys and mouse cleared on close; key-ups
+  outside a capture pass through; the choice dialog and window Enter/Escape ignore key repeat;
+  text_entry_active is atomic. Tested: build.sh, U3 1-minute boot. Not tested: the menu by hand with
+  keyboard or pad.
+- 1b3e4b1 runtime: Apply and restart was always disabled because nothing set GOW3_RESTART_COMMAND.
+  On Windows runtime_restart writes the loadexec file (current executable, guest argv) and exits with
+  LOADEXEC_EXIT (30); probe_uncharted.py sets GOW3_RESTART_EXECUTABLE, so its existing loop re-prepares
+  (new resolution patch) and relaunches in the same process and log. Tested: build.sh; a mocked
+  relaunch loop and the handoff file contents. Not tested: a live restart. Nothing restores the old
+  settings if the restarted game never shows (restart_unconfirmed is not consumed; pre-existing).
+- d57a704 runtime: sfo_value checks offsets in uint64_t and bounds keys with memchr/memcmp; the
+  duplicate exec-watch reader (it deleted the watch file and dropped w: entries) is removed. Tested:
+  build.sh, malformed SFO cases (coder harness). Not tested: exec watch in a live run.
+- 15b2bba runtime: module TLS blocks (module IDs 2..7) live in the GuestThread record and free_thread
+  releases them at join or reap. Tested: runtime-test, --direct-bounds, --thread-reclaim (six module
+  TLS slots). Not tested: allocation counts in a live run.
+- b7f7e47 tools: link_modules raises ValueError naming the file when DT_INIT is missing (it defaulted
+  to the module base, i.e. the ELF header). Tested: Python tests, a missing-DT_INIT harness. The two
+  errors in that run (test_packaged_vulkan, test_upscaler_assets) are pre-existing God of War 3
+  leftovers: they import modules missing since the first commit.
+
+### Performance quick wins (b1ffd84, eaa4dac, 47c9aeb, 4f39daf, 1d0593a)
+
+- b1ffd84 runtime: GOW3_CLOCK_TRACE is read once (every guest clock read called getenv under the CRT
+  environment lock); the mutex lock/unlock/wait/wakeup counters (shared non-atomic writes) are removed,
+  the report keeps created counts; kernel_mprotect checks for an unchanged protection under the read
+  lock and returns without the write lock, generation bump or flush_hooks. Tested: build.sh,
+  runtime-test (plain, --direct-bounds, --thread-reclaim), U3 1-minute boot.
+- eaa4dac gpu: the present clear and its barrier run only when the fitted blit leaves bars; PrepareFrame
+  calls PumpWarmUp once per flip on the GPU command thread (before, it advanced only when the game
+  looked up a pipeline; U1 entries waited ~4.8 s). Tested: build.sh, U3 1-minute boot. Not tested:
+  letterboxed aspect ratios by eye.
+- 47c9aeb runtime: 35fff41 serialized every pread on a file, so streaming threads read one at a time.
+  Game files now open as overlapped handles; read/write/lseek keep the position in the File record and
+  use positioned I/O, so pread/pwrite take no lock and never touch a host cursor; O_APPEND writes use
+  the end-of-file offset; each operation waits on its own event. Tested: file-mods-test plain,
+  --close-race, --position-race, new --pread-race; build.sh; U3 1-minute boot. Not tested: a level-load
+  time A/B, non-Windows.
+- 4f39daf runtime: stdout was unbuffered, so each printf was a WriteFile under the CRT stdout lock
+  (the GPU command thread waited 548 ms for it in a level load). Now a 64 KiB buffer and a flusher
+  thread every 250 ms; exit, _exit, the crash handler and the POSIX fault/watchdog handlers flush
+  first (the crash handler waits up to 500 ms for the flusher, skips it if the flusher crashed).
+  Tested: build.sh; U3 1-minute boot wrote the full boot.log (1810 lines). The commit message says
+  the hang watchdog read the buffered log live; that was not checked (only that the log was complete
+  after the boot). Not tested: an injected crash; output can be lost if a thread dies holding the
+  stdout lock.
+- 1d0593a gpu: U1, U2 and U3 share TITLE_ID CUSA02320, so one cache folder held all three games'
+  pipelines (U3's warm-up read 2351 entries, kept 576, took 30.85 s). probe.c passes a cache id (serial
+  plus executable stem from GOW3_RESTART_EXECUTABLE, e.g. CUSA02320-big3-ps4_shipping) used only for
+  the shader cache and pipeline-binaries folders. Tested: build.sh; U3 boot created
+  cache/CUSA02320-big3-ps4_shipping. Not tested: the U1 and U2 folders. Each game rebuilds its shaders
+  once in its first session; the old shared folder is left in place.
+
+### Performance A/B (U3)
+
+Player settings (4K, DLAA model M, 120 FPS cap, multithreading on), C:/dev/bench/bench.sh with
+SETTLE=5 SECONDS_MEASURE=10, builds alternated:
+
+| Build | Run 1 FPS (PresentMon) | Run 2 FPS | GPU busy ms/frame |
+| --- | --- | --- | --- |
+| baseline b7f7e47 | 61.9 | 63.7 | 15.80, 15.50 |
+| quick wins 1d0593a | 63.9 | 67.3 | 15.45, 14.68 |
+
+Mean +2.8 FPS, -0.6 ms GPU busy. The spread between runs of the same build (1.8-3.4 FPS) is as large
+as the difference: not beyond noise. Earlier 20-second baseline runs that day gave 68.6 and 63.5 FPS
+(63.5 overlapped a compile).
+
+### One freeze, not reproduced
+
+A bench run with the baseline build b7f7e47 (which already contains 35fff41's thread reaping and
+per-File refcount) stopped writing boot.log at 12:49:27, 15 s after start, during loading. The last
+line was an open of u3data/build/main/effect1/sky-desert-teaser-ingame12.bin -> not found. No hang
+report (the watchdog needs Frame stats lines) and no dump; the process was killed about 4 minutes
+later. Four later runs (2 per build) and a 1-minute boot reached gameplay. Cause unknown. Candidates to
+check first: reap_threads (pthread_join of finished detached threads in create) and the per-File
+lock/refcount from 35fff41.
+
+### Open from the performance audit (not done)
+
+- Per-page touch faults on streaming reads (runtime_file.c touch_for_write).
+- winpthreads condvars/mutexes vs SRWLOCK.
+- Frame limiter Sleep granularity and present-thread spin; present thread priority.
+- End-of-frame GC before work_retired.
+- capture_job.Wait translating on the GPU thread.
+- Motion-vector vertex shaders never cached.
+- Prepare chain redone every launch (~2-3 s).
+- EOP readback flushes.
+- VRR/G-Sync on the 164 Hz display unverified (GOW3_DISPLAY_LOG).
+
+## 20 October 2026: pipeline cache carried over; U3 chapter 2 frame rate
+
+### Cache seeding (8268bac)
+
+- Bug: 1d0593a moved each executable to its own cache folder (cache/CUSA02320-<stem>) and did not carry
+  the old shared cache/CUSA02320 over. After the update the player's U3 played on an empty cache.
+  boot.log showed freezes of 5.1 s (474 compiles), 4.1 s (406), 1.05 s (124), 0.94 s (90) and 0.42 s
+  (26), one of them right after the museum cutscene in chapter 2.
+- Fix: on first open of the new id, the old folder (or zip) is copied once, only when the new folder
+  does not exist. The copy goes to "<id>.seeding" and is then renamed. It never merges, because the
+  <hash>_<perm_idx>.spv names follow the discovery order of each run.
+- Test: U3 bench (chapter 2 rooftops save, 4K, DLAA M, 120 cap, multithreading on) with the U3 folder
+  moved aside. The new folder got all 124 MB; the run had 582 pipeline-binary hits and 13 compiles.
+  Result: 64.1 FPS (PresentMon 64.0), p99 27.9 ms, GPU busy 15.07 ms/frame (96%): GPU-bound there, at
+  980 draws/frame.
+- Not verified: the zip mode. The "Seeded pipeline cache" LOG_INFO line did not appear in boot.log,
+  probably because of the log level. The player's install already has a cold
+  CUSA02320-big3-ps4_shipping (59 MB, created 20 Oct 13:16), so the seeding does not apply to U3
+  there. It does apply to U1 and U2.
+
+### U3 chapter 2, following Sully (player's log, 5 s windows)
+
+- Earlier windows: about 4,000 draws/frame, 55-63 FPS, draw-pipe stage B 60% busy.
+- The chase section: 6,300 draws/frame, 41-49 FPS, a ceiling of about 300k draws/s, stage B 79-90%
+  busy, stage A waited 37%, 0 compiles. There it is CPU-bound on the draw pipe (FPS is about
+  300k / 6,300). This is the known limit (see "Levels are CPU-bound on the GPU command thread"
+  above).
+- Correction (same day, later): that window was partly a stuck constant ring, not only the known
+  limit. The ring stayed full from the alley checkpoint load until quit and pushed ~1M copies/s onto
+  stage B. Fixed in 2025147 (next subsection). The CPU limit that remains after the fix is in
+  "Remaining CPU limit (profile)"; it is not fixed.
+
+### Constant ring stuck full (2025147)
+
+- Player's 20 Oct log: 55-63 FPS at ~4,000 pipe items/frame before. A switch right after the alley
+  checkpoint load (col-alley): stream copies ~300k -> ~2.1M per 5 s (~3 GB), static ranges ~1,000
+  promoted and ~1,000 demoted per 5 s, known ranges 863 -> 3,259, and "constant ring ... copies/s left
+  to stage B" ~1,025,000/s. Then 41-49 FPS for 4+ min until quit, at ~6,300 items/frame.
+- Cause (vk_constant_ring.h, ConstantRing::Stamp): when the ring filled while no binding was reused,
+  Allocate failed and the position stopped moving. Every packet then stamped the same end, and Stamp
+  returned early before it published the pending end of the earlier tick. Nothing was retired again, so
+  every small read-only binding (~1M/s) fell back to stage B's stream copies for the rest of the
+  session. Each failed Allocate also called Retire, which refreshes the semaphore.
+- Fix: Stamp publishes the pending (end, tick) pair once the tick has moved on, even with an unchanged
+  end. A publish dropped because the stamp array is full (1024 entries) is retried on later packets.
+  Codex and two workflow reviews (GPU safety, liveness) found no defect.
+- A/B: U3 chapter 2 chase save, player settings (DLSS Performance 1080p -> 4K, model K, 120 cap,
+  multithreading on). The same scripted walk to the meat market exit, then a camera turn and a 30 s
+  wait. Saves /c/dev/bench/backup_ch2chase and backup_ch2meat; routes
+  analysis/play/routes/chase_market.txt and meat_heavy.txt (replays drift; the scripted move
+  sequence is more reliable).
+
+| Build | Stuck sessions | Ring copies/s | Stage B busy | Stage A waiting | FPS |
+| --- | --- | --- | --- | --- | --- |
+| old, when stuck | 3 of 5 | 0 | 87% | 55% | 73.1 |
+| old, when not stuck | 2 of 5 | not recorded | not recorded | not recorded | 75.3 |
+| fixed | 0 of 3 | ~540k | 77% | 28% | 77.8, 73.6 |
+
+- Old build when stuck: ~1.0M/s left to stage B, 1.9M stream copies per 5 s. Fixed build: brief fills
+  of 5-28k/s that recovered to 0.
+- Stage B cost per pipe item: ~2.8 us stuck vs ~2.3 us not stuck (+24%). That view is light (318-460
+  draws/frame), so FPS there moves only ~3-5 FPS, about noise.
+- Estimate for the player's heavier views (6,300 items/frame), not measured: 300k / 6,300 ~ 48 FPS
+  stuck vs ~340-357k / 6,300 ~ 54-57 FPS unstuck.
+- Not verified: the FPS gain in the 6,300 items/frame views. The bench's DLAA M copy was GPU-bound at
+  the chase checkpoint (56.6 FPS, GPU 93%), so it cannot show a CPU-side gain there. The sample is
+  small (5 and 3 sessions), so "0 of 3 stuck" is evidence, not proof.
+
+### Remaining CPU limit (profile)
+
+- Fixed build, market street, CPU-bound at 62-73 FPS, GPU 63-71% busy. Player's settings are DLSS
+  Performance with model K (lighter GPU), which is why he is CPU-bound there. Sampling profile, 5 ms
+  interval, 10 s.
+- Stage B (draw recording thread) 78% busy, about 325k items/s: DispatchRecord 44% and DrawRecord
+  19.5%. Inside the dispatches: BindBuffers 26.5%, ObtainBuffer 18%, GpuRangesAdd (boost::icl)
+  ~10-13%, CompleteReadbacks 7%, LandGuarded 5%, NoteGpuWriteWindows 4%.
+- Stage A (GPU command thread): ProcessCompute 58%, CollectRingBindings 30% (memcpy 17%),
+  RefreshComputeKey -> Shader::Info::RefreshFlatBuf 22%, SyncSrtTables 22%, waiting for stage B 24%.
+- The Vulkan recording thread is not the limit.
+- A player stall frame had 2494 draws and 1604 dispatches. Compute dispatches dominate both stages.
+- Seen in the player's stall frames, not investigated: write-fault handlers took 70-100 ms of
+  80-112 ms frames at the alley load.
+- Not fixed.
+
+### Can all shaders be compiled before the game starts? (player's question)
+
+No. PS4 shaders and their pipeline state are known only when the game draws with them. The disk cache
+plus warm-up already covers everything seen once; GOW3_BACKGROUND_WARMUP=0 loads it all behind the
+loading screen before play.
+
+## 21 October 2026: freezes after cutscenes = garbage V#s specialized compute shaders
+
+### Evidence (player's install logs, 20-21 Oct)
+
+- U3 boot.log: 9 stalls per session, dominated by compute compiles. Worst: "Stall: 6107.4 ms frame ...
+  compute variants 263 536.0 ms, compute pipelines 263 5517.5 ms". Others: 3988 ms (186), 2238 ms (99),
+  1760 ms (93). U2: 2208 ms (105 compute pipelines) and 1038 ms (73). Same pattern every session.
+- The player's U3 pipeline cache held 1,095 permutations of shader 8f067540 and 245 of 7d7e7206, and
+  grew every run.
+
+### Cause
+
+- The treasure-effect compute shaders 8f067540 and 7d7e7206 read V#s from table slots that hold floats
+  (the branches that use them are not taken). Binding already bound these as null (vk_rasterizer.cpp,
+  "garbage V#", the 16 Oct GPU hang fix).
+- StageSpecialization still keyed on their random stride/format/swizzle, so nearly every dispatch was a
+  new permutation, compiled synchronously on the GPU thread (~20 ms each).
+
+### Fix
+
+- The binding predicate is now one function, ClassifyGarbageSharp (vk_rasterizer.cpp), also installed as
+  a specialization hook (Shader::g_garbage_buffer_filter, shader_recompiler/buffer_filter.h). A garbage
+  guest-buffer V# counts as null in the specialization (bitset bit clear).
+- Permutations already cached still match: StageSpecialization operator== skips slots whose incoming bit
+  is clear, so nothing recompiles.
+- Toggle: second word bit 1024 (SpecGarbageSharps, gow3_toggles.h) restores the old behaviour, read live.
+- Offline replay (Codex) of the cached .meta specializations: a mapped-base check alone leaves 53 / 13
+  permutations (8f067540 / 7d7e7206); the binding predicate applied before specialization leaves 1 / 1.
+- Old junk permutations stay in the player's cache and keep loading in the background warm-up (no
+  stall). Clearing the cache is not needed.
+
+### Tested / not tested
+
+- Tested: build OK; one short U3 gameplay run from source: no crash.
+- Not tested: the player's own cutscene spots (the repo saves never reach the treasure effect; the repo
+  cache has 1 permutation of 8f067540), so the stall removal is inferred from the replay, not seen
+  in game. No performance A/B of the extra ClampRangeSize per guest buffer per specialization. U2.
+
+## 21 October 2026: chapter-load write faults from file reads
+
+### Symptom
+
+- Player report after the cutscene fix: the cutscene freezes got smaller, but loading a new chapter in
+  U3 had many stalls.
+- Player boot.log (21 Oct 10:19, U3, new build): 0 shader compiles in all 33 stalls. During the chapter
+  load 2,000-6,348 write faults/s, "writes into GPU-written memory 0". A 103 ms frame had 96.4 ms in
+  write-fault handlers and 1,049 one-page protect calls; a 215 ms frame had 203 ms in write faults; one
+  5 s window ran at 39.9 FPS.
+- Other stalls in the same log, not addressed here: a 230 ms frame uploading a 16.9 MB image, a 188 ms
+  "Slow submit" in the driver (1,076 images registered), 97 ms frames with 58-87 MB of image uploads.
+
+### Cause
+
+- runtime_file.c touch_for_write stores once per 4 KiB page of each read's destination (a kernel copy
+  into a protected page fails with EFAULT, so the pages must be writable first).
+- Every page the GPU tracks became one write fault (exception + handler) per page.
+
+### Fix
+
+- Before the touches, runtime_file.c calls gow3gpu_prepare_cpu_write (gow3gpu.cpp), which calls
+  Rasterizer::PrepareCpuWrite (vk_rasterizer.cpp).
+- PrepareCpuWrite: a lock-free check whether any page of the range is watched. If so: interrupt hold
+  (as the handler does on GPU-side threads), one drain, then for each touch address whose page is
+  write-watched only, the same per-address work the write fault does. That work is HandleWriteAt =
+  InvalidateMemory(addr, 8) + ExtendWriteFault + LandWatchedReadback, shared with OnWriteFault.
+- Read-watched pages are left to the touches: their load takes the read fault, which lands the readback
+  first.
+- The touches stay as a safety net.
+- Toggle: second word bit 2048 (RangeWritePrepare, gow3_toggles.h) restores the old behaviour, read
+  live. Fault stats line: "file-read ranges prepared N (X MB, P pages, Y ms)".
+- Rejected design (Codex review, 21 Oct): one InvalidateMemory over the whole range.
+  BufferCache::ReadMemory checks only the first page, then marks the whole range CPU-modified, and the
+  bulk readback cancellation rounds to pages. Both could lose GPU-written bytes. It also lacked the
+  interrupt hold.
+
+### Measured
+
+- Repo U3 bench, Continue into gameplay (earlier version of the walk): 76 reads, 28.8 MB, 470 per-page
+  calls in 34.7 ms (~74 us each). So the per-page work itself, not the exception, is most of the cost.
+  The gain on the player's chapter loads is expected to be partial.
+- Steady ~1,600 write faults/s while standing still in that bench come from game code, not file reads
+  (0 ranges prepared then).
+
+### Tested / not tested
+
+- Tested: build; short U3 bench runs from source: no crash.
+- Not tested: the player's chapter load, U2/U1, a toggle A/B (bit 2048 on vs off).
+
+### Open
+
+- Per-call cost: InvalidateMemory drains the draw pipe on each call (~74 us per page in the bench).
+  Batching it safely is not done.
+- Write faults from game code (~1,600/s at idle in the bench) are not addressed.
+- Image-upload stalls (230 ms for a 16.9 MB image, 97 ms frames with 58-87 MB) and the 188 ms "Slow
+  submit" in the driver with 1,076 images registered are not addressed.
+
+## 21 October 2026: write faults in gameplay: prewait for GPU-written pages
+
+Measurements (U3 bench, Continue, standing, `GOW3_FAULT_STATS=1`):
+- About 1,720 guest write faults/s. `buffer_cache.InvalidateMemory` took 1,880-2,100 ms per 5 s (~235 us/call).
+- Region lock wait 1.2 ms and work under the lock ~27 ms per 5 s: not the cause.
+- "Fault flush" = ~746 faults/5 s into GPU-written pages: `PrewaitPageWrites` waited 1,040-1,275 ms, page
+  fetch 280-370 ms, queue to the GPU thread ~260-350 ms, shared path 452 calls in 4.4 ms, downloads 0.
+- Top pages 0x103f239000 (~110/s) and neighbours. Top guest RIPs 0xd25dfd2 (`mov word [rbx+0xe7dc],0`)
+  and 0xd385251 (`or dword [rax+8],0x20`), guest base 0xc400000.
+
+Cause: the 19 Oct prewait (the guest thread waits for the page's GPU work before the GPU command thread
+fetches) predates the 17 Oct-era shared-page path being the common case. For writes that miss the
+GPU-written bytes the shared path needs no wait, so the prewait only added one.
+
+Fix: skip the prewait when the written range misses `gpu_modified_ranges` (`IsRangeGpuWrittenShared`,
+shared lock). Toggle `PrewaitAlways` = second word 8192 restores it. Result: prewait waits 0 ms, flush
+640-710 ms/5 s, buffer bucket 640-730 ms/5 s; GPU command thread blocked on GPU ticks unchanged at
+27-29%; FPS 69.7-70.1 (GPU 98% busy). Codex review: approve. Note `CopyFinishedGpuPage` may now wait on
+the GPU thread for submitted work in some cases (aggregate unchanged in the bench).
+
+Tried and dropped: a bounded hot-page set (rate admission >=16 faults/s, 64-page budget, 10 s retire).
+Faults -18% (8,550 -> 7,030 per 5 s) but only ~6 ms saved per 5 s and no FPS change; removed. Bit 4096
+left unused.
+
+DLSS: feature creation measured 41.1 ms (first evaluate 0.7 ms) in the bench, so the player's 230 ms
+frame at chapter start is not mainly DLSS creation; cause open.
+
+Slow submit 188 ms (`vkQueueSubmit` wall time in the NVIDIA driver): open, needs a GPUView/WPR trace.
+
+Diagnostics added (`GOW3_FAULT_STATS=1`): Write fault split, Fault flush (phases, prewait skipped),
+buffer lock wait/under lock, write-fault page and RIP histograms. Always on: "DLSS: feature created in X ms".
+
+Open: page fetch (~300 ms/5 s) and the queue to the GPU command thread (~250 ms/5 s) per GPU-page write
+fault. The ~1,500 other faults/5 s are cheap (~4 us).
+
+## 21 October 2026: first-gameplay-frame DLSS stall; slow-submit detail
+
+### Evidence
+
+- Player U3 log (21 Oct, preset=3 Performance, dlss_model=k, 4K output): a 230.2 ms frame right after
+  "DLSS: DLSS 1920x1080 -> 3840x2160, quality 3, preset 11, HDR input", i.e. the first gameplay frame of
+  the session. Cross-checked: it is the same frame the chapter-load entry listed as a 16.9 MB image
+  upload (boot.log line 349: "GPU thread on CPU 218.8 ms; 1 images registered, 16.9 MB image uploads").
+  It is one frame, directly after the DLSS line above, not two stalls.
+- Correction to the write-fault entry above ("not mainly DLSS creation; cause open"): that conclusion came
+  from the DLAA bench (creation 37-41 ms). At the player's Performance/model K settings creation takes
+  63-177 ms, so this frame was mostly DLSS creation. The older entry is left as written.
+- Reproduced with the player's save and settings: "DLSS: feature created in 176.5 ms" -> 189.4 ms frame
+  (1080p output run), "80.4 ms" -> 92.1 ms frame (4K run). DLAA creates in ~37-41 ms.
+- NGX CreateFeature is synchronous on the recording thread; the GPU command thread only waits
+  (LandDeferredFenceFor) during it. One creation per session.
+- Also seen in the reproduction (repo cache only, not the player's): 88-94 ms frames with the GPU thread
+  waiting in QueueShader capture_job.Wait for shaders missing from the repo cache. The player's cache has
+  them (0 compiles in their stalls), so this is not their stall.
+
+### Fix (DLSS)
+
+- TemporalUpscaler::PrecreateDlss runs at the first frame start (boot/menus) and creates the feature there.
+  It predicts the desc the first scene frame will need with the same DlssDesc builder as RecordDlss:
+  SceneSize, target size, hdr = !Scaled(), QualityForScale, TransformerPreset.
+- RecordDlss logs "pre-created feature used" or "did not match ..., recreating". A mismatch costs what it
+  cost before.
+- Toggle: second word bit 16384 (DlssPrecreate, gow3_toggles.h) restores the old behaviour.
+
+### Verified (DLSS)
+
+- Same save/settings, 4K: "DLSS: feature pre-created in 63.4 ms" during boot/menus (that frame 93.9 ms,
+  before gameplay), "DLSS: pre-created feature used" at the chapter start, no stall frame there; 95.6 FPS,
+  no crash.
+
+### Not tested
+
+- U1/U2.
+- GOW3_RENDER_RES sessions (the likeliest mismatch of the predicted desc).
+- Switching the upscaler in the menu.
+- A toggle A/B (bit 16384 on vs off) beyond the before/after runs above.
+
+### Slow submit: diagnostic only
+
+- Player log: one 188.2 ms vkQueueSubmit in the driver during the chapter load, in the same frame as 203 ms
+  of write faults, with async compile workers at 2,831 ms in that 5 s window. GPU: RTX 5070 12 GB.
+- Not reproduced in 3 runs at the player's settings. No behaviour change.
+- New: for submits >= 50 ms (vk_scheduler.cpp) a "Slow submit detail:" line with
+  - device-local heap usage/budget (VK_EXT_memory_budget; "heap budget unavailable" without it),
+  - compiles running right now (new g_gow3_compiles_running counter in the compiler workers,
+    vk_pipeline_cache.cpp),
+  - the 5 s window compile totals (async workers, GPU thread compiles), read without resetting them,
+  - submits not yet known complete and pending ops.
+- Hypotheses it separates: VRAM over budget (the driver pages inside the submit) vs. pipeline compiles
+  contending in the driver.
+
+### Open
+
+- Slow submit stays open until a player log shows the "Slow submit detail:" line.
+- The chapter-load entry's 230 ms frame is the DLSS one above (mostly DLSS creation, not the
+  16.9 MB image upload). The other stalls from that entry, 97 ms frames with 58-87 MB of image uploads, are not addressed here.
+
+## 21 October 2026 (afternoon): post-movie stall, alley-load stalls, chapter 2 FPS
+
+### Evidence
+
+- Player report: the chapter-start stall is almost gone; the stall after the cutscene is smaller but still
+  there; then a big FPS drop.
+- Player log 21 Oct 12:51, 297 s of frame times. U3 chapter 2, DLSS Performance 1080p -> 4K, model K, 120
+  cap, MT on, RTX 5070, window 2560x1440.
+- P1, post-movie stall: at 203 s, right after a ~60 s pre-rendered movie, a 99.7 ms frame with "image
+  refresh 63.1 ms" (17 images, 21.3 MB), then five frames of 42-55 ms.
+  - During the movie the staging pool's large buffers went from 14 (69 MB) to 0 (trim after 3000 idle
+    frames, ~25 s); 20 were created again after it.
+  - Chapter-start frames by contrast uploaded 105 MB with 4.7 ms of refresh (buffers still cached).
+- P2, alley-load stalls (278-280 s): 100.7 and 80.3 ms frames with 89.4 / 74.0 ms in write faults. Window
+  stats: "file-read ranges prepared 239 (92.1 MB, 5323 pages, 468.9 ms)" (~88 us/page), 5,681 page fetches
+  on the GPU command thread (485.7 ms) plus 398.2 ms queued to it.
+  - Cause: a file read replacing a whole page first fetched the page's old GPU bytes, one GPU-thread
+    command per page.
+- P3, FPS drop: after the movie 52-80 FPS at 1,600-3,000 draws plus 1,600-1,900 dispatches per frame. GPU
+  command thread idle 0.2%, stage B 83% busy, stage A waits 20% for it, ~285k pipe items/s. This is the
+  known CPU limit ("Remaining CPU limit (profile)", 20 Oct).
+
+### Fixes
+
+- 27da750, diagnostics (no behaviour change):
+  - The stall line splits image refresh into staging allocations, inline image copies, detile (pipelines).
+  - New lines: "Slow staging allocation" (>= 5 ms) and "Detiler pipeline ... created in X ms" (bench:
+    0.1-6.0 ms each, not the cause).
+  - The old "staging" / "waiting for host copies" columns were never incremented (always 0.0).
+  - Windows "us/draw" in Frame stats is now real (GetThreadTimes on the GPU command thread).
+- 06fdcac, P1: TrimLarge keeps the most recently used idle large staging buffers up to
+  GOW3_STAGING_KEEP_LARGE_MB (default 128) and 32 per memory type; 0 = old trim. Memory cost: up to 128
+  MiB per memory type kept.
+- 999e363, P2: a file read discards whole pages in one GPU-thread command per read instead of fetching
+  each page's old GPU bytes.
+  - Discarded: gpu ranges, page tick, page_writes, lazy/shared records; region marked CPU-modified;
+    texture invalidate.
+  - Refused pages keep the old path: pending readback piece, overlapping GPU-modified or
+    download-queued image (new TextureCache::PageHasGpuImageAuthority), edge pages, read-watched pages.
+  - runtime_file.c clips the prepared range at EOF.
+  - Disabled2 bit 32768 (FileReadDiscard) restores the old path. The fault stats line counts discarded
+    pages.
+  - Codex static review: buffer paths, drain and lock order OK. It found the image case (now refused)
+    and the short-read limit. Documented shortcut: a read that fails after the discard leaves those
+    pages without their GPU bytes.
+
+### Measured
+
+- Bench, creating one large staging buffer (new diagnostics): 38.9 and 33.2 ms (64 MiB DeviceLocal), 30.2
+  ms (32 MiB HostUncached), 15.4 ms (24 MiB DeviceLocal). A 16 MiB DeviceLocal ring block 9-13 ms. The
+  movie stall itself was not reproduced in the bench.
+- Bench, chapter 2 meat market save, Continue, file reads: "57 (20.4 MB, 427 pages, 339 discarded, 2.2
+  ms)" vs "67 (23.7 MB, 532 pages, 50.1 ms)" before.
+- Bench standing at the meat market: 67-75 FPS at ~700 draws/frame with 19 us/draw of GPU-thread CPU
+  time (1,862 dispatches/frame). Walking into the next area: 49-57 FPS at 2,000-2,750 draws/frame.
+- Sampling profile, current build, meat market, 10 s windows, 5 ms:
+  - Stage B: RunDrawPacket 73-77%, DispatchRecord 44-49%, BindBuffers 27-29%, ObtainBuffer 20.4-20.8%,
+    GpuRangesAdd 9.9-10.1% (boost::icl 8.5%), CompleteReadbacks 8.7-8.8%, LandGuarded 5-6%,
+    NoteGpuWriteWindows 3.5-3.9%.
+  - Stage A: ProcessCompute 54-60%, CollectRingBindings 33% (memcpy of guest constants via
+    CopySparseMemory 18-19%), DrainDrawPipe (waiting for B) 15-19.5%, GetComputePipeline 12-13.6%
+    (RefreshFlatBuf 8.7-10.9%), SyncSrtTables 8-10.5%.
+
+### Tried and dropped
+
+- Not committed: a memo that skipped GpuRangesAdd and the per-readback rewritten adds for a range already
+  recorded in the same scheduler tick.
+  - Hit rate ~0.1% (about 2,400 hits vs 2.0 million misses per 5 s): each dispatch writes different
+    ranges.
+  - A/B 3+3 windows of 10 s: on 75.68 vs off 76.79 FPS, diff -1.10 [-2.15, +0.01]. Removed.
+- The FPS limit remains. A real gain needs structural work (batching the GPU-range bookkeeping per
+  submission, constant-ring reuse across submissions, splitting stage B). Not done.
+
+### Slow submit
+
+- Reproduced in the bench: "Slow submit: 266.1 ms in the driver (0 wait semaphores, 1 signal); 295 images
+  registered since the last slow one".
+- Detail line: heap 0 3423/11175 MB (31%), compiles running 0, no compile work in the window. That frame
+  took 283 ms; GPU command thread kernel time 109.4 ms.
+- So neither VRAM over budget nor compile contention. Still open: kernel time inside vkQueueSubmit after
+  many new images; needs a GPUView/WPR trace.
+
+### Not tested
+
+- U1 and U2.
+- The player's own movie moment (no save before it): P1 fix not seen on the real case.
+- The player's own alley load.
+- A toggle A/B for bit 32768 (FileReadDiscard).
+- One bench run ended during the chapter load without a crash message (play.py saw no process, then
+  killed it); cause unknown. The next two runs passed.
+
+### Open
+
+- P3: the CPU limit of stage B / stage A in heavy U3 areas (52-80 FPS at 1,600-3,000 draws). Needs the
+  structural work listed above.
+- Slow submit (266.1 ms in the bench): cause open, GPUView/WPR trace needed.
+- P1: memory use with up to 128 MiB per type kept, over a long session, is not measured.
+- P2: short-read limit (a read failing after the discard leaves those pages without their GPU bytes) is a
+  documented shortcut, not removed.
+- The unexplained bench run that ended during the chapter load.
+
+## 21 October 2026 (evening): chapter 2 CPU limit, SRT pipe drains
+
+### Evidence
+
+- Profile (meat market, GOW3_PROFILE=10, 5 ms): once stage A's ring memcpy was off it, stage A waited
+  37% on stage B, 22.8% at the SRT pipe check (SyncSrtTables operator()), ~1,400 rasterizer drains/s;
+  only 1 real SRT table download per 5 s.
+- The 256-range pipe_write_ranges list overflowed after 256 written buffers (~1,800 dispatches/frame),
+  and every later SRT walk drained the pipe: 4,715 of 4,722 drains per 5 s were overflow drains
+  (GOW3_FRAME_STATS "SRT pipe check").
+
+### Fix
+
+- Uncommitted 20 Oct work from another session (main checkout) ported and committed: SyncSrtTables
+  checks pending GPU writes (PendingWriteOverlaps), pending labels (NotePendingLabel) and un-noted
+  queued tasks instead; the old check stays while pending_complete is false.
+- Disabled2 bits SrtPipeCheck 128, DrainCopyShaders 256, SrtPendingWrites 512 (replace first-word
+  1<<61 / 1<<62, which collided with OneFrameStart / FullScreenPassJitter).
+
+### Measured
+
+- U3 ch2 chase save = Cartagena market, Continue, standing; player's ini preset=3 dlss_model=k, 4K, 120
+  cap, MT on; ab2walk.sh 3x10 s windows each state.
+- SrtPendingWrites on vs off: 65.01 vs 61.99 FPS, +3.03 [+1.17, +4.61]; median -0.78 ms [-1.16, -0.34];
+  p99 -0.65 ms [-1.10, -0.01]. With it on: 0 SRT drains.
+- Market landing: 1,710 draws/frame, ~60 FPS, GPU 63% busy, stage B 81% busy: CPU-bound.
+
+### Tried and dropped (not committed; patch kept outside the repo)
+
+- RewrittenClip (pending readbacks' rewritten sets get only the bytes inside their pieces) +
+  GpuRangesContained (skip icl add of an already GPU-modified range): meat market +0.25 [-0.78, +1.40];
+  market on top of the SRT fix +1.62 [-0.14, +3.82].
+- RingCopyThreads (stage A's guest constant-ring copies on the copy threads, one shared batch every
+  host-copy wait starts): meat market +0.64 [-0.24, +1.59]; market on top of the SRT fix +0.58
+  [-2.70, +5.62]. Reviews found three ordering defects (batch handed to the pool after unlocking;
+  stage-A guest writes without a host-copy wait; GpuIdle/flip signals without one), fixed before
+  measuring. Remaining gap: compute ring read_addr updates.
+- Neither stage alone is the limit: cutting stage A's memcpy moved its time into SRT drains; cutting
+  stage B's bookkeeping moved little. Stage B now 81-87% busy.
+
+### Not tested
+
+- U1, U2; the player's own run; long soak with the SRT change.

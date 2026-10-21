@@ -574,6 +574,27 @@ void TextureCache::MarkAsMaybeDirty(ImageId image_id, Image& image) {
     UntrackImage(image_id);
 }
 
+bool TextureCache::PageHasGpuImageAuthority(VAddr addr, size_t size) {
+    if (!size) {
+        return false;
+    }
+    std::scoped_lock lock{mutex};
+    std::scoped_lock download_lock{download_images_mutex};
+    const auto pages_start = PageManager::GetPageAddr(addr);
+    const auto pages_end = PageManager::GetNextPageAddr(addr + size - 1);
+    bool has_authority = false;
+    ForEachImageInRegion(pages_start, pages_end - pages_start, [&](ImageId image_id, Image& image) {
+        if (!image.Overlaps(addr, size)) {
+            return false;
+        }
+        // 21 Oct review: recorded readbacks retain GpuModified, including stale/unwatched copies.
+        has_authority = True(image.flags & ImageFlagBits::GpuModified) ||
+                        download_images.contains(image_id) || tiny_downloads.contains(image_id);
+        return has_authority;
+    });
+    return has_authority;
+}
+
 void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
     // A CPU write: a tiny readback still on its way must not overwrite it.
     CancelTinyReadbacks(addr, size);

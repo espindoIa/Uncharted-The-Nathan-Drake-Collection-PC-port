@@ -118,6 +118,9 @@ public:
     /// Invalidates any image in the logical page range.
     void InvalidateMemory(VAddr addr, size_t size);
 
+    /// Whether overlapping images retain GPU data or are queued for download.
+    bool PageHasGpuImageAuthority(VAddr addr, size_t size);
+
     /// Diagnostics: re-read every texture not written by the GPU from guest memory on its
     /// next use (as if the CPU had written all of them). Returns the number of images.
     size_t DebugInvalidateAll();

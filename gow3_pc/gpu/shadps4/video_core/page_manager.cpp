@@ -54,6 +54,15 @@ namespace VideoCore {
 constexpr size_t PM_PAGE_SIZE = 4_KB;
 constexpr size_t PM_PAGE_BITS = 12;
 
+// gow3 21 Oct 2026: file-read ranges prepared by Rasterizer::PrepareCpuWrite (count, bytes, ns),
+// reported by the 5 s fault stats line; taken (and cleared) there.
+std::atomic<u64> g_range_prepares{0}, g_range_prepare_bytes{0}, g_range_prepare_ns{0},
+    g_range_prepare_pages{0}, g_range_prepare_discarded{0};
+
+// gow3 21 Oct 2026: Rasterizer::HandleWriteAt's time split (GOW3_FAULT_STATS): ns in buffer-cache
+// invalidate, texture-cache part, ExtendWriteFault, LandWatchedReadback; and the call count.
+std::atomic<u64> g_wf_split_ns[4], g_wf_split_calls{0};
+
 struct PageManager::Impl {
     using PageState = VideoCore::PageState;
 
@@ -68,6 +77,34 @@ struct PageManager::Impl {
         self = this;
     }
     virtual ~Impl() = default;
+
+    static bool AnyWatched(VAddr addr, u64 size) {
+        if (!self) {
+            return false;
+        }
+        const u64 last = (addr + size - 1) >> PM_PAGE_BITS;
+        if (last >= NUM_ADDRESS_PAGES) {
+            return false;
+        }
+        for (u64 page = addr >> PM_PAGE_BITS; page <= last; ++page) {
+            const auto& state = self->cached_pages[page];
+            if (__atomic_load_n(&state.num_write_watchers, __ATOMIC_RELAXED) |
+                __atomic_load_n(&state.num_read_watchers, __ATOMIC_RELAXED)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Write-watched and not read-watched: a store faults on the write branch alone.
+    static bool OnlyWriteWatched(VAddr addr) {
+        if (!self || (addr >> PM_PAGE_BITS) >= NUM_ADDRESS_PAGES) {
+            return false;
+        }
+        const auto& state = self->cached_pages[addr >> PM_PAGE_BITS];
+        return __atomic_load_n(&state.num_write_watchers, __ATOMIC_RELAXED) != 0 &&
+               __atomic_load_n(&state.num_read_watchers, __ATOMIC_RELAXED) == 0;
+    }
 
     virtual void OnMap(VAddr address, size_t size) {
         // No-op
@@ -132,9 +169,15 @@ struct PageManager::Impl {
             return sorted;
         };
         std::printf("Fault stats (5 s): guest-thread read faults %llu (%.1f ms), GPU-side %llu (%.1f ms), "
-                    "writes into GPU-written memory %llu (%.1f ms)\n",
+                    "writes into GPU-written memory %llu (%.1f ms), file-read ranges prepared %llu "
+                    "(%.1f MB, %llu pages, %llu discarded, %.1f ms)\n",
                     (unsigned long long)count[0], ns[0] / 1e6, (unsigned long long)count[1], ns[1] / 1e6,
-                    (unsigned long long)write_count, write_ns / 1e6);
+                    (unsigned long long)write_count, write_ns / 1e6,
+                    (unsigned long long)g_range_prepares.exchange(0),
+                    g_range_prepare_bytes.exchange(0) / 1048576.0,
+                    (unsigned long long)g_range_prepare_pages.exchange(0),
+                    (unsigned long long)g_range_prepare_discarded.exchange(0),
+                    g_range_prepare_ns.exchange(0) / 1e6);
         for (const auto& [n, key] : top(by_rip)) {
             std::printf("  %s rip %#llx: %u\n", key >> 63 ? "write" : "read",
                         (unsigned long long)(key & ~(1ULL << 63)), n);
@@ -147,6 +190,92 @@ struct PageManager::Impl {
         by_rip.clear();
         by_window.clear();
         count[0] = count[1] = ns[0] = ns[1] = write_count = write_ns = 0;
+    }
+
+    // gow3 21 Oct 2026: every write fault (not just the ones that download), by 4 KiB page and by
+    // RIP, plus the HandleWriteAt time split, printed every 5 s (GOW3_FAULT_STATS=1). Why: ~1,600
+    // ordinary write faults/s standing in U3, cause unknown.
+    static void NoteAnyWriteFault(void* context, VAddr addr) {
+        static const bool enabled = [] {
+            const char* env = std::getenv("GOW3_FAULT_STATS");
+            return env && env[0] == '1';
+        }();
+        if (!enabled) {
+            return;
+        }
+        u64 rip = 0;
+#ifdef _WIN32
+        rip = static_cast<EXCEPTION_POINTERS*>(context)->ContextRecord->Rip;
+        static const u64 exe_base = reinterpret_cast<u64>(GetModuleHandleW(nullptr));
+        if (rip >= exe_base && rip < exe_base + 0x20000000) {
+            rip = rip - exe_base + 0x140000000;
+        }
+#endif
+        static std::mutex mutex;
+        static std::unordered_map<u64, u32> by_rip, by_page;
+        static auto last = std::chrono::steady_clock::now();
+        std::scoped_lock lock{mutex};
+        ++by_rip[rip];
+        ++by_page[addr >> PM_PAGE_BITS];
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last < std::chrono::seconds{5}) {
+            return;
+        }
+        last = now;
+        const auto top = [](const std::unordered_map<u64, u32>& map) {
+            std::vector<std::pair<u32, u64>> sorted;
+            for (const auto& [key, n] : map) {
+                sorted.emplace_back(n, key);
+            }
+            std::ranges::sort(sorted, std::greater{});
+            sorted.resize(std::min<size_t>(sorted.size(), 8));
+            return sorted;
+        };
+        const auto ms = [](int i) { return g_wf_split_ns[i].exchange(0) / 1e6; };
+        const double buffer = ms(0), texture = ms(1), extend = ms(2), landing = ms(3);
+        std::printf("Write fault split (5 s): %llu calls; buffer %.1f ms, texture %.1f ms, extend "
+                    "%.1f ms, landing %.1f ms\n",
+                    (unsigned long long)g_wf_split_calls.exchange(0), buffer, texture, extend,
+                    landing);
+        {
+            using namespace Gow3Stats;
+            const auto fms = [](int i) { return ff_ns[i].exchange(0) / 1e6; };
+            const auto fn = [](int i) { return (unsigned long long)ff_n[i].exchange(0); };
+            const double total = ff_total_ns.exchange(0) / 1e6;
+            const double rb = fms(FF_RBWAIT), early = fms(FF_EARLY), fetch = fms(FF_FETCH),
+                         lazy = fms(FF_LAZY), lazyw = fms(FF_LAZYWRITE), pre = fms(FF_PREWAIT),
+                         down = fms(FF_DOWNLOAD), other = fms(FF_OTHER);
+            std::printf("Fault flush (5 s): %llu calls %.1f ms; early %llu/%.1f ms, lazy %llu/%.1f ms, "
+                        "lazywrite %llu/%.1f ms, prewait %llu/%.1f ms (waited %.1f ms), download "
+                        "%llu/%.1f ms, other %llu/%.1f ms; also readback-complete %llu/%.1f ms, "
+                        "page fetch %llu/%.1f ms; not in any phase (queue to GPU thread, etc.) %.1f ms, "
+                        "prewait skipped %llu\n",
+                        (unsigned long long)ff_total_n.exchange(0), total, fn(FF_EARLY), early,
+                        fn(FF_LAZY), lazy, fn(FF_LAZYWRITE), lazyw, fn(FF_PREWAIT), pre,
+                        ff_prewait_wait_ns.exchange(0) / 1e6, fn(FF_DOWNLOAD), down, fn(FF_OTHER),
+                        other, fn(FF_RBWAIT), rb, fn(FF_FETCH), fetch,
+                        total - (rb + early + fetch + lazy + lazyw + pre + down + other),
+                        (unsigned long long)ff_prewait_skipped.exchange(0));
+        }
+        std::printf("buffer lock wait %.1f ms, under lock %.1f ms\n",
+                    Gow3Stats::buffer_lock_wait_ns.exchange(0) / 1e6,
+                    Gow3Stats::buffer_under_lock_ns.exchange(0) / 1e6);
+        std::string pages = "Write fault pages (5 s):";
+        for (const auto& [n, key] : top(by_page)) {
+            char text[48];
+            std::snprintf(text, sizeof(text), " %#llx:%u", (unsigned long long)(key << PM_PAGE_BITS), n);
+            pages += text;
+        }
+        std::string rips = "Write fault rips (5 s):";
+        for (const auto& [n, key] : top(by_rip)) {
+            char text[48];
+            std::snprintf(text, sizeof(text), " %#llx:%u", (unsigned long long)key, n);
+            rips += text;
+        }
+        std::printf("%s\n%s\n", pages.c_str(), rips.c_str());
+        std::fflush(stdout);
+        by_rip.clear();
+        by_page.clear();
     }
 
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
@@ -184,6 +313,9 @@ struct PageManager::Impl {
         }
         if (Common::IsWriteError(context)) {
             Gow3Stats::Timer timer{Gow3Stats::t_write_faults};
+            if (!is_gpu_thread) {
+                NoteAnyWriteFault(context, addr);
+            }
             const u64 downloads = gow3_downloads;
             const auto start = std::chrono::steady_clock::now();
             const bool handled = rasterizer->OnWriteFault(addr, is_gpu_thread);
@@ -535,6 +667,16 @@ void PageManager::OnGpuMap(VAddr address, size_t size) {
 
 void PageManager::OnGpuUnmap(VAddr address, size_t size) {
     impl->OnUnmap(address, size);
+}
+
+// gow3 21 Oct 2026: true when any page of the range is write- or read-watched (protected); the
+// cheap test of Rasterizer::PrepareCpuWrite for file reads. Lock-free hint, like IsReadWatched.
+bool Gow3AnyPageWatched(VAddr addr, u64 size) {
+    return SignalImpl::AnyWatched(addr, size); // (Impl is private: a friend names it)
+}
+
+bool Gow3PageOnlyWriteWatched(VAddr addr) {
+    return SignalImpl::OnlyWriteWatched(addr);
 }
 
 bool PageManager::IsReadWatched(VAddr addr) const {

@@ -33,6 +33,8 @@ uintptr_t runtime_rwlock_resolve(const char *name);
 void runtime_rwlock_report(void);
 void runtime_set_libc_tls(const void *data, uint64_t filesz, uint64_t memsz);
 void runtime_set_module_tls(uint64_t module, const void *data, uint64_t filesz, uint64_t memsz);
+unsigned char **runtime_thread_module_tls(void);
+void runtime_free_module_tls(unsigned char **blocks);
 void runtime_set_procparam(void *param);
 void **runtime_application_heap_api(void);
 uintptr_t runtime_thread_resolve(const char *name);

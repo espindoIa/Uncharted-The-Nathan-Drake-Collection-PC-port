@@ -138,8 +138,10 @@ int main(int argc, char** argv) {
     v.gold_orb_multiplier = 4.0f;
     Gow3Settings::Save();
     const std::string saved = Read(path);
-    for (const char* line : {"damage_dealt=2.500\n", "damage_taken=0.500\n", "green_orb_multiplier=3.000\n",
-                             "blue_orb_multiplier=100.000\n", "gold_orb_multiplier=4.000\n"}) {
+    // 20 Oct 2026 audit: Save no longer writes the God of War multipliers; keys already in the
+    // file stay as they were (not rewritten from memory).
+    for (const char* line : {"damage_dealt=2.5\n", "damage_taken=0.5\n", "green_orb_multiplier=3\n",
+                             "blue_orb_multiplier=1000\n", "gold_orb_multiplier=0\n"}) {
         assert(saved.find(line) != std::string::npos);
     }
     std::remove(path);

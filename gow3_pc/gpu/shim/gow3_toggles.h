@@ -117,6 +117,28 @@ enum : std::uint64_t {
     /// Draining the draw pipe for a queued command (guest fault downloads, readback landings,
     /// flips) keeps the ring epoch: those write only GPU-written memory, which is never copied.
     RingKeepOnCommands = 64,
+    /// Bit set: SRT walks skip waits for queued writes (A/B only).
+    SrtPipeCheck = 128,
+    /// Inverted sense, opt-in diagnostic: bit set drains the pipe before copy shaders
+    /// 2d215c3b, 6a6422a9 and c92150ba run.
+    DrainCopyShaders = 256,
+    /// Bit set: off. Use the old 256-range SRT pipe check, including overflow drains.
+    SrtPendingWrites = 512,
+    /// Bit set: off. Shader specialization reads a garbage buffer V# (bound as null) as it is,
+    /// so its random stride/format makes new permutations (21 Oct: U3 treasure effect freezes).
+    SpecGarbageSharps = 1024,
+    /// Bit set: off. File reads into tracked memory fault once per 4 KiB page again (U3 chapter
+    /// load, 21 Oct: thousands of write faults a second) instead of preparing the range once.
+    RangeWritePrepare = 2048,
+    /// Bit set: old behaviour. 21 Oct U3: prewait even when the write misses GPU-written bytes
+    /// (the shared-page path needs no wait: ~746 prewaits per 5 s, ~1.1 s waited).
+    PrewaitAlways = 8192,
+    /// Bit set: old behaviour. 21 Oct U3 4K Performance: DLSS created its feature on the first
+    /// scene frame (80-230 ms stall); on, it is created at the first frame start in the menus.
+    DlssPrecreate = 16384,
+    /// Bit set: off. File reads fetch whole overwritten pages again (21 Oct U3 load:
+    /// 532 pages cost 50.1 ms); on, one queued command discards their GPU bytes.
+    FileReadDiscard = 32768,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;
@@ -127,6 +149,18 @@ namespace Gow3Stats {
 /// Guest writes caught by page protection, and pages currently left unprotected as hot.
 inline std::atomic<std::uint64_t> tracker_faults{0};
 inline std::atomic<std::int64_t> hot_pages{0};
+/// Region-lock diagnostics, collected only with GOW3_FAULT_STATS=1.
+inline const bool fault_stats = [] {
+    const char* env = std::getenv("GOW3_FAULT_STATS");
+    return env && env[0] == '1';
+}();
+inline std::atomic<std::uint64_t> buffer_lock_wait_ns{0}, buffer_under_lock_ns{0};
+/// 21 Oct: where BufferCache::InvalidateMemory's on_flush time goes (GOW3_FAULT_STATS=1, 5 s).
+/// ff_ns/ff_n by phase of ReadMemory(is_write): see FF_* below; ff_total_* is the whole on_flush.
+enum FaultFlushPhase { FF_RBWAIT, FF_EARLY, FF_FETCH, FF_LAZY, FF_LAZYWRITE, FF_PREWAIT, FF_DOWNLOAD,
+                       FF_OTHER, FF_COUNT };
+inline std::atomic<std::uint64_t> ff_ns[FF_COUNT], ff_n[FF_COUNT], ff_total_ns{0}, ff_total_n{0},
+    ff_prewait_wait_ns{0}, ff_prewait_skipped{0};
 /// Stall diagnostics (GOW3_FRAME_STATS): per-frame deltas printed for frames over 40 ms.
 inline std::atomic<std::uint64_t> images_registered{0};
 inline std::atomic<std::uint64_t> image_upload_bytes{0};
@@ -138,8 +172,12 @@ inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0};
 inline std::atomic<std::uint64_t> gpu_frames{0};
 /// Wall time spent in operations suspected of stalls (ns, all threads).
 inline std::atomic<std::uint64_t> t_resident{0}, t_protect{0}, t_image_create{0}, t_refresh{0},
-    t_staging{0}, t_host_wait{0}, t_copy{0}, copy_bytes{0}, t_read_faults{0}, read_faults{0},
+    t_copy{0}, copy_bytes{0}, t_read_faults{0}, read_faults{0},
     t_write_faults{0}, t_copy_cpu{0}, copy_sys_us{0}, copy_minflt{0}, t_gc{0}, t_readback_wait{0};
+/// 21 Oct 2026: a post-movie frame spent 63 ms in image refresh; its parts, to find the cost:
+/// new staging buffers, inline guest copies for images, detile (whole) and its pipeline creation.
+inline std::atomic<std::uint64_t> t_staging_alloc{0}, t_refresh_copy{0}, t_detile{0},
+    t_detile_pipeline{0};
 /// Diagnostics are collected only with GOW3_FRAME_STATS=1.
 inline const bool enabled = [] {
     const char* env = std::getenv("GOW3_FRAME_STATS");

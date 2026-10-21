@@ -23,7 +23,9 @@ static _Atomic size_t memory_calls;
 /* Dynamic TLS of linked modules: module IDs 2..7 (1 is the eboot's static TLS). */
 #define TLS_MODULES 8
 static struct { const void *data; uint64_t filesz, memsz; } tls_modules[TLS_MODULES];
-static _Thread_local unsigned char *tls_blocks[TLS_MODULES];
+void runtime_free_module_tls(unsigned char **blocks) {
+    for (unsigned i=2;i<TLS_MODULES;++i) { free(blocks[i]); blocks[i]=NULL; }
+}
 static void *process_param;
 void runtime_set_procparam(void *param) { process_param=param; }
 static ABI void *guest_procparam(void) { return process_param; }
@@ -42,7 +44,7 @@ static ABI void *guest_tls_get_addr(const uint64_t *index) {
     if (!index || index[0]<2 || index[0]>=TLS_MODULES || !tls_modules[index[0]].data || index[1]>=tls_modules[index[0]].memsz) {
         fputs("STOP: unsupported TLS module/offset\n",stderr); exit(21);
     }
-    unsigned char **block=&tls_blocks[index[0]];
+    unsigned char **block=&runtime_thread_module_tls()[index[0]];
     if (!*block) {
         *block=calloc(1,tls_modules[index[0]].memsz);
         if (!*block) { fputs("Cannot allocate module TLS\n",stderr); exit(1); }

@@ -6,6 +6,7 @@
 #define _GNU_SOURCE
 #include <time.h>
 #include "runtime.h"
+#include "gpu/gow3gpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,7 +53,7 @@ typedef struct {
 _Static_assert(sizeof(GuestStat)==120,"FreeBSD stat layout");
 
 typedef struct { char *names; size_t count, *offsets; unsigned char *types; } Listing;
-typedef struct { int used, host, traced; Listing *dir; size_t position; char path[512]; } File;
+typedef struct { int used, host, traced, append; unsigned refs; pthread_mutex_t io; Listing *dir; size_t position; int64_t offset; char path[512]; } File;
 typedef struct { char guest[64]; char host[512]; } Mount;
 static File files[MAX_FILES];
 static Mount mounts[MAX_MOUNTS];
@@ -173,8 +174,9 @@ static int resolve(const char *guest,char *out,size_t size,int base_only) {
     char buffer[1024];
     if (guest[0]!='/') snprintf(buffer,sizeof(buffer),"/app0/%s",guest);
     else snprintf(buffer,sizeof(buffer),"%s",guest);
+    /* 20 Oct 2026 audit: both Windows separators delimit parent traversal components. */
     for (const char *p=buffer;(p=strstr(p,".."));p+=2)
-        if ((p==buffer || p[-1]=='/') && (p[2]==0 || p[2]=='/')) return EACCES;
+        if ((p==buffer || p[-1]=='/' || p[-1]=='\\') && (p[2]==0 || p[2]=='/' || p[2]=='\\')) return EACCES;
     pthread_mutex_lock(&lock);
     size_t best=0; const Mount *m=NULL;
     for (size_t i=0;i<mount_count;++i) {
@@ -329,6 +331,30 @@ static File *get(int fd) {
     if (fd<3 || fd>=MAX_FILES || !files[fd].used) return NULL;
     return &files[fd];
 }
+/* 20 Oct 2026 audit: a closed slot and host fd stay owned until the last in-flight operation drops them. */
+static File *file_get(int fd) {
+    pthread_mutex_lock(&lock);
+    File *f=get(fd);
+    if (f) ++f->refs;
+    pthread_mutex_unlock(&lock);
+    return f;
+}
+static void file_destroy(File *f) {
+    if (f->host>=0) close(f->host);
+    free_listing(f->dir);
+    pthread_mutex_destroy(&f->io);
+    *f=(File){0};
+}
+static void file_put(File *f) {
+    int saved=errno;
+    if (f) {
+        pthread_mutex_lock(&lock);
+        if (!--f->refs && !f->used) file_destroy(f);
+        pthread_mutex_unlock(&lock);
+    }
+    errno=saved;
+}
+static int file_host(int fd,File *f) { return f ? f->host : fd>=0 && fd<3 ? fd : -1; }
 /* GOW3_AUDIO_TRACE=1: sound file opens and failed reads (missing game sounds). */
 static int audio_trace(void) { static int v=-1; if (v<0) { const char *e=getenv("GOW3_AUDIO_TRACE"); v=e && e[0]=='1'; } return v; }
 /* GOW3_FILE_TRACE=<text>: opens, reads and seeks of files whose guest path contains <text>
@@ -345,7 +371,6 @@ static int file_trace_line(void) {
     printf("[%ld.%03ld] ",(long)t.tv_sec,t.tv_nsec/1000000);
     return 1;
 }
-static int file_traced(int fd) { File *f=(fd>=3 && fd<MAX_FILES) ? &files[fd] : NULL; return f && f->used && f->traced; }
 /* Game mounts (including linked mod overlays) are read-only. Saves use other mounts. */
 static int game_path(const char *p) {
     if (!p || !*p) return 0;
@@ -374,7 +399,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
         if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
         return -e;
     } else {
-        host=open(path,host_flags(flags)&~O_DIRECTORY,_S_IREAD|_S_IWRITE);
+        host=compat_open_positioned(path,host_flags(flags)&~O_DIRECTORY);
         if (host<0) {
             e=errno;
             if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
@@ -396,18 +421,20 @@ static int64_t do_open(const char *guest,int flags,int mode) {
 #endif
     pthread_mutex_lock(&lock);
     int fd=-1;
-    for (int i=3;i<MAX_FILES;++i) if (!files[i].used) { fd=i; break; }
+    for (int i=3;i<MAX_FILES;++i) if (!files[i].used && !files[i].refs) { fd=i; break; }
     if (fd<0) {
         pthread_mutex_unlock(&lock); if (host>=0) close(host); free_listing(dir);
         printf("Runtime: open(%s) failed: guest file table full\n",guest);
         return -EMFILE;
     }
-    files[fd]=(File){.used=1,.host=host,.dir=dir,
+    files[fd]=(File){.used=1,.host=host,.dir=dir,.append=!!(flags&0x8),
                      .traced=file_trace_match() && strstr(guest,file_trace_match())};
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
+    pthread_mutex_init(&files[fd].io,NULL);
+    int traced=files[fd].traced;
     ++opens;
     pthread_mutex_unlock(&lock);
-    if (files[fd].traced && file_trace_line())
+    if (traced && file_trace_line())
         printf("File trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
     if (audio_trace() && (strstr(guest,"sound/") || strstr(guest,"sound1/"))) printf("Audio trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
     const char *mod_trace=getenv("GOW3_MOD_TRACE"), *mod_root=getenv("GOW3_MODS_DIR");
@@ -428,16 +455,10 @@ static int64_t do_close(int fd) {
     pthread_mutex_lock(&lock);
     File *f=get(fd);
     if (!f) { pthread_mutex_unlock(&lock); return -EBADF; }
-    if (f->host>=0) close(f->host);
-    free_listing(f->dir);
-    *f=(File){0};
+    f->used=0;
+    if (!f->refs) file_destroy(f);
     pthread_mutex_unlock(&lock);
     return 0;
-}
-static int host_fd(int fd) {
-    if (fd>=0 && fd<3) return fd;
-    File *f=get(fd);
-    return f ? f->host : -1;
 }
 #ifdef _WIN32
 /* The CRT reads and writes at most INT_MAX bytes per call. */
@@ -450,8 +471,21 @@ static ssize_t host_write(int h,const void *buffer,uint64_t size) { return write
 /* Pages of the destination may be write-protected for GPU tracking: the kernel's copy then
  * fails with EFAULT instead of faulting to our handler. A user-mode write to each page first
  * goes through the handler, which unprotects it (and records the upcoming write). */
-static void touch_for_write(void *buffer,uint64_t size) {
+static void touch_for_write(void *buffer,uint64_t size,int h,int64_t offset) {
     if (!size) return;
+    /* 21 Oct: player's U3 chapter load: up to 6,348 write faults/s from these touches, 1,049
+     * one-page protects in a 103 ms frame. The range is prepared in one call first; the touches
+     * stay as the safety net (then they fault nowhere). */
+    /* 21 Oct U3: discard only pages the read can fill, not the requested bytes past EOF.
+     * Unknown sizes keep the touches' fault path. shortcut: a failed or short read (e.g. I/O
+     * errors or concurrent truncation) leaves unwritten parts of discarded pages without their
+     * GPU bytes. If this matters, stage the read in a host buffer, then prepare only the returned
+     * range before copying it to the destination. */
+    HostStat s;
+    if (offset>=0 && !host_fstat(h,&s) && S_ISREG(s.st_mode) && s.st_size>=0) {
+        uint64_t available=offset<s.st_size ? (uint64_t)(s.st_size-offset) : 0;
+        gow3gpu_prepare_cpu_write(buffer,size<available ? size : available);
+    }
     uintptr_t p=(uintptr_t)buffer & ~(uintptr_t)4095, end=(uintptr_t)buffer+size;
     for (; p<end; p+=4096) {
         volatile unsigned char *b=(volatile unsigned char *)(p<(uintptr_t)buffer ? (uintptr_t)buffer : p);
@@ -459,73 +493,114 @@ static void touch_for_write(void *buffer,uint64_t size) {
     }
 }
 static int64_t do_read(int fd,void *buffer,uint64_t size) {
-    int h=host_fd(fd);
-    if (h<0) return -EBADF;
-    touch_for_write(buffer,size);
+    File *f=file_get(fd); int h=file_host(fd,f);
+    if (h<0) { file_put(f); return -EBADF; }
+    /* 20 Oct audit: only sequential operations share the logical cursor lock. */
+    if (f) pthread_mutex_lock(&f->io);
+#ifdef _WIN32
+    touch_for_write(buffer,f ? size : (size>0x7ffff000 ? 0x7ffff000 : size),h,
+                    f ? f->offset : host_lseek(h,0,SEEK_CUR));
+    ssize_t n=f ? pread(h,buffer,size,f->offset) : host_read(h,buffer,size);
+    if (f && n>0) f->offset+=n;
+#else
+    touch_for_write(buffer,size,h,host_lseek(h,0,SEEK_CUR));
     ssize_t n=host_read(h,buffer,size);
-    if (file_traced(fd) && file_trace_line())
+#endif
+    if (f) pthread_mutex_unlock(&f->io);
+    if (f && f->traced && file_trace_line())
         printf("File trace: read(fd %d, %llu) -> %lld (errno %d)\n",fd,(unsigned long long)size,(long long)n,n<0 ? errno : 0);
+    file_put(f);
     if (n<0) { if (audio_trace()) printf("Audio trace: read(fd %d, %llu) failed, errno %d\n",fd,(unsigned long long)size,errno); return -errno; }
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;
 }
 static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
-    int h=host_fd(fd);
-    if (h<0) return -EBADF;
-    touch_for_write(buffer,size);
+    File *f=file_get(fd); int h=file_host(fd,f);
+    if (h<0) { file_put(f); return -EBADF; }
+    touch_for_write(buffer,size,h,offset);
     ssize_t n=pread(h,buffer,size,offset);
-    if (file_traced(fd) && file_trace_line())
+    if (f && f->traced && file_trace_line())
         printf("File trace: pread(fd %d, %llu @%lld) -> %lld (errno %d)\n",fd,(unsigned long long)size,
                (long long)offset,(long long)n,n<0 ? errno : 0);
+    file_put(f);
     if (n<0) { if (audio_trace()) printf("Audio trace: pread(fd %d, %llu @%lld) failed, errno %d\n",fd,(unsigned long long)size,(long long)offset,errno); return -errno; }
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;
 }
 static int64_t do_write(int fd,const void *buffer,uint64_t size) {
-    int h=host_fd(fd);
-    if (h<0) return -EBADF;
+    File *f=file_get(fd); int h=file_host(fd,f);
+    if (h<0) { file_put(f); return -EBADF; }
+    if (f) pthread_mutex_lock(&f->io);
+#ifdef _WIN32
+    ssize_t n=f ? (f->append ? compat_append(h,buffer,size) : pwrite(h,buffer,size,f->offset)) : host_write(h,buffer,size);
+    if (f && n>0) {
+        HostStat s;
+        if (f->append && !host_fstat(h,&s)) f->offset=s.st_size;
+        else f->offset+=n;
+    }
+#else
     ssize_t n=host_write(h,buffer,size);
+#endif
+    if (f) pthread_mutex_unlock(&f->io);
+    file_put(f);
     if (n<0) return -errno;
     __atomic_add_fetch(&writes,1,__ATOMIC_RELAXED);
     return n;
 }
 static int64_t do_pwrite(int fd,const void *buffer,uint64_t size,int64_t offset) {
-    int h=host_fd(fd);
-    if (h<0) return -EBADF;
+    File *f=file_get(fd); int h=file_host(fd,f);
+    if (h<0) { file_put(f); return -EBADF; }
     ssize_t n=pwrite(h,buffer,size,offset);
+    file_put(f);
     return n<0 ? -errno : n;
 }
 static int64_t do_lseek(int fd,int64_t offset,int whence) {
-    File *f=get(fd);
+    File *f=file_get(fd);
     if (!f) return -EBADF;
-    if (whence<0 || whence>2) return -EINVAL;
+    if (whence<0 || whence>2) { file_put(f); return -EINVAL; }
     if (f->dir) {
         /* Directory offsets are entry indices for getdirentries. */
-        if (whence==0 && offset>=0) { f->position=(size_t)offset; return offset; }
-        return -EINVAL;
+        pthread_mutex_lock(&lock);
+        int64_t r=-EINVAL;
+        if (whence==0 && offset>=0) { f->position=(size_t)offset; r=offset; }
+        pthread_mutex_unlock(&lock);
+        file_put(f); return r;
     }
+    pthread_mutex_lock(&f->io);
+#ifdef _WIN32
+    HostStat s;
+    int64_t base=whence==1 ? f->offset : 0, r=-1;
+    if (whence!=2 || !host_fstat(f->host,&s)) {
+        if (whence==2) base=s.st_size;
+        if ((offset>0 && base>INT64_MAX-offset) || offset < -base) errno=EINVAL;
+        else r=f->offset=base+offset;
+    }
+#else
     int64_t r=host_lseek(f->host,offset,whence);
+#endif
+    pthread_mutex_unlock(&f->io);
     if (f->traced && file_trace_line())
         printf("File trace: lseek(fd %d, %lld, %d) -> %lld\n",fd,(long long)offset,whence,(long long)r);
+    file_put(f);
     return r<0 ? -errno : r;
 }
 static int64_t do_fstat(int fd,GuestStat *out) {
-    int h=host_fd(fd);
+    File *f=file_get(fd); int h=file_host(fd,f);
     HostStat s;
+    int64_t result=0;
+    if (h<0 && (!f || !f->dir)) { file_put(f); return -EBADF; }
+    if (!out) { file_put(f); return -EFAULT; }
 #ifdef _WIN32
     if (h<0) { /* directory: a listing only, stat the path it was opened with */
-        File *f=get(fd); char path[1024];
-        if (!f || !f->dir) return -EBADF;
-        if (!out) return -EFAULT;
-        if (translate(f->path,path,sizeof(path)) || host_stat(path,&s)) return -EBADF;
-        convert_stat(&s,out); return 0;
-    }
+        char path[1024];
+        if (!f || !f->dir || translate(f->path,path,sizeof(path)) || host_stat(path,&s)) result=-EBADF;
+    } else if (host_fstat(h,&s)) result=-errno;
 #else
-    if (h<0) return -EBADF;
+    if (h<0) result=-EBADF;
+    else if (host_fstat(h,&s)) result=-errno;
 #endif
-    if (!out) return -EFAULT;
-    if (host_fstat(h,&s)) return -errno;
-    convert_stat(&s,out); return 0;
+    if (!result) convert_stat(&s,out);
+    file_put(f); return result;
 }
 static int64_t do_stat(const char *guest,GuestStat *out) {
     char path[1024]; HostStat s;
@@ -589,13 +664,16 @@ static int64_t do_rename(const char *from,const char *to) {
 #endif
 }
 static int64_t do_ftruncate(int fd,int64_t length) {
-    int h=host_fd(fd);
-    if (h<0) return -EBADF;
+    File *f=file_get(fd); int h=file_host(fd,f);
+    if (h<0) { file_put(f); return -EBADF; }
+    if (f) pthread_mutex_lock(&f->io);
 #ifdef _WIN32
-    return _chsize_s(h,length) ? -errno : 0;
+    int64_t r=_chsize_s(h,length) ? -errno : 0;
 #else
-    return ftruncate(h,length) ? -errno : 0;
+    int64_t r=ftruncate(h,length) ? -errno : 0;
 #endif
+    if (f) pthread_mutex_unlock(&f->io);
+    file_put(f); return r;
 }
 static int64_t do_truncate(const char *guest,int64_t length) {
     if (game_path(guest)) return -EROFS;
@@ -612,7 +690,11 @@ static int64_t do_truncate(const char *guest,int64_t length) {
     return truncate(path,length) ? -errno : 0;
 #endif
 }
-static int64_t do_fsync(int fd) { int h=host_fd(fd); if (h<0) return -EBADF; return fsync(h) ? -errno : 0; }
+static int64_t do_fsync(int fd) {
+    File *f=file_get(fd); int h=file_host(fd,f);
+    int64_t r=h<0 ? -EBADF : fsync(h) ? -errno : 0;
+    file_put(f); return r;
+}
 static int64_t do_access(const char *guest,int mode) {
     char path[1024];
     int e=translate(guest,path,sizeof(path));

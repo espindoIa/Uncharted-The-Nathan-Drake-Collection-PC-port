@@ -438,6 +438,9 @@ std::atomic<u32> g_gow3_compiles;
 std::atomic<u64> g_gow3_compile_kind_ns[6];
 std::atomic<u32> g_gow3_compile_kind_count[6];
 std::atomic<u64> g_gow3_capture_ns, g_gow3_async_ns, g_gow3_compile_wait_ns;
+// gow3 21 Oct 2026: compiles running on the compiler workers right now (shader, graphics pipeline,
+// compute precompile), read by the scheduler's slow-submit detail line.
+std::atomic<u32> g_gow3_compiles_running;
 std::atomic<u64> g_gow3_snapshot_ns, g_gow3_guest_wait_ns;
 std::atomic<u32> g_gow3_pool_reuses;
 std::atomic<u32> g_gow3_pending_draws;
@@ -455,6 +458,10 @@ struct PhaseTimer {
         active = false;
     }
     ~PhaseTimer() { Stop(); }
+};
+struct RunningCompile {
+    RunningCompile() { g_gow3_compiles_running.fetch_add(1, std::memory_order_relaxed); }
+    ~RunningCompile() { g_gow3_compiles_running.fetch_sub(1, std::memory_order_relaxed); }
 };
 struct CompileTimer {
     enum Kind : u32 { ComputeShader, ComputeVariant, GraphicsShader, GraphicsVariant, ComputePipe, GraphicsPipe };
@@ -544,6 +551,7 @@ bool PipelineCache::QueueShader(Program& program, HwStage stage, SwStage l_stage
         return false;
     }
     const bool queued = build->job.Start(*compiler, [this, build] {
+        RunningCompile running;
         PhaseTimer compile{g_gow3_async_ns};
         Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch};
         auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, build->runtime, *build->ir,
@@ -796,6 +804,7 @@ void PipelineCache::PrecompileCompute(const AmdGpu::ComputeProgram& cs) {
         return;
     }
     if (!compiler->Submit([this, job] {
+            RunningCompile running;
             // A GPU library assertion on this guess (stale registers or tables) throws here
             // instead of stopping the game; the GPU thread compiles the real dispatch itself.
             gow3_assert_throws = true;
@@ -1061,6 +1070,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
                 }
             }
             const bool queued = build->job.Start(*compiler, [this, build] {
+                RunningCompile running;
                 // Only the vertex stage uses fetch-shader guest pointers during pipeline construction.
                 Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch[u32(SwStage::Vertex)]};
                 PhaseTimer compile{g_gow3_async_ns};

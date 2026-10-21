@@ -47,6 +47,11 @@ static uint64_t pool_size_bytes(void) {
 #define NO_SPACE ((int32_t)UINT32_C(0x80020023))
 #define MAP_FIXED_FLAG 0x10
 #define MAP_NO_OVERWRITE 0x80
+
+/* 20 Oct 2026 audit: subtract before adding so wrapped physical ranges cannot reach the backing view. */
+static int range_within(uint64_t start,uint64_t size,uint64_t limit) {
+    return start<=limit && size<=limit-start;
+}
 enum { KIND_RESERVED=1, KIND_DIRECT, KIND_FLEXIBLE };
 typedef struct { uint64_t start, size; int type, used; } Block;
 typedef struct { uintptr_t start, end; int kind, prot, type; uint64_t phys; char name[32]; } Vma;
@@ -314,7 +319,9 @@ static int host_protect(uintptr_t address, uint64_t size, int prot) {
     return 0;
 }
 /* Released pages read as zero when reused, like the memfd's punched holes. */
-static void host_discard(uint64_t phys, uint64_t size) { memset(backing_base+phys,0,size); }
+static void host_discard(uint64_t phys, uint64_t size) {
+    if (range_within(phys,size,POOL_SIZE+FLEXIBLE_SIZE)) memset(backing_base+phys,0,size);
+}
 /* gow3 18 Oct 2026: the section is only reserved; pages are committed when the game allocates
  * them (direct allocations, flexible maps), so Windows charges the commit limit for the ~4.8 GB a
  * game uses, not the whole 6+ GB pool at start. A full commit made 16 GB PCs with a small page
@@ -372,6 +379,7 @@ static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, ui
 static int host_unmap(uintptr_t address, uint64_t size) { return munmap((void *)address,size); }
 static int host_protect(uintptr_t address, uint64_t size, int prot) { return mprotect((void *)address,size,prot); }
 static void host_discard(uint64_t phys, uint64_t size) {
+    if (!range_within(phys,size,POOL_SIZE+FLEXIBLE_SIZE)) return;
     fallocate(pool_fd,FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)phys,(off_t)size);
 }
 static int host_commit(uint64_t phys, uint64_t size) { (void)phys; (void)size; return 0; }
@@ -471,7 +479,7 @@ static int overlaps(uintptr_t start, uintptr_t end, int ignore_reserved) {
 /* First-fit search in the PS4 user range, starting from the hint. */
 static uintptr_t find_free(uintptr_t hint, uint64_t size, uint64_t alignment) {
     uintptr_t at=align_up(hint<USER_MIN ? USER_MIN : hint, alignment);
-    for (size_t i=vma_index(at); at+size<=USER_MAX; ++i) {
+    for (size_t i=vma_index(at); range_within(at,size,USER_MAX); ++i) {
         if (i==vma_count || vmas[i].start>=at+size) return at;
         at=align_up(vmas[i].end,alignment);
     }
@@ -516,6 +524,7 @@ static int block_type(uint64_t phys) {
     return -1;
 }
 static int direct_range_allocated(uint64_t phys, uint64_t size) {
+    if (!range_within(phys,size,POOL_SIZE)) return 0;
     for (uint64_t at=phys; at<phys+size;) {
         int found=0;
         for (int i=0;i<LIMIT;++i) if (blocks[i].used && at>=blocks[i].start && at-blocks[i].start<blocks[i].size) {
@@ -631,7 +640,7 @@ static ABI int32_t direct_unmap(void *address, uint64_t size) {
     return result;
 }
 static ABI int32_t direct_release(uint64_t start, uint64_t size) {
-    if (start % PAGE || size % PAGE) return INVALID;
+    if (start % PAGE || size % PAGE || !range_within(start,size,POOL_SIZE)) return INVALID;
     if (!size) return 0;
     const uint64_t release_start=mono_ns();
     write_lock();
@@ -743,10 +752,15 @@ static void note_protect(uintptr_t start, uint64_t size, int old_prot, int prot,
     memset(slots,0,sizeof(slots)); total=0; skipped_slots=0;
 }
 static uintptr_t protect_caller;
-static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type) {
-    uintptr_t end=start+align_up(size,PAGE);
+/* Validates the range (page-aligned start and end are returned) and returns 1 when every VMA already has
+ * `prot` (and `type` if >=0), 0 when something changes, -1 when the range is invalid. Needs a lock. */
+static int protect_check(uintptr_t *start_io, uint64_t size, int prot, int type, uintptr_t *end_out, int *old_prot_out) {
+    uintptr_t start=*start_io;
+    /* 20 Oct 2026 audit: round the original interval's end without wrapping either addition. */
+    if (size>UINTPTR_MAX-start || start+size>UINTPTR_MAX-(PAGE-1)) return -1;
+    uintptr_t end=align_up(start+size,PAGE);
     start&=~(uintptr_t)(PAGE-1);
-    if ((prot & ~0x37) || !covered(start,end,0)) return INVALID;
+    if ((prot & ~0x37) || !covered(start,end,0)) return -1;
     /* An unchanged protection is a no-op: the host pages keep their GPU-tracking protection and
      * the GPU caches stay valid. Uncharted re-protects ranges several times per frame; each
      * invalidation downloaded GPU-written data with a full GPU wait (temple: ~47% of frame time). */
@@ -755,7 +769,14 @@ static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type
         if (old_prot<0) old_prot=vmas[j].prot;
         if (vmas[j].prot!=prot || (type>=0 && vmas[j].type!=type)) { unchanged=0; break; }
     }
-    if (unchanged) return 0;
+    *start_io=start; *end_out=end; *old_prot_out=old_prot;
+    return unchanged;
+}
+static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type) {
+    uintptr_t end; int old_prot;
+    const int state=protect_check(&start,size,prot,type,&end,&old_prot);
+    if (state<0) return INVALID;
+    if (state) return 0;
     note_protect(start,end-start,old_prot,prot,protect_caller);
     if (host_protect(start,end-start,host_prot(prot))) return INVALID;
     int error; size_t i=carve(start,end,&error);
@@ -766,6 +787,13 @@ static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type
     return 0;
 }
 static ABI int32_t kernel_mprotect(const void *address, uint64_t size, int prot) {
+    /* 20 Oct audit: a no-op re-protect (several per frame) took the exclusive lock, bumped table_generation
+     * (flushing every thread's region cache) and ran flush_hooks; the read lock is enough to see it. */
+    read_lock();
+    uintptr_t s=(uintptr_t)address, e; int old_prot;
+    const int state=protect_check(&s,size,prot,-1,&e,&old_prot);
+    read_unlock();
+    if (state>0) return 0;
     write_lock();
     protect_caller=(uintptr_t)__builtin_return_address(0);
     int32_t result=protect_locked((uintptr_t)address,size,prot,-1);
@@ -901,27 +929,56 @@ void *runtime_map_guest_memory(uint64_t size) {
  * [LOW_MIN, USER_MIN): PS4 code packs pointers into 40-bit fields. */
 #define LOW_MIN UINT64_C(0x0800000000)
 static uintptr_t low_next=LOW_MIN;
+typedef struct LowRange { void *address; size_t size; int used; struct LowRange *next; } LowRange;
+static LowRange *low_ranges;
+/* 20 Oct 2026 audit: joined stacks return their ranges instead of exhausting the low window. */
+void runtime_low_unmap(void *address) {
+    write_lock();
+    for (LowRange *r=low_ranges;r;r=r->next) if (r->address==address && r->used) {
+#ifdef _WIN32
+        if (VirtualFree(address,0,MEM_RELEASE)) r->used=0;
+#else
+        if (!munmap(address,r->size)) r->used=0;
+#endif
+        break;
+    }
+    write_unlock();
+}
 void *runtime_low_map(size_t size, int prot) {
+    if (!size || size>SIZE_MAX-PAGE+1) return NULL;
     size=align_up(size,PAGE);
     write_lock();
+    LowRange *range=NULL;
+    for (LowRange *r=low_ranges;r;r=r->next) if (!r->used && r->size>=size) {
+#ifdef _WIN32
+        void *reused=VirtualAlloc(r->address,r->size,MEM_RESERVE|MEM_COMMIT,win_prot(prot));
+#else
+        void *reused=mmap(r->address,r->size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
+        if (reused==MAP_FAILED) reused=NULL;
+#endif
+        if (reused) { r->used=1; write_unlock(); return reused; }
+    }
+    range=calloc(1,sizeof(*range));
+    if (!range) { write_unlock(); return NULL; }
 #ifdef _WIN32
     void *p=NULL;
-    while (!p && low_next+size<=USER_MIN) {
+    while (!p && range_within(low_next,size,USER_MIN)) {
         p=VirtualAlloc((void *)low_next,size,MEM_RESERVE|MEM_COMMIT,win_prot(prot));
         low_next+=size+UINT64_C(65536); /* unmapped gap catches overruns; allocation granularity */
     }
-    write_unlock();
-    return p;
 #else
     void *p=MAP_FAILED;
-    while (low_next+size<=USER_MIN) {
+    while (range_within(low_next,size,USER_MIN)) {
         p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
         low_next+=size+PAGE; /* unmapped gap catches overruns */
         if (p!=MAP_FAILED) break;
     }
-    write_unlock();
-    return p==MAP_FAILED ? NULL : p;
+    if (p==MAP_FAILED) p=NULL;
 #endif
+    if (p) { *range=(LowRange){p,size,1,low_ranges}; low_ranges=range; }
+    else free(range);
+    write_unlock();
+    return p;
 }
 /* ---- GPU library interface (gpu/shim/gow3gpu.cpp) ---- */
 /* Optimizations switched off at run time (diagnostics): the number in the file named by

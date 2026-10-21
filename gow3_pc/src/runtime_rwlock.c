@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <errno.h>
 #include <limits.h>
+#include <time.h>
 typedef struct Holder {
     pthread_t thread;
     unsigned readers, writer, pending;
@@ -19,7 +20,6 @@ typedef struct Rwlock {
     unsigned inflight;
     struct Rwlock *next;
 } Rwlock;
-typedef struct { int64_t seconds, nanoseconds; } GuestTime;
 static pthread_mutex_t registry_lock = PTHREAD_MUTEX_INITIALIZER;
 static Rwlock *registry;
 static size_t created, reads, writes, unlocks;
@@ -66,11 +66,19 @@ static void prune_locked(Rwlock *r, Holder *h) {
     *link=h->next; free(h);
 }
 enum Operation { READ, WRITE, TRY_READ, TRY_WRITE, TIMED_READ, TIMED_WRITE };
-static int32_t acquire(Rwlock **handle, enum Operation op, const GuestTime *time) {
+static int32_t acquire(Rwlock **handle, enum Operation op, uint32_t usec) {
     if (!handle) return error(EINVAL);
     int writer=op==WRITE || op==TRY_WRITE || op==TIMED_WRITE;
     int attempt=op==TRY_READ || op==TRY_WRITE;
     int timed=op==TIMED_READ || op==TIMED_WRITE;
+    /* 20 Oct 2026 audit: PS4 timed rwlocks take relative microseconds, like timed mutexes. */
+    struct timespec deadline;
+    if (timed) {
+        if (clock_gettime(CLOCK_REALTIME,&deadline)) return error(EINVAL);
+        uint64_t ns=(uint64_t)deadline.tv_nsec+(usec%1000000)*UINT64_C(1000);
+        deadline.tv_sec+=(time_t)(usec/1000000+ns/1000000000);
+        deadline.tv_nsec=(long)(ns%1000000000);
+    }
     pthread_mutex_lock(&registry_lock);
     int e=0;
     if (!*handle) e=create_locked(handle);
@@ -89,15 +97,12 @@ static int32_t acquire(Rwlock **handle, enum Operation op, const GuestTime *time
     }
     ++r->inflight; ++h->pending;
     pthread_mutex_unlock(&registry_lock);
-    /* Timed operations first try the lock, matching POSIX timeout validation. */
+    /* A zero timeout still gets one attempt at an available lock. */
     if (attempt || timed) e=writer ? pthread_rwlock_trywrlock(&r->native) : pthread_rwlock_tryrdlock(&r->native);
     else e=writer ? pthread_rwlock_wrlock(&r->native) : pthread_rwlock_rdlock(&r->native);
     if (timed && e==EBUSY) {
-        if (!time || time->nanoseconds<0 || time->nanoseconds>=1000000000) e=EINVAL;
-        else {
-            struct timespec deadline={.tv_sec=(time_t)time->seconds,.tv_nsec=(long)time->nanoseconds};
-            e=writer ? pthread_rwlock_timedwrlock(&r->native,&deadline) : pthread_rwlock_timedrdlock(&r->native,&deadline);
-        }
+        if (!usec) e=ETIMEDOUT;
+        else e=writer ? pthread_rwlock_timedwrlock(&r->native,&deadline) : pthread_rwlock_timedrdlock(&r->native,&deadline);
     }
     pthread_mutex_lock(&registry_lock);
     --r->inflight; --h->pending;
@@ -108,12 +113,12 @@ static int32_t acquire(Rwlock **handle, enum Operation op, const GuestTime *time
     prune_locked(r,h);
     pthread_mutex_unlock(&registry_lock); return error(e);
 }
-static ABI int32_t rw_read(Rwlock **r) { return acquire(r,READ,NULL); }
-static ABI int32_t rw_write(Rwlock **r) { return acquire(r,WRITE,NULL); }
-static ABI int32_t rw_tryread(Rwlock **r) { return acquire(r,TRY_READ,NULL); }
-static ABI int32_t rw_trywrite(Rwlock **r) { return acquire(r,TRY_WRITE,NULL); }
-static ABI int32_t rw_timedread(Rwlock **r,const GuestTime *t) { return acquire(r,TIMED_READ,t); }
-static ABI int32_t rw_timedwrite(Rwlock **r,const GuestTime *t) { return acquire(r,TIMED_WRITE,t); }
+static ABI int32_t rw_read(Rwlock **r) { return acquire(r,READ,0); }
+static ABI int32_t rw_write(Rwlock **r) { return acquire(r,WRITE,0); }
+static ABI int32_t rw_tryread(Rwlock **r) { return acquire(r,TRY_READ,0); }
+static ABI int32_t rw_trywrite(Rwlock **r) { return acquire(r,TRY_WRITE,0); }
+static ABI int32_t rw_timedread(Rwlock **r,uint32_t usec) { return acquire(r,TIMED_READ,usec); }
+static ABI int32_t rw_timedwrite(Rwlock **r,uint32_t usec) { return acquire(r,TIMED_WRITE,usec); }
 static ABI int32_t rw_unlock(Rwlock **handle) {
     if (!handle) return error(EINVAL);
     pthread_mutex_lock(&registry_lock);

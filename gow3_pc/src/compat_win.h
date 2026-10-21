@@ -49,7 +49,10 @@
 static inline int compat_mkdir(const char *path, int mode) { (void)mode; return _mkdir(path); }
 #define mkdir(path, mode) compat_mkdir(path, mode)
 
-/* pread/pwrite on CRT descriptors: positioned I/O that leaves the file offset unchanged. */
+/* 20 Oct audit: overlapped handles let archive reads run concurrently without a host cursor. */
+int compat_open_positioned(const char *path, int flags);
+ssize_t compat_append(int fd, const void *buffer, size_t size);
+/* Positioned I/O on CRT descriptors; callers maintain their own sequential offset. */
 ssize_t compat_pread(int fd, void *buffer, size_t size, int64_t offset);
 ssize_t compat_pwrite(int fd, const void *buffer, size_t size, int64_t offset);
 #define pread compat_pread

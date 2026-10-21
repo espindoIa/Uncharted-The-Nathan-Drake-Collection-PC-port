@@ -102,14 +102,21 @@ public:
     }
 
     /// Stage B, after recording a packet whose allocations end at `end`. Stamps of one
-    /// submission tick are merged: only the last end per tick is published.
+    /// submission tick are merged: only the last end per tick is published. The pending pair is
+    /// published once the tick has moved on, also when `end` equals the pending end.
     void Stamp(u64 end) {
-        if (end == pending_end) {
-            return;
-        }
         const u64 tick = scheduler.CurrentTick();
+        // 20 Oct, U3 chapter 2: after a camera turn every Allocate failed (about 1,014,000/s, 0 ring
+        // copies/s) until quit, because a failed Allocate leaves position unchanged, so each later
+        // packet stamped the same end and an equality return placed before this publish never
+        // published the pending end of an earlier tick. Retired and Floor() then stayed put. A
+        // Publish that found the array full is retried here on later packets. An unchanged end keeps
+        // its old pending_tick: a later reuse would have raised the end, so the pair stays safe.
         if (tick != pending_tick && pending_end != last_published) {
             Publish(pending_end, pending_tick);
+        }
+        if (end == pending_end) {
+            return;
         }
         pending_end = end;
         pending_tick = tick;

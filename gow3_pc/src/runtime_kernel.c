@@ -108,7 +108,11 @@ static int host_clock(uint32_t id,clockid_t *out) {
     }
 }
 static int clock_read(uint32_t id,GuestTimespec *ts) {
-    if (getenv("GOW3_CLOCK_TRACE") && id<32) {
+    /* 20 Oct audit: getenv on every guest clock read took the CRT environment lock; read once. */
+    static int trace=-1;
+    int tracing=__atomic_load_n(&trace,__ATOMIC_RELAXED);
+    if (tracing<0) { tracing=getenv("GOW3_CLOCK_TRACE")!=NULL; __atomic_store_n(&trace,tracing,__ATOMIC_RELAXED); }
+    if (tracing && id<32) {
         static uint32_t seen;
         const uint32_t bit=UINT32_C(1)<<id;
         if (!(__atomic_fetch_or(&seen,bit,__ATOMIC_RELAXED)&bit))
@@ -345,14 +349,17 @@ static ABI int32_t thread_once(int32_t *once,void (ABI *routine)(void)) {
 static ABI int32_t posix_once(int32_t *once,void (ABI *routine)(void)) { return thread_once(once,routine) ? 22 : 0; }
 #define KEYS 256
 typedef void (ABI *KeyDestructor)(void *);
-static struct { int used; KeyDestructor destructor; } keys[KEYS];
+static struct { int used; KeyDestructor destructor; uint64_t generation; } keys[KEYS];
 static pthread_mutex_t key_lock=PTHREAD_MUTEX_INITIALIZER;
-static _Thread_local void *key_values[KEYS];
+/* 20 Oct 2026 audit: deleted slots may be reused while other threads retain their old values. */
+static _Thread_local struct { void *value; uint64_t generation; } key_values[KEYS];
 static ABI int32_t key_create(uint32_t *key,KeyDestructor destructor) {
     if (!key) return ERR(22);
     pthread_mutex_lock(&key_lock);
     for (uint32_t i=1;i<KEYS;++i) if (!keys[i].used) {
-        keys[i].used=1; keys[i].destructor=destructor;
+        keys[i].destructor=destructor;
+        __atomic_store_n(&keys[i].generation,keys[i].generation+1,__ATOMIC_RELEASE);
+        __atomic_store_n(&keys[i].used,1,__ATOMIC_RELEASE);
         pthread_mutex_unlock(&key_lock);
         *key=i; return 0;
     }
@@ -363,23 +370,32 @@ static ABI int32_t key_delete(uint32_t key) {
     if (!key || key>=KEYS) return ERR(22);
     pthread_mutex_lock(&key_lock);
     int32_t r=keys[key].used ? 0 : ERR(22);
-    keys[key].used=0; keys[key].destructor=NULL;
+    __atomic_store_n(&keys[key].used,0,__ATOMIC_RELEASE); keys[key].destructor=NULL;
     pthread_mutex_unlock(&key_lock);
     return r;
 }
 static ABI int32_t key_set(uint32_t key,void *value) {
-    if (!key || key>=KEYS || !keys[key].used) return ERR(22);
-    key_values[key]=value; return 0;
+    if (!key || key>=KEYS) return ERR(22);
+    int32_t r=__atomic_load_n(&keys[key].used,__ATOMIC_ACQUIRE) ? 0 : ERR(22);
+    if (!r) { key_values[key].value=value; key_values[key].generation=__atomic_load_n(&keys[key].generation,__ATOMIC_ACQUIRE); }
+    return r;
 }
-static ABI void *key_get(uint32_t key) { return key && key<KEYS ? key_values[key] : NULL; }
+static ABI void *key_get(uint32_t key) {
+    if (!key || key>=KEYS) return NULL;
+    void *value=__atomic_load_n(&keys[key].used,__ATOMIC_ACQUIRE) && key_values[key].generation==__atomic_load_n(&keys[key].generation,__ATOMIC_ACQUIRE) ? key_values[key].value : NULL;
+    return value;
+}
 void runtime_thread_keys_cleanup(void) {
     for (int round=0;round<4;++round) {
         int any=0;
         for (uint32_t i=1;i<KEYS;++i) {
-            void *value=key_values[i];
-            if (!value || !keys[i].used || !keys[i].destructor) continue;
-            key_values[i]=NULL; any=1;
-            keys[i].destructor(value);
+            pthread_mutex_lock(&key_lock);
+            void *value=key_values[i].value;
+            KeyDestructor destructor=keys[i].used && key_values[i].generation==keys[i].generation ? keys[i].destructor : NULL;
+            if (value && destructor) key_values[i].value=NULL;
+            pthread_mutex_unlock(&key_lock);
+            if (!value || !destructor) continue;
+            any=1; destructor(value);
         }
         if (!any) break;
     }

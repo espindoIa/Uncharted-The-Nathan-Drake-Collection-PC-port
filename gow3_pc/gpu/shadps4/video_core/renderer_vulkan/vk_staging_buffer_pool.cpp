@@ -29,6 +29,7 @@ namespace {
 // upload ring keeps GOW3_STAGING_KEEP_MB (512) and is populated at startup.
 constexpr u64 RING_IDLE_FRAMES = 3000;
 constexpr u64 LARGE_IDLE_FRAMES = 3000;
+constexpr u64 LARGE_KEEP_COUNT = 32; // idle large buffers kept per memory type
 constexpr u64 PREWARM_BLOCKS = 8;
 constexpr u64 LARGE_MIN_GRANULARITY = 64_KB;
 constexpr u64 BLOCK_SIZE = 16_MB;
@@ -38,12 +39,31 @@ u64 RoundAllocationSize(u64 size) {
     return Common::AlignUp(size, step);
 }
 
+// 21 Oct 2026: a post-movie frame re-created 20 large buffers; time each new buffer (stall line)
+// and name the slow ones (>= 5 ms).
+void NoteNewBuffer(std::chrono::steady_clock::time_point start, u64 bytes, MemoryType type,
+                   const char* kind) {
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - start)
+                        .count();
+    if (Gow3Stats::enabled) {
+        Gow3Stats::t_staging_alloc.fetch_add(ns, std::memory_order_relaxed);
+    }
+    if (ns >= 5'000'000) {
+        static constexpr const char* names[] = {"DeviceLocal", "HostUncached", "HostCached"};
+        std::printf("Slow staging allocation: %.1f ms, %llu MiB, %s %s\n", ns / 1e6,
+                    static_cast<unsigned long long>(bytes >> 20), names[u32(type)], kind);
+    }
+}
+
 } // Anonymous namespace
 
 StagingBufferPool::StagingBufferPool(const Instance& instance_, Scheduler& scheduler_)
     : instance{instance_}, scheduler{scheduler_} {
     const char* env = std::getenv("GOW3_STAGING_KEEP_MB");
     keep_blocks = (env ? std::strtoull(env, nullptr, 10) : 512) * 1_MB / BLOCK_SIZE;
+    const char* large_env = std::getenv("GOW3_STAGING_KEEP_LARGE_MB");
+    keep_large_bytes = (large_env ? std::strtoull(large_env, nullptr, 10) : 128) * 1_MB;
     Ring& ring = rings[u32(MemoryType::HostUncached)];
     for (u64 i = 0; i < PREWARM_BLOCKS; ++i) {
         auto& block = ring.blocks.emplace_back(Block{
@@ -84,11 +104,13 @@ StagingBufferRef StagingBufferPool::RequestFromRing(Ring& ring, u64 size, u64 al
     }
 
     if (!best) {
+        const auto start = std::chrono::steady_clock::now();
         best = &ring.blocks.emplace_back(Block{
             .buffer =
                 std::make_unique<VideoCore::StreamBuffer>(instance, scheduler, type, BLOCK_SIZE),
             .last_used_frame = frame,
         });
+        NoteNewBuffer(start, BLOCK_SIZE, type, "ring block");
         ring.current = ring.blocks.size() - 1;
         best_offset = *best->buffer->Reserve(size, alignment, false);
     }
@@ -125,6 +147,7 @@ StagingBufferRef StagingBufferPool::RequestLarge(u64 size, MemoryType type, bool
     }
 
     if (!best) {
+        const auto start = std::chrono::steady_clock::now();
         best = &cache.emplace_back(LargeBuffer{
             .buffer = std::make_unique<VideoCore::Buffer>(instance, 0, RoundAllocationSize(size),
                                                           type, "StagingBufferPool:Dedicated"),
@@ -132,6 +155,7 @@ StagingBufferRef StagingBufferPool::RequestLarge(u64 size, MemoryType type, bool
             .last_used_frame = frame,
             .held = false,
         });
+        NoteNewBuffer(start, best->buffer->SizeBytes(), type, "large");
     }
 
     best->tick = scheduler.CurrentTick();
@@ -214,10 +238,50 @@ void StagingBufferPool::TrimRing(Ring& ring) {
 }
 
 void StagingBufferPool::TrimLarge(std::vector<LargeBuffer>& cache) {
-    std::erase_if(cache, [this](const LargeBuffer& entry) {
+    const auto eligible = [this](const LargeBuffer& entry) {
         return !entry.held && frame - entry.last_used_frame >= LARGE_IDLE_FRAMES &&
                scheduler.IsFree(entry.tick);
+    };
+    if (keep_large_bytes == 0) {
+        std::erase_if(cache, eligible);
+        return;
+    }
+    // 21 Oct 2026 player log: a 60 s movie freed all 14 large buffers (69 MB) and the first frames
+    // after it re-created 20 at 15-39 ms each (99.7 ms frame). Keep the most recently used idle
+    // ones up to a byte budget and a count limit per memory type.
+    u64 idle_count = 0, idle_bytes = 0;
+    for (const LargeBuffer& entry : cache) {
+        if (eligible(entry)) {
+            ++idle_count;
+            idle_bytes += entry.buffer->SizeBytes();
+        }
+    }
+    if (idle_count <= LARGE_KEEP_COUNT && idle_bytes <= keep_large_bytes) {
+        return; // Nothing to erase: no allocation on the per-frame path.
+    }
+    std::vector<size_t> idle;
+    idle.reserve(idle_count);
+    for (size_t i = 0; i < cache.size(); ++i) {
+        if (eligible(cache[i])) {
+            idle.push_back(i);
+        }
+    }
+    std::ranges::sort(idle, [&](size_t a, size_t b) {
+        return cache[a].last_used_frame > cache[b].last_used_frame;
     });
+    std::vector<bool> drop(cache.size(), false);
+    u64 kept_count = 0, kept_bytes = 0;
+    for (const size_t i : idle) {
+        const u64 bytes = cache[i].buffer->SizeBytes();
+        if (kept_count < LARGE_KEEP_COUNT && kept_bytes + bytes <= keep_large_bytes) {
+            ++kept_count;
+            kept_bytes += bytes;
+        } else {
+            drop[i] = true;
+        }
+    }
+    size_t index = 0;
+    std::erase_if(cache, [&](const LargeBuffer&) { return drop[index++]; });
 }
 
 void StagingBufferPool::PublishStats() const {

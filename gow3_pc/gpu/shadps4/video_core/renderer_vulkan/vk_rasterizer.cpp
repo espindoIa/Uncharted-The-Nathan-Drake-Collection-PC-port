@@ -14,6 +14,7 @@
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "gow3_toggles.h"
+#include "gow3_trigger_files.h"
 #include "gow3_watch_range.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
@@ -39,7 +40,28 @@
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
+#include <optional>
+#include "core/platform.h"
+
+// page_manager.cpp: the cheap protected-pages test and the stats of Rasterizer::PrepareCpuWrite.
+namespace VideoCore {
+bool Gow3AnyPageWatched(VAddr addr, u64 size);
+bool Gow3PageOnlyWriteWatched(VAddr addr);
+extern std::atomic<u64> g_range_prepares, g_range_prepare_bytes, g_range_prepare_ns,
+    g_range_prepare_pages, g_range_prepare_discarded;
+// Write fault split (GOW3_FAULT_STATS): ns in buffer / texture / extend / landing, and calls.
+extern std::atomic<u64> g_wf_split_ns[4], g_wf_split_calls;
+} // namespace VideoCore
+
 namespace Vulkan {
+// Set by HandleWriteAt while timing its InvalidateMemory (GOW3_FAULT_STATS only).
+static thread_local bool g_wf_split_active = false;
+using VideoCore::g_range_prepare_pages;
+using VideoCore::Gow3PageOnlyWriteWatched;
+using VideoCore::Gow3AnyPageWatched;
+using VideoCore::g_range_prepares;
+using VideoCore::g_range_prepare_bytes;
+using VideoCore::g_range_prepare_ns;
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
@@ -86,6 +108,43 @@ bool LateConstantsEnabled();
 void NoteLateGuestCopy(VideoCore::Buffer& buffer, u64 offset, VAddr address, u32 size);
 void NoteLateFlatCopy(VideoCore::Buffer& buffer, u64 offset, const Shader::Info& stage, u32 size);
 void RefreshLateConstants(Core::MemoryManager* memory);
+
+struct GarbageSharp {
+    bool unbound;
+    bool garbage;
+    u64 mapped_size;
+};
+
+// gow3: the garbage V# predicate, shared by binding and (through the hook below) shader
+// specialization. See the comments at the binding site.
+GarbageSharp ClassifyGarbageSharp(Core::MemoryManager* memory, const AmdGpu::Buffer& vsharp,
+                                  u64 pgm_hash) {
+    const bool unbound = vsharp.base_address == 0 || vsharp.GetSize() == 0;
+    const u64 mapped_size =
+        unbound ? 0 : memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+    // gow3 16 Oct: the treasure effect's float slots can also make a V# that lands in mapped
+    // memory: after 90 minutes one with an unaligned base, a stride of ~15 KB and ~1e9
+    // records was bound, the GPU hung (OBS's own device was removed with DEVICE_HUNG at the
+    // same moment) and the game stopped with "Device lost during submit". For these two
+    // shaders an unaligned base, a stride of 8 KiB or more or over 64 MiB is garbage too.
+    const bool treasure_effect = pgm_hash == 0x8f067540 || pgm_hash == 0x7d7e7206;
+    const bool garbage =
+        !unbound && (mapped_size >= 1_GB ||
+                     (mapped_size != vsharp.GetSize() && vsharp.num_records < 0xFFFF0000u) ||
+                     (treasure_effect && ((vsharp.base_address & 3) != 0 || vsharp.stride >= 8192 ||
+                                          vsharp.GetSize() > 64_MB)));
+    return {unbound, garbage, mapped_size};
+}
+
+// gow3 21 Oct: specialization hook. Binding nulls garbage V#s, but specialization read their
+// random stride/format: the player's U3 log had a 6.1 s frame compiling 263 permutations of
+// 8f067540 (cache held 1,095 of them); an offline replay with this filter gave 1.
+bool SpecGarbageFilter(const AmdGpu::Buffer& vsharp, u64 pgm_hash) {
+    if (Gow3Toggle::Disabled2(Gow3Toggle::SpecGarbageSharps)) {
+        return false;
+    }
+    return ClassifyGarbageSharp(Core::Memory::Instance(), vsharp, pgm_hash).garbage;
+}
 } // namespace
 
 Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime& runtime_,
@@ -97,6 +156,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
       pipeline_cache{instance, scheduler, liverpool, buffer_cache.GetSparsePageShift()},
       host_markers_enabled{EmulatorSettings.IsVkHostMarkersEnabled()},
       guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
+    Shader::g_garbage_buffer_filter.store(&SpecGarbageFilter, std::memory_order_relaxed);
     // Before the rasterizer is bound: Liverpool enqueues buffers only once it sees it.
     draw_prep = std::make_unique<DrawPreparation>(pipeline_cache);
     scene_targets = std::make_unique<SceneTargets>(instance, scheduler, runtime, texture_cache);
@@ -909,10 +969,12 @@ void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
     }
     if (!stats) {
         draw_pipe->Drain(reason);
+        pending_complete = true;
         return;
     }
     const u64 before = draw_pipe->drain_cycles;
     draw_pipe->Drain(reason);
+    pending_complete = true;
     if (const u64 waited = draw_pipe->drain_cycles - before) {
         drain_sites[function][line] += waited;
     }
@@ -955,6 +1017,20 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
     pending_writes.push_back({address, end, position});
     pending_min = std::min(pending_min, address);
     pending_max = std::max(pending_max, end);
+}
+
+void Rasterizer::PrunePendingLabels() {
+    while (!pending_labels.empty() && draw_pipe->Reached(pending_labels.front().position)) {
+        pending_labels.pop_front();
+    }
+}
+
+void Rasterizer::NotePendingLabel(VAddr address, u64 size) {
+    if (!draw_pipe || !size || !OnStageA()) {
+        return;
+    }
+    PrunePendingLabels();
+    pending_labels.push_back({address, address + size, draw_pipe->Head()});
 }
 
 void Rasterizer::NoteRingWrite(VAddr address, u64 size) {
@@ -1181,6 +1257,8 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
             if (constant_ring && !Gow3Toggle::Disabled(Gow3Toggle::ConstantRing)) {
                 building_packet = true;
                 CollectRingBindings(*stage, used_prepared, ring);
+            } else {
+                pending_complete = false;
             }
             ++num_stages;
             size += sizeof(PacketStage) +
@@ -1314,6 +1392,9 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
     *reinterpret_cast<TaskPacket*>(out) = {PacketKind::Task, size, task};
     std::memcpy(out + sizeof(TaskPacket), data, size);
     draw_pipe->Commit(total);
+    if (!writes_noted) {
+        pending_task_position = draw_pipe->Head();
+    }
     return true;
 }
 
@@ -1600,32 +1681,48 @@ bool SkippedShader(u64 first, u64 second = 0) {
     if (!path || !path[0]) {
         return false;
     }
+    // 20 Oct 2026 audit: the stat + fopen ran on the draw path inside a mutex; a thread started on
+    // first use re-reads the file every 500 ms and swaps the list; the draw path only copies a pointer.
     static std::mutex mutex;
-    static std::vector<u64> hashes;
-    static std::filesystem::file_time_type stamp{};
-    static std::chrono::steady_clock::time_point checked{};
-    std::scoped_lock lock{mutex};
-    const auto now = std::chrono::steady_clock::now();
-    if (now - checked > std::chrono::milliseconds(500)) {
-        checked = now;
-        std::error_code ec;
-        const auto time = std::filesystem::last_write_time(path, ec);
-        if (ec) {
-            hashes.clear();
-        } else if (time != stamp) {
-            stamp = time;
-            hashes.clear();
-            if (FILE* f = std::fopen(path, "r")) {
-                unsigned long long value;
-                while (std::fscanf(f, "%llx", &value) == 1) {
-                    hashes.push_back(value);
+    static std::shared_ptr<const std::vector<u64>> shared = std::make_shared<const std::vector<u64>>();
+    static const bool poller = [] {
+        std::thread([] {
+            std::filesystem::file_time_type stamp{};
+            for (;; std::this_thread::sleep_for(std::chrono::milliseconds(500))) {
+                std::error_code ec;
+                const auto time = std::filesystem::last_write_time(path, ec);
+                std::shared_ptr<const std::vector<u64>> next;
+                if (ec) {
+                    next = std::make_shared<const std::vector<u64>>();
+                    stamp = {};
+                } else if (time != stamp) {
+                    stamp = time;
+                    auto list = std::make_shared<std::vector<u64>>();
+                    if (FILE* f = std::fopen(path, "r")) {
+                        unsigned long long value;
+                        while (std::fscanf(f, "%llx", &value) == 1) {
+                            list->push_back(value);
+                        }
+                        std::fclose(f);
+                    }
+                    std::printf("Skip list: %zu shaders\n", list->size());
+                    next = std::move(list);
+                } else {
+                    continue;
                 }
-                std::fclose(f);
+                std::scoped_lock lock{mutex};
+                shared = std::move(next);
             }
-            std::printf("Skip list: %zu shaders\n", hashes.size());
-        }
+        }).detach();
+        return true;
+    }();
+    (void)poller;
+    std::shared_ptr<const std::vector<u64>> hashes_ptr;
+    {
+        std::scoped_lock lock{mutex};
+        hashes_ptr = shared;
     }
-    for (const u64 h : hashes) {
+    for (const u64 h : *hashes_ptr) {
         if (h == first || (second && h == second)) {
             return true;
         }
@@ -2222,8 +2319,9 @@ void Rasterizer::DispatchDirect() {
     // gow3 18 Oct: GOW3_DRAIN_CS=<hex hash>[,<hash>...]: these dispatches run here after a drain
     // (diagnostics). Uncharted 2's train flashed white with multithreaded rendering: later draws
     // were prepared from constants its copy shaders had yet to write. SyncSrtTables now waits for
-    // the dispatches whose written buffers it reads (pipe_write_ranges); draining before the copy
-    // shaders 2d215c3b/6a6422a9 and c92150ba as well (toggle 1 << 62) cost 5.8% of this thread.
+    // queued writes to the buffers it reads; draining before the copy
+    // shaders 2d215c3b/6a6422a9 and c92150ba as well (DrainCopyShaders, second word) cost 5.8%
+    // of this thread. That diagnostic is opt-in: bit set means drain.
     static const std::vector<u64> drain_cs = [] {
         std::vector<u64> out;
         for (const char* env = std::getenv("GOW3_DRAIN_CS"); env && *env;) {
@@ -2235,7 +2333,7 @@ void Rasterizer::DispatchDirect() {
     }();
     const u64 cs_hash = pipeline->GetStage(Shader::SwStage::Compute).pgm_hash;
     if (pipelined && (std::ranges::find(drain_cs, cs_hash) != drain_cs.end() ||
-                      (Gow3Toggle::Disabled(1ull << 62) &&
+                      (Gow3Toggle::Disabled2(Gow3Toggle::DrainCopyShaders) &&
                        (cs_hash == 0x2d215c3b || cs_hash == 0x6a6422a9 || cs_hash == 0xc92150ba)))) {
         pipelined = false;
         DrainDrawPipe();
@@ -2504,10 +2602,9 @@ void Rasterizer::OnSubmit() {
     SyncSmallGpuWrites();
     texture_cache.ProcessDownloadImages();
     // Diagnostics: GOW3_RETEXTURE_FILE=<file>; creating it re-reads all CPU-sourced textures.
-    static const char* retexture = std::getenv("GOW3_RETEXTURE_FILE");
-    if (retexture && retexture[0] && std::filesystem::exists(retexture)) {
-        std::error_code ec;
-        std::filesystem::remove(retexture, ec);
+    // 20 Oct 2026 audit: polled off this thread; exists() here cost 25-50 ms per check (d026d97).
+    static const int retexture = Gow3TriggerFiles::Watch("GOW3_RETEXTURE_FILE");
+    if (Gow3TriggerFiles::Take(retexture)) {
         std::printf("Texture cache: %zu textures marked for re-upload\n", texture_cache.DebugInvalidateAll());
     }
     texture_cache.RunGarbageCollector();
@@ -2599,24 +2696,9 @@ void Rasterizer::SyncDmaMemory(const Shader::Info* stage) {
         return true;
     }();
     (void)init;
-    static const char* trigger = std::getenv("GOW3_DMA_TRIGGER");
-    static auto last_poll = std::chrono::steady_clock::now();
-    const auto now = std::chrono::steady_clock::now();
-    if (trigger && trigger[0] && now - last_poll > std::chrono::milliseconds(500)) {
-        last_poll = now;
-        if (std::filesystem::exists(trigger)) {
-            std::string text;
-            if (FILE* f = std::fopen(trigger, "r")) {
-                char line[64]{};
-                if (std::fgets(line, sizeof(line), f)) {
-                    text = line;
-                }
-                std::fclose(f);
-            }
-            std::error_code ec;
-            std::filesystem::remove(trigger, ec);
-            parse(text);
-        }
+    static const int trigger = Gow3TriggerFiles::Watch("GOW3_DMA_TRIGGER");
+    if (const auto text = Gow3TriggerFiles::Take(trigger)) {
+        parse(*text);
     }
     static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
     const u64 bytes_before = Gow3Stats::buffer_upload_bytes.load(std::memory_order_relaxed);
@@ -2747,18 +2829,9 @@ bool Rasterizer::ReadBackEopResults() {
 
 void Rasterizer::SyncSmallGpuWrites() {
     buffer_cache.PollReadbacks();
-    static const char* trigger = std::getenv("GOW3_READBACK_TRIGGER");
-    if (trigger && trigger[0] && std::filesystem::exists(trigger)) {
-        std::string text;
-        if (FILE* f = std::fopen(trigger, "r")) {
-            char line[128]{};
-            if (std::fgets(line, sizeof(line), f)) {
-                text = line;
-            }
-            std::fclose(f);
-        }
-        std::error_code ec;
-        std::filesystem::remove(trigger, ec);
+    static const int trigger = Gow3TriggerFiles::Watch("GOW3_READBACK_TRIGGER");
+    if (const auto taken = Gow3TriggerFiles::Take(trigger)) {
+        const std::string& text = *taken;
         if (text.starts_with("auto")) {
             sync_gpu_constants = true;
             std::printf("GPU constants sync: on\n");
@@ -2999,10 +3072,50 @@ void Rasterizer::SyncSrtTables(const Shader::Info& info) {
     // GPU-written check below cannot see them: the walk read the tables before the GPU wrote
     // them (Uncharted 2's train still flashed white, rarely, after the copy shaders drained).
     // Reads overlapping a pending dispatch's written buffers drain the pipe first; draining
-    // before every walk cost 15% in U3's bar fight. Toggle 1 << 61 skips it (A/B).
-    const bool check_pipe = !Gow3Toggle::Disabled(1ull << 61);
+    // before every walk cost 15% in U3's bar fight. SrtPipeCheck (second word) skips it (A/B).
+    // gow3 20 Oct, U3 chapter 2: ~1,500 drains/s but only one download in 5 s; the 256-range
+    // overflow made almost every wait a false positive (18.8% of stage A). With the ring on,
+    // its pending writes cover every stage's buffers; labels and un-noted tasks cover the rest.
+    // Packets built without that tracking keep the old check until a full drain.
+    static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
+    static u64 pipe_reads = 0, pipe_drains = 0;
+    static std::array<u64, 5> pipe_reasons{};
+    const bool check_pipe = !Gow3Toggle::Disabled2(Gow3Toggle::SrtPipeCheck);
     const auto pipe_wait = [&](VAddr address, u64 size) {
-        if (!check_pipe || (pipe_write_ranges.empty() && !pipe_writes_overflow)) {
+        if (!check_pipe) {
+            return;
+        }
+        if (stats) {
+            ++pipe_reads;
+        }
+        if (draw_pipe && constant_ring && !Gow3Toggle::Disabled(Gow3Toggle::ConstantRing) &&
+            !Gow3Toggle::Disabled2(Gow3Toggle::SrtPendingWrites) && pending_complete) {
+            PrunePendingLabels();
+            u32 reason = 0;
+            bool overlap = PendingWriteOverlaps(address, size);
+            if (!overlap) {
+                reason = 1;
+                for (const auto& label : pending_labels) {
+                    if (address < label.end && label.begin < address + size) {
+                        overlap = true;
+                        break;
+                    }
+                }
+            }
+            if (!overlap) {
+                reason = 2;
+                overlap = !draw_pipe->Reached(pending_task_position);
+            }
+            if (overlap) {
+                if (stats) {
+                    ++pipe_drains;
+                    ++pipe_reasons[reason];
+                }
+                DrainDrawPipe();
+            }
+            return;
+        }
+        if (pipe_write_ranges.empty() && !pipe_writes_overflow) {
             return;
         }
         bool overlap = pipe_writes_overflow;
@@ -3010,6 +3123,10 @@ void Rasterizer::SyncSrtTables(const Shader::Info& info) {
             overlap = overlap || (address < base + bytes && base < address + size);
         }
         if (overlap) {
+            if (stats) {
+                ++pipe_drains;
+                ++pipe_reasons[pipe_writes_overflow ? 3 : 4];
+            }
             DrainDrawPipe();
         }
     };
@@ -3057,7 +3174,26 @@ void Rasterizer::SyncSrtTables(const Shader::Info& info) {
             std::fflush(stdout);
         }
     }
-    static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
+    if (stats) {
+        static auto report = std::chrono::steady_clock::now();
+        if (const auto now = std::chrono::steady_clock::now();
+            now - report >= std::chrono::seconds(5)) {
+            report = now;
+            std::printf("SRT pipe check (5 s): %llu reads checked, %llu drains "
+                        "(pending write %llu, "
+                        "label %llu, queued task %llu; old path: overflow %llu, overlap %llu)\n",
+                        static_cast<unsigned long long>(pipe_reads),
+                        static_cast<unsigned long long>(pipe_drains),
+                        static_cast<unsigned long long>(pipe_reasons[0]),
+                        static_cast<unsigned long long>(pipe_reasons[1]),
+                        static_cast<unsigned long long>(pipe_reasons[2]),
+                        static_cast<unsigned long long>(pipe_reasons[3]),
+                        static_cast<unsigned long long>(pipe_reasons[4]));
+            std::fflush(stdout);
+            pipe_reads = pipe_drains = 0;
+            pipe_reasons.fill(0);
+        }
+    }
     if (stats && srt_syncs) {
         static auto report = std::chrono::steady_clock::now();
         if (const auto now = std::chrono::steady_clock::now(); now - report >= std::chrono::seconds(5)) {
@@ -4263,20 +4399,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             // it: the game's fg-draw-mgr assert), and the arena over them ran out of device
             // memory. A V# reaching past mapped memory, other than an unbounded raw buffer
             // (num_records ~0), or spanning 1 GiB is bound as null. Normal play has none.
-            const bool unbound = vsharp.base_address == 0 || vsharp.GetSize() == 0;
-            const u64 mapped_size =
-                unbound ? 0 : memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
-            // gow3 16 Oct: the treasure effect's float slots can also make a V# that lands in mapped
-            // memory: after 90 minutes one with an unaligned base, a stride of ~15 KB and ~1e9
-            // records was bound, the GPU hung (OBS's own device was removed with DEVICE_HUNG at the
-            // same moment) and the game stopped with "Device lost during submit". For these two
-            // shaders an unaligned base, a stride of 8 KiB or more or over 64 MiB is garbage too.
-            const bool treasure_effect = stage.pgm_hash == 0x8f067540 || stage.pgm_hash == 0x7d7e7206;
-            const bool garbage =
-                !unbound && (mapped_size >= 1_GB ||
-                             (mapped_size != vsharp.GetSize() && vsharp.num_records < 0xFFFF0000u) ||
-                             (treasure_effect && ((vsharp.base_address & 3) != 0 || vsharp.stride >= 8192 ||
-                                                  vsharp.GetSize() > 64_MB)));
+            const GarbageSharp gs = ClassifyGarbageSharp(memory, vsharp, stage.pgm_hash);
+            const bool unbound = gs.unbound;
+            const u64 mapped_size = gs.mapped_size;
+            const bool garbage = gs.garbage;
             if (garbage) {
                 static u32 garbage_reports = 0;
                 if (garbage_reports < 32) {
@@ -5708,6 +5834,21 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
         // Not GPU mapped memory, can skip invalidation logic entirely.
         return false;
     }
+    if (g_wf_split_active) {
+        const auto t0 = std::chrono::steady_clock::now();
+        texture_cache.ResolveReadbacks(addr, size, assume_locks, VideoCore::ReadbackSource::CpuWrite);
+        const auto t1 = std::chrono::steady_clock::now();
+        buffer_cache.InvalidateMemory(addr, size, assume_locks);
+        const auto t2 = std::chrono::steady_clock::now();
+        texture_cache.InvalidateMemory(addr, size);
+        const auto t3 = std::chrono::steady_clock::now();
+        using std::chrono::duration_cast, std::chrono::nanoseconds;
+        VideoCore::g_wf_split_ns[0].fetch_add(duration_cast<nanoseconds>(t2 - t1).count(),
+                                              std::memory_order_relaxed);
+        VideoCore::g_wf_split_ns[1].fetch_add(
+            duration_cast<nanoseconds>((t1 - t0) + (t3 - t2)).count(), std::memory_order_relaxed);
+        return true;
+    }
     texture_cache.ResolveReadbacks(addr, size, assume_locks, VideoCore::ReadbackSource::CpuWrite);
     buffer_cache.InvalidateMemory(addr, size, assume_locks);
     texture_cache.InvalidateMemory(addr, size);
@@ -5740,11 +5881,137 @@ bool Rasterizer::OnWriteFault(VAddr addr, bool assume_locks) {
     }
     DrainDrawPipe();
     WaitDrawPipeForCapture();
+    return HandleWriteAt(addr, assume_locks);
+}
+
+bool Rasterizer::HandleWriteAt(VAddr addr, bool assume_locks) {
+    static const bool split_stats = [] {
+        const char* env = std::getenv("GOW3_FAULT_STATS");
+        return env && env[0] == '1';
+    }();
+    if (split_stats) {
+        // Same steps as below, timed; sums are printed by the page manager's 5 s fault stats.
+        using Clock = std::chrono::steady_clock;
+        const auto ns = [](Clock::time_point a, Clock::time_point b) {
+            return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+        };
+        g_wf_split_active = true; // InvalidateMemory splits its buffer / texture parts
+        const bool ok = InvalidateMemory(addr, 8, assume_locks);
+        g_wf_split_active = false;
+        if (!ok) {
+            return false;
+        }
+        const auto t0 = Clock::now();
+        buffer_cache.ExtendWriteFault(addr);
+        const auto t1 = Clock::now();
+        LandWatchedReadback(addr, assume_locks);
+        const auto t2 = Clock::now();
+        VideoCore::g_wf_split_ns[2].fetch_add(ns(t0, t1), std::memory_order_relaxed);
+        VideoCore::g_wf_split_ns[3].fetch_add(ns(t1, t2), std::memory_order_relaxed);
+        VideoCore::g_wf_split_calls.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
     if (!InvalidateMemory(addr, 8, assume_locks)) {
         return false;
     }
     buffer_cache.ExtendWriteFault(addr);
     LandWatchedReadback(addr, assume_locks);
+    return true;
+}
+
+bool Rasterizer::DiscardCpuWritePage(VAddr page) {
+    if (!Gow3PageOnlyWriteWatched(page) || !IsMapped(page, 4096)) {
+        return false;
+    }
+    // Check before the buffer discard takes its locks; GPU-owned images keep HandleWriteAt.
+    if (texture_cache.PageHasGpuImageAuthority(page, 4096)) {
+        return false;
+    }
+    // Texture copies may protect only writes (stale readbacks). Resolving one keeps that page
+    // on the old path; pages actually discarded never wait for a GPU copy.
+    if (texture_cache.ResolveReadbacks(page, 4096, true, VideoCore::ReadbackSource::CpuWrite) ||
+        !buffer_cache.DiscardCpuWritePage(page)) {
+        return false;
+    }
+    texture_cache.InvalidateMemory(page, 4096);
+    return true;
+}
+
+// gow3 21 Oct 2026: the player's U3 chapter load: up to 6,348 write faults/s from the game's file
+// reads (touch_for_write: one store per 4 KiB page), 1,049 one-page protects in a 103 ms frame
+// (96.4 ms in write-fault handlers), a 215 ms frame with 203 ms in them. The faults the touches
+// would cause, minus the exception dispatch: the same per-address work (HandleWriteAt) at the
+// touch addresses whose page is still protected, one drain before the loop (InvalidateMemory
+// drains per call anyway). One InvalidateMemory over the whole range was rejected (21 Oct review):
+// BufferCache::ReadMemory fetches only the first page's GPU bytes before marking the whole range
+// CPU-modified, and the bulk readback cancellation rounds out to pages, dropping GPU authority
+// for untouched boundary bytes.
+bool Rasterizer::PrepareCpuWrite(VAddr addr, u64 size) {
+    if (!size) {
+        return true;
+    }
+    if (!Gow3AnyPageWatched(addr, size)) {
+        return true; // Nothing protected: the copy faults nowhere, and no GPU bytes to bring back.
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const bool assume_locks = IsGpuSideThread();
+    // As in the fault handler (page_manager.cpp): interrupts landed here wait for this thread's
+    // next safe point, it may hold cache locks the interrupt handlers take.
+    std::optional<Platform::IrqController::HoldScope> hold_interrupts;
+    if (assume_locks) {
+        hold_interrupts.emplace();
+    }
+    DrainDrawPipe();
+    WaitDrawPipeForCapture();
+    const VAddr end = addr + size;
+    u64 pages = 0;
+    std::vector<VAddr> discarded;
+    if (!Gow3Toggle::Disabled2(Gow3Toggle::FileReadDiscard) &&
+        (!assume_locks || OnStageA())) {
+        for (VAddr at = addr; at < end; at = Common::AlignDown(at, VAddr{4096}) + 4096) {
+            if ((at & 4095) == 0 && end - at >= 4096 && Gow3PageOnlyWriteWatched(at) &&
+                buffer_cache.IsRangeGpuWrittenShared(at, 4096)) {
+                discarded.push_back(at);
+            }
+        }
+        if (!discarded.empty()) {
+            // 21 Oct U3: 532 pages/50.1 ms. One queue hop per read, without fetching each page;
+            // Liverpool drains the draw pipe before commands, exactly as for flush_request.
+            const auto discard = [this, &discarded] {
+                std::erase_if(discarded, [this](VAddr page) { return !DiscardCpuWritePage(page); });
+            };
+            if (assume_locks) {
+                discard();
+            } else {
+                liverpool->SendCommand<true>(discard);
+            }
+        }
+    }
+    pages = discarded.size();
+    // The touch addresses of touch_for_write: the buffer itself, then each page base after it.
+    for (VAddr at = addr; at < end; at = Common::AlignDown(at, VAddr{4096}) + 4096) {
+        if (std::binary_search(discarded.begin(), discarded.end(), at)) {
+            continue;
+        }
+        if (!Gow3PageOnlyWriteWatched(at)) {
+            // Unprotected (maybe by an earlier window): the touch would not fault. Read-watched:
+            // left to the touches (21 Oct review: their load takes the read fault, which lands
+            // the readback, before any write fault).
+            continue;
+        }
+        if (!HandleWriteAt(at, assume_locks)) {
+            return false; // The page touches handle what faults.
+        }
+        ++pages;
+    }
+    g_range_prepare_pages.fetch_add(pages, std::memory_order_relaxed);
+    VideoCore::g_range_prepare_discarded.fetch_add(discarded.size(), std::memory_order_relaxed);
+    g_range_prepares.fetch_add(1, std::memory_order_relaxed);
+    g_range_prepare_bytes.fetch_add(size, std::memory_order_relaxed);
+    g_range_prepare_ns.fetch_add(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
+            .count(),
+        std::memory_order_relaxed);
     return true;
 }
 
@@ -6126,22 +6393,24 @@ vk::Pipeline Rasterizer::SquarePass(const GraphicsPipeline& pipeline) const {
 static int DepthCompareProbe() {
     static const char* path = std::getenv("GOW3_DEPTH_PROBE_FILE");
     if (!path || !path[0]) return 0;
-    static std::mutex mutex;
-    static std::chrono::steady_clock::time_point checked{};
-    static int mode = 0;
-    std::scoped_lock lock{mutex};
-    const auto now = std::chrono::steady_clock::now();
-    if (now - checked > std::chrono::milliseconds(250)) {
-        checked = now;
-        int next = 0;
-        if (FILE* f = std::fopen(path, "r")) {
-            if (std::fscanf(f, "%d", &next) != 1 || next < 0 || next > 2) next = 0;
-            std::fclose(f);
-        }
-        if (mode != next) std::printf("Depth compare probe: %d\n", next);
-        mode = next;
-    }
-    return mode;
+    // 20 Oct 2026 audit: the fopen ran on the draw path every 250 ms; a thread started on first use
+    // polls the file and publishes the mode through an atomic.
+    static std::atomic<int> mode{0};
+    static const bool poller = [] {
+        std::thread([] {
+            for (;; std::this_thread::sleep_for(std::chrono::milliseconds(250))) {
+                int next = 0;
+                if (FILE* f = std::fopen(path, "r")) {
+                    if (std::fscanf(f, "%d", &next) != 1 || next < 0 || next > 2) next = 0;
+                    std::fclose(f);
+                }
+                if (mode.exchange(next) != next) std::printf("Depth compare probe: %d\n", next);
+            }
+        }).detach();
+        return true;
+    }();
+    (void)poller;
+    return mode.load(std::memory_order_relaxed);
 }
 
 void Rasterizer::UpdateDepthStencilState() const {

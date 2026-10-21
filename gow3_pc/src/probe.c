@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <pthread.h>
+#include <time.h>
 #include "runtime.h"
 #include "cpu_check.h"
 #include "orb_hook.h"
@@ -33,6 +35,75 @@
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #endif
+
+static char stdout_buffer[64*1024];
+#ifdef _WIN32
+static HANDLE stdout_wake, stdout_flushed, stdout_thread;
+static DWORD stdout_thread_id;
+static LONG stdout_stopping;
+static DWORD WINAPI flush_stdout_thread(LPVOID unused) {
+    (void)unused;
+    for (;;) {
+        DWORD wake=WaitForSingleObject(stdout_wake,250);
+        fflush(stdout);
+        if (wake==WAIT_OBJECT_0) SetEvent(stdout_flushed);
+        if (InterlockedCompareExchange(&stdout_stopping,0,0)) return 0;
+    }
+}
+static void flush_stdout_crash(void) {
+    /* 20 Oct audit: a fault while owning the CRT lock must not deadlock the crash reporter. */
+    if (!stdout_thread || GetCurrentThreadId()==stdout_thread_id) return;
+    ResetEvent(stdout_flushed);
+    SetEvent(stdout_wake);
+    WaitForSingleObject(stdout_flushed,500);
+}
+static void stop_stdout(void) {
+    InterlockedExchange(&stdout_stopping,1);
+    SetEvent(stdout_wake);
+    WaitForSingleObject(stdout_thread,INFINITE);
+    CloseHandle(stdout_thread); CloseHandle(stdout_wake); CloseHandle(stdout_flushed);
+    fflush(stdout);
+}
+#else
+static pthread_t stdout_thread;
+static int stdout_stopping;
+static void *flush_stdout_thread(void *unused) {
+    (void)unused;
+    while (!__atomic_load_n(&stdout_stopping,__ATOMIC_ACQUIRE)) {
+        struct timespec delay={0,250000000};
+        nanosleep(&delay,NULL);
+        fflush(stdout);
+    }
+    return NULL;
+}
+static void flush_stdout_crash(void) {
+    if (!ftrylockfile(stdout)) { fflush_unlocked(stdout); funlockfile(stdout); }
+}
+static void stop_stdout(void) {
+    __atomic_store_n(&stdout_stopping,1,__ATOMIC_RELEASE);
+    pthread_join(stdout_thread,NULL);
+    fflush(stdout);
+}
+#endif
+static void start_stdout(void) {
+    /* 20 Oct audit: unbuffered prints held the GPU command thread for 548 ms during a load. */
+    if (setvbuf(stdout,stdout_buffer,_IOFBF,sizeof(stdout_buffer))) exit(1);
+#ifdef _WIN32
+    stdout_wake=CreateEventA(NULL,FALSE,FALSE,NULL);
+    stdout_flushed=CreateEventA(NULL,FALSE,FALSE,NULL);
+    if (stdout_wake && stdout_flushed)
+        stdout_thread=CreateThread(NULL,0,flush_stdout_thread,NULL,0,&stdout_thread_id);
+    if (!stdout_thread) { fputs("Cannot start stdout flusher\n",stderr); exit(1); }
+#else
+    if (pthread_create(&stdout_thread,NULL,flush_stdout_thread,NULL)) exit(1);
+#endif
+    atexit(stop_stdout);
+}
+static __attribute__((noreturn)) void flushed_exit(int status) {
+    fflush(stdout);
+    _exit(status);
+}
+#define _exit flushed_exit
 
 typedef struct { uint64_t address, size, flags; } Segment;
 typedef struct { uint64_t target, kind, value, addend; } Reloc;
@@ -211,7 +282,7 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
         fprintf(stderr,"  #%d %s\n",depth,where);
         rbp=frame[0];
     }
-    fflush(NULL);
+    flush_stdout_crash();
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -348,32 +419,6 @@ static DWORD WINAPI exec_watch_thread(LPVOID unused) {
             CloseHandle(snap);
         }
         if (round==0) SetEvent(exec_watch_ready);
-        /* GOW3_EXEC_WATCH_FILE=<path>: up to 4 hex absolute addresses written there (each
-         * optionally prefixed r: to catch reads too) replace the watches while the game runs
-         * (the file is removed once read). */
-        static const char *retarget_file;
-        if (!retarget_file) { retarget_file=getenv("GOW3_EXEC_WATCH_FILE"); if (!retarget_file) retarget_file=""; }
-        if (*retarget_file && (round%10)==0) {
-            FILE *f=fopen(retarget_file,"r");
-            if (f) {
-                uint64_t watches[4]; int count=0;
-                char word[64];
-                while (count<4 && fscanf(f,"%63s",word)==1) {
-                    const int rw=(word[0]=='r' || word[0]=='R') && word[1]==':';
-                    const unsigned long long target=strtoull(word+(rw ? 2 : 0),NULL,16);
-                    if (target) watches[count++]=target|(1ull<<63)|(rw ? 1ull<<62 : 0);
-                }
-                fclose(f); remove(retarget_file);
-                if (count) {
-                    if (watch_unique>0) watch_summary();
-                    for (int i=0;i<count;++i) exec_watch[i]=watches[i];
-                    exec_watch_count=count;
-                    InterlockedExchange(&exec_watch_armed_count,0);
-                    InterlockedExchange(&watch_hits,0);
-                    printf("Exec watch: %d data watches moved\n",count); fflush(stdout);
-                }
-            }
-        }
         Sleep(round<200 ? 1 : 20);
     }
     printf("Exec watch: done (%ld threads armed)\n",(long)exec_watch_armed_count);
@@ -412,6 +457,7 @@ static void poll_exec_watch_file(void) {
     strcpy(exec_watch_file_text,text);
     uint64_t list[4]={0};
     const int count=parse_exec_watch(text,list);
+    if (watch_unique>0) watch_summary();
     for (int i=0;i<4;++i) exec_watch[i]=list[i];
     exec_watch_count=count;
     InterlockedExchange(&watch_hits,0);
@@ -648,7 +694,8 @@ static void fault(int sig, siginfo_t *info, void *context) {
             snprintf(line, sizeof(line), "  #%d %p\n", i, frames[i]);
         ssize_t written_=write(2, line, strlen(line)); (void)written_;
     }
-    _exit(128 + sig);
+    flush_stdout_crash();
+    _Exit(128 + sig);
 }
 #endif
 #ifndef _WIN32
@@ -695,7 +742,8 @@ static void watchdog(int sig, siginfo_t *info, void *context) {
             at+=d->reclen;
         }
     usleep(100000);
-    _exit(128 + sig);
+    flush_stdout_crash();
+    _Exit(128 + sig);
 }
 #endif
 /* param.sfo lookup: string or integer value of key, 0 when absent. */
@@ -707,15 +755,20 @@ static int sfo_value(const char *path, const char *key, char *text, size_t text_
     if (n<20 || memcmp(data,"\0PSF",4)) return 0;
     uint32_t keys, values, count;
     memcpy(&keys,data+8,4); memcpy(&values,data+12,4); memcpy(&count,data+16,4);
-    for (uint32_t i=0;i<count && 20+i*16+16<=n;++i) {
+    if ((uint64_t)keys>values || (uint64_t)values>n) return 0;
+    size_t key_length=strlen(key);
+    for (uint64_t i=0;i<count && 20+i*16+16<=(uint64_t)n;++i) {
         const unsigned char *e=data+20+i*16;
         uint16_t key_offset, format; uint32_t length, offset;
         memcpy(&key_offset,e,2); memcpy(&format,e+2,2); memcpy(&length,e+4,4); memcpy(&offset,e+12,4);
-        if (keys+key_offset>=n || values+offset+length>n || strcmp((const char *)data+keys+key_offset,key)) continue;
-        if (format==0x0404 && number && length>=4) { memcpy(number,data+values+offset,4); return 1; }
+        uint64_t key_at=(uint64_t)keys+key_offset, value_at=(uint64_t)values+offset;
+        if (key_at>=values || value_at+(uint64_t)length>(uint64_t)n) continue;
+        const unsigned char *end=memchr(data+key_at,0,(uint64_t)values-key_at);
+        if (!end || (size_t)(end-(data+key_at))!=key_length || memcmp(data+key_at,key,key_length)) continue;
+        if (format==0x0404 && number && length>=4) { memcpy(number,data+value_at,4); return 1; }
         if (text && text_size) {
             size_t copy=length<text_size-1 ? length : text_size-1;
-            memcpy(text,data+values+offset,copy); text[copy]=0;
+            memcpy(text,data+value_at,copy); text[copy]=0;
         }
         return 1;
     }
@@ -1042,28 +1095,24 @@ static void apply_patches(const char *path, Segment *segments, uint64_t ns, cons
     fclose(f);
     printf("Patches: %" PRIu64 " writes, %" PRIu64 " bytes applied, %" PRIu64 " pointers rebased\n",count,bytes,rebased);
 }
-/* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
- * applied at start). Descriptors are closed first so the old GPU device and its memory are
- * released before the new process opens its own. */
+static const char **restart_guest_argv;
+static int restart_guest_argc;
+/* A new render resolution is patched at start; Windows reuses the launcher's LoadExec loop. */
 void runtime_restart(void) {
     fflush(NULL);
 #ifdef _WIN32
-    /* run.py sets GOW3_RESTART_COMMAND: the launch command line, started again (new patches). */
-    const char *command=getenv("GOW3_RESTART_COMMAND");
-    puts("Runtime: restarting through run.py");
-    if (!command || !*command) { fputs("runtime_restart: GOW3_RESTART_COMMAND is not set\n",stderr); _exit(1); }
-    char *line=_strdup(command);
-    /* Same output handles: a launcher reading the game's log keeps reading the new launch. */
-    STARTUPINFOA startup={.cb=sizeof(startup),.dwFlags=STARTF_USESTDHANDLES,
-                          .hStdInput=GetStdHandle(STD_INPUT_HANDLE),.hStdOutput=GetStdHandle(STD_OUTPUT_HANDLE),
-                          .hStdError=GetStdHandle(STD_ERROR_HANDLE)};
-    PROCESS_INFORMATION process;
-    if (!line || !CreateProcessA(NULL,line,NULL,NULL,TRUE,0,NULL,NULL,&startup,&process)) {
-        fprintf(stderr,"runtime_restart: CreateProcess failed (%lu)\n",GetLastError()); _exit(1);
-    }
-    CloseHandle(process.hThread); CloseHandle(process.hProcess);
-    /* The new launch waits for this process's GPU device to go away (run.py --after). */
-    TerminateProcess(GetCurrentProcess(),0);
+    const char *handoff=getenv("GOW3_LOADEXEC_FILE");
+    const char *executable=getenv("GOW3_RESTART_EXECUTABLE");
+    FILE *f=handoff && *handoff && executable && *executable ? fopen(handoff,"w") : NULL;
+    if (!f) { fputs("runtime_restart: no launcher handoff\n",stderr); _exit(31); }
+    int failed=fprintf(f,"%s\n",executable)<0;
+    for (int i=0;i<restart_guest_argc;++i)
+        if (fprintf(f,"%s\n",restart_guest_argv[i])<0) failed=1;
+    if (fclose(f)) failed=1;
+    if (failed) { fputs("runtime_restart: cannot write launcher handoff\n",stderr); _exit(31); }
+    puts("Runtime: restart handed to the launcher; exiting");
+    fflush(NULL);
+    _exit(30); /* LOADEXEC_EXIT: no destructors while GPU/audio/guest threads run. */
 #else
     const char *command = getenv("GOW3_RESTART_COMMAND");
     syscall(SYS_close_range, 3u, ~0u, 0u);
@@ -1080,7 +1129,7 @@ void runtime_restart(void) {
 }
 
 int main(int argc, char **argv) {
-    setvbuf(stdout, NULL, _IONBF, 0);
+    start_stdout();
 #ifndef _WIN32
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
        non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */
@@ -1128,6 +1177,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--check-imports] [--no-game-hooks] [--content-profile file] [--app0 dir] [--app0-overlay dir]... [--user dir] [--patches file] [--timeout seconds] [--guest-path /app0/file] [--guest-arg value]... | --vulkan-only\n", argv[0]);
         return 1;
     }
+    restart_guest_argv=guest_argv;
+    restart_guest_argc=guest_argc;
     /* The guest code needs the PS4's instruction sets (#33, #66); GOW3_CPU_CHECK=0 skips this. */
     const char *cpu_check = getenv("GOW3_CPU_CHECK");
     if (!cpu_check || strcmp(cpu_check, "0")) {
@@ -1296,7 +1347,22 @@ int main(int argc, char **argv) {
         sfo_value(sfo,"ATTRIBUTE",NULL,0,&attributes);
         uint64_t sdk=0;
         if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
-        Gow3GpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080};
+        /* 20 Oct audit: U3 read 2351 shared cache keys but kept only 576. */
+        const char *executable=getenv("GOW3_RESTART_EXECUTABLE");
+        if (!executable || !*executable) executable=guest_argv[0];
+        for (const char *p=executable;*p;++p) if (*p=='/' || *p=='\\') executable=p+1;
+        char stem[64], cache_id[96];
+        size_t stem_length=0;
+        while (executable[stem_length] && executable[stem_length]!='.' && stem_length<sizeof(stem)-1) {
+            unsigned char c=(unsigned char)executable[stem_length];
+            stem[stem_length]=(char)((c>='A' && c<='Z') ? c+32 :
+                (c>='a' && c<='z') || (c>='0' && c<='9') || c=='-' || c=='_' ? c : '_');
+            ++stem_length;
+        }
+        stem[stem_length]=0;
+        snprintf(cache_id,sizeof(cache_id),"%s-%s",serial,stem);
+        Gow3GpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080,
+                           stem_length ? cache_id : NULL};
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
         if (gow3gpu_init(&gpu)) fail("GPU initialization failed");
         printf("GPU: window and Vulkan presenter ready; SDK 0x%08x, %u HLE symbols\n",(unsigned)sdk,gow3gpu_symbol_count());

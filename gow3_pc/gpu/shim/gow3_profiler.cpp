@@ -344,22 +344,28 @@ void Start(unsigned long thread_id, const char* name) {
             CONTEXT context{};
             context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
             const BOOL ok = GetThreadContext(thread, &context);
-            if (ok && StallMode()) {
-                Stack stack{};
-                Walk(modules, context, stack);
-                recent.emplace_back(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                        std::chrono::steady_clock::now() - stall_epoch)
-                                        .count(),
-                                    stack);
-                while (recent.size() > 600) {
-                    recent.pop_front();
-                }
+            // 20 Oct 2026 audit: the deque grows and frees blocks, so it is filled after the resume;
+            // the target may hold the CRT heap lock while suspended and the allocation would deadlock.
+            const bool stall_sample = ok && StallMode();
+            Stack stall_stack{};
+            long long stall_when = 0;
+            if (stall_sample) {
+                Walk(modules, context, stall_stack);
+                stall_when = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 std::chrono::steady_clock::now() - stall_epoch)
+                                 .count();
             } else if (ok && samples.size() < samples.capacity()) {
                 samples.push_back(context.Rip);
                 stacks.emplace_back();
                 Walk(modules, context, stacks.back());
             }
             ResumeThread(thread);
+            if (stall_sample) {
+                recent.emplace_back(stall_when, stall_stack);
+                while (recent.size() > 600) {
+                    recent.pop_front();
+                }
+            }
             if (StallMode()) {
                 const unsigned seq = stall_seq.load();
                 if (seq == seen_stall) {

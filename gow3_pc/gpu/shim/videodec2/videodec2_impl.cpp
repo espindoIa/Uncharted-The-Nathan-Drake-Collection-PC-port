@@ -466,12 +466,21 @@ AVFrame* VdecDecoder::ConvertNV12Frame(AVFrame& frame) {
     nv12_frame->crop_right = frame.crop_right;
     nv12_frame->opaque = frame.opaque;
 
-    av_frame_get_buffer(nv12_frame, 0);
+    if (av_frame_get_buffer(nv12_frame, 0) < 0) {
+        av_frame_free(&nv12_frame);
+        return nullptr;
+    }
 
+    // 20 Oct 2026 audit: the context was built once, so a decoder reused for a movie of another
+    // size or format converted with the old plan (rows of the old width overran the new buffer).
+    // sws_getCachedContext returns the same context while the parameters match.
+    m_sws_context = sws_getCachedContext(m_sws_context, frame.width, frame.height,
+                                         AVPixelFormat(frame.format), nv12_frame->width,
+                                         nv12_frame->height, AV_PIX_FMT_NV12,
+                                         SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
     if (m_sws_context == nullptr) {
-        m_sws_context = sws_getContext(frame.width, frame.height, AVPixelFormat(frame.format),
-                                       nv12_frame->width, nv12_frame->height, AV_PIX_FMT_NV12,
-                                       SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+        av_frame_free(&nv12_frame);
+        return nullptr;
     }
 
     const auto res = sws_scale(m_sws_context, frame.data, frame.linesize, 0, frame.height,
