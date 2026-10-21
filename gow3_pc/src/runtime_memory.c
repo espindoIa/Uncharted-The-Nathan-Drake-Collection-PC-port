@@ -1042,9 +1042,22 @@ void runtime_memory_set_gpu_hooks(GpuRange map, GpuRange unmap, GpuRange invalid
  * read-write lock there cost Uncharted 2 ~15% of the GPU thread (winpthreads, 16 Oct). */
 static const void *cached_backing(uintptr_t address, uint64_t size);
 static void cache_region(size_t i);
+/* gow3 21 Oct 2026: GPU fence and label values (4 or 8 bytes, naturally aligned) are stored with
+ * one atomic release store, never a runtime-sized memcpy: the Bloodborne port (same shadPS4 core)
+ * fixed a heap-corruption crash this way. A guest thread polling the label sees one whole value,
+ * and the data the GPU wrote before it. Other sizes keep memcpy. */
+static void store_backing(void *dst, const void *src, uint64_t size) {
+    if (size==4 && ((uintptr_t)dst & 3)==0) {
+        uint32_t v; memcpy(&v,src,4);
+        __atomic_store_n((uint32_t *)dst,v,__ATOMIC_RELEASE);
+    } else if (size==8 && ((uintptr_t)dst & 7)==0) {
+        uint64_t v; memcpy(&v,src,8);
+        __atomic_store_n((uint64_t *)dst,v,__ATOMIC_RELEASE);
+    } else memcpy(dst,src,size);
+}
 /* Writes through the backing view; 0 when part of the range has no backing. */
 int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t size) {
-    { const void *fast=cached_backing(address,size); if (fast) { memcpy((void *)fast,data,size); return 1; } }
+    { const void *fast=cached_backing(address,size); if (fast) { store_backing((void *)fast,data,size); return 1; } }
     read_lock();
     { size_t first=vma_index(address); if (first<vma_count && vmas[first].start<=address) cache_region(first); }
     int ok=1;
@@ -1052,7 +1065,7 @@ int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t s
         size_t i=vma_index(at);
         if (i==vma_count || vmas[i].start>at || vmas[i].kind==KIND_RESERVED) { ok=0; break; }
         uint64_t n=(vmas[i].end<end ? vmas[i].end : end)-at;
-        memcpy(backing_base+vmas[i].phys+(at-vmas[i].start),(const unsigned char *)data+(at-address),n);
+        store_backing(backing_base+vmas[i].phys+(at-vmas[i].start),(const unsigned char *)data+(at-address),n);
         at+=n;
     }
     read_unlock();

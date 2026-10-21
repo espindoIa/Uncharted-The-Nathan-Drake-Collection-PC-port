@@ -618,7 +618,7 @@ void SignalEop(const PM4CmdEventWriteEop& eop) {
             Gow3WriteLog::Note(reinterpret_cast<u64>(address), &data, num_bytes, Gow3WriteLog::Fence);
             if (!memory->TryWriteBacking(address, &data, num_bytes)) {
                 const Vulkan::GpuWriteSite site{5};
-                memcpy(address, &data, num_bytes);
+                StoreFenceValue(address, data, num_bytes);
             }
         },
         [] { SignalEopInterrupt(); });
@@ -790,7 +790,7 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
                 [](VAddr, u16, u16) {},
                 [](void* address, u64 value, u32 num_bytes) {
                     if (!Core::Memory::Instance()->TryWriteBacking(address, &value, num_bytes)) {
-                        std::memcpy(address, &value, num_bytes);
+                        StoreFenceValue(address, value, num_bytes);
                     }
                 });
         });
@@ -829,7 +829,7 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
                 }
             }
             const Vulkan::GpuWriteSite site{5};
-            std::memcpy(address, &value, num_bytes);
+            StoreFenceValue(address, value, num_bytes);
         });
 }
 
@@ -953,7 +953,7 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
         Gow3WriteLog::Note(reinterpret_cast<u64>(address), &value, num_bytes, Gow3WriteLog::Fence);
         if (!memory->TryWriteBacking(address, &value, num_bytes)) {
             const Vulkan::GpuWriteSite site{5};
-            memcpy(address, &value, num_bytes);
+            StoreFenceValue(address, value, num_bytes);
         }
     };
     if (event_eos.command == PM4CmdEventWriteEos::Command::SignalFence) {

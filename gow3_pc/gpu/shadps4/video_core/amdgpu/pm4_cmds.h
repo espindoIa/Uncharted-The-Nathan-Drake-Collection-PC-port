@@ -24,6 +24,20 @@
 
 namespace AmdGpu {
 
+/// gow3 21 Oct 2026: stores a fence/label value (4 or 8 bytes) with one atomic release store, never
+/// a runtime-sized memcpy. The Bloodborne port (same shadPS4 core) fixed a heap-corruption crash
+/// by making its label stores atomic releases: a guest thread polling the label must see one whole
+/// value, and everything the GPU wrote before it. Other sizes and unaligned addresses keep memcpy.
+inline void StoreFenceValue(void* address, u64 value, u32 num_bytes) {
+    if (num_bytes == sizeof(u32) && (reinterpret_cast<uintptr_t>(address) & 3) == 0) {
+        __atomic_store_n(static_cast<u32*>(address), static_cast<u32>(value), __ATOMIC_RELEASE);
+    } else if (num_bytes == sizeof(u64) && (reinterpret_cast<uintptr_t>(address) & 7) == 0) {
+        __atomic_store_n(static_cast<u64*>(address), value, __ATOMIC_RELEASE);
+    } else {
+        std::memcpy(address, &value, num_bytes);
+    }
+}
+
 enum class PM4ShaderType : u32 {
     ShaderGraphics = 0,
     ShaderCompute = 1,
@@ -1046,7 +1060,7 @@ struct PM4CmdReleaseMem {
 
     void SignalFence(auto&& signal_irq, auto&& gds_to_mem) const {
         SignalFence(signal_irq, gds_to_mem, [](void* address, u64 value, u32 num_bytes) {
-            std::memcpy(address, &value, num_bytes);
+            StoreFenceValue(address, value, num_bytes);
         });
     }
 
