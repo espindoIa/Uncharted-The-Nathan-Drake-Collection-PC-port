@@ -3601,3 +3601,32 @@ Results (ab2.sh live toggle in one session, 6 rounds x 10 s alternating windows 
 - 4K: FPS 92.28 vs 91.28, +1.00 [+0.62, +1.38]; median -0.15 ms [-0.22, -0.08]; p99 -0.08 ms [-0.30, +0.11]; 1% low +0.45 FPS [-1.23, +2.20].
 
 Not verified: U1 and U2; other U3 chapters (one scene measured); a long soak; 4K with DLSS model M. The reader paths ran only about once a frame in the verify run, so the check covers the write path far more than the three reader sites. The verify run was 1080p only. p99 and 1% low intervals at both resolutions include 0, so no tail-latency claim.
+
+## 22 October 2026: fence wait for its packet's position instead of a full drain (tried, not kept)
+
+All numbers measured 22 Oct on U3 chapter 2 meat market, 1080p, DLAA model K, build 6faf3ff plus the change below. The code is not committed: the diff is saved outside the repository as `C:\dev\bench\fence_position_wait.patch` (13.7 KB; `git apply` it on 6faf3ff to retry). It touched liverpool.cpp / .h, vk_draw_pipe.h, vk_rasterizer.cpp / .h and gow3_toggles.h.
+
+Idea: on its slow path Liverpool::LandDeferredFenceFor (liverpool.cpp) drains the whole draw pipe (about 3,400 a second, 9.4% of stage A in the wait trace, 99.6% ending with the fence met; see the section above). Tried: when the label has a queued write in pending_fences, stage A waits only until stage B has run that packet (DrawPipe::WaitReached(position), position of the newest covering pending entry). Then it reads the deferred value (BufferCache::DeferredFenceTick, under deferred_values_mutex) and passes if the wait is met. Anything else falls back to the full drain.
+- Toggle: Disabled2 bit 8388608 FencePositionWait (set = old path).
+- Check mode: GOW3_FENCE_VERIFY=1 (off by default) also does the old full drain and compares the value.
+- Counters: on the GOW3_WAIT_TRACE fence line.
+- Stricter than GOW3_FEWER_DRAINS=1 (no wait at all), which made a multithreaded readback race frequent (2 of 5 multithreaded U3 runs stopped flipping, see the FEWER_DRAINS notes above in this file).
+
+Check run (GOW3_FENCE_VERIFY=1, 30 s, 79.9 FPS in verify mode):
+- Verify mismatches: 0.
+- Per 5 s window: 3,400-16,300 position waits; 99.5% met after the position wait; 0.2-0.5% fell back to the drain.
+
+Why it was dropped: the wait itself barely got shorter.
+- Average position wait 21.8-24.6 us (three windows) against 26.7 us for the old full drain: about 14% shorter.
+- That is at most about 1.3% of stage A time (about 0.5-1 FPS). The fence's packet is nearly always close to the head of the queue, and stage B's latency to finish it is what stage A waits for.
+- Under the 1 FPS threshold set for this series.
+- The path keeps stage B busy while stage A goes on, which is the window the FEWER_DRAINS race needs, so it would need a long multithreaded soak first.
+
+The 1080p live-toggle A/B (6+6 windows) is NOT usable: it ran at 74.9 vs 73.8 FPS (instead of the usual 93-96) with a difference of +1.12 [-7.92, +10.84] FPS. The machine was loaded by other programs (Chrome about 1.2 cores, CPU load 46-82% with the game stopped).
+
+What would still cut the fence and fault-flush waits (not done):
+- Make stage B finish packets faster (what the cuts so far did).
+- Have stage B do the fence check as part of the packet, so stage A does not wait at all. Needs the same race analysis as above.
+- Fault-flush commands (about 9% of stage A, 190 a second, about 480 us each) were not touched.
+
+Not verified: no 4K run, no soak run, no GOW3_READBACK_RACE run; U1 and U2; other U3 chapters (one scene measured); each number is from one run.
