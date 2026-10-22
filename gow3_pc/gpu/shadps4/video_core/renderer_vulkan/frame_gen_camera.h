@@ -210,6 +210,22 @@ inline FrameGenCamera Assemble(const Mat4& view_to_clip, const Mat4& view_to_pre
 
 } // namespace frame_gen_detail
 
+/// A camera cut between two real frames (NGX wants reset=true there, or it warns "Scene change
+/// detected without Reset flag" and blends two shots): either camera invalid, the view direction
+/// turns more than 30 degrees, or fov_y changes by more than 20%. The 22 Oct 2026 shortcut: no
+/// position test, the games' world units are not known (a teleport with the same view stays a miss);
+/// add one when a unit is measured. fov_y is a default for the scene sources (MakeFrameGenCamera
+/// leaves it), so that test only fires where a source fills it.
+inline bool IsCameraCut(const FrameGenCamera& prev, const FrameGenCamera& cur) {
+    if (!prev.valid || !cur.valid) {
+        return true;
+    }
+    const float dot = prev.fwd[0] * cur.fwd[0] + prev.fwd[1] * cur.fwd[1] + prev.fwd[2] * cur.fwd[2];
+    constexpr float cos_30_degrees = 0.8660254f;
+    return !(dot >= cos_30_degrees) ||
+           !(std::abs(cur.fov_y - prev.fov_y) <= 0.2f * prev.fov_y);
+}
+
 /// General 4x4 inverse (row-major, double inside); nullopt when it is singular.
 inline std::optional<std::array<float, 16>> InvertMatrix4(const std::array<float, 16>& m) {
     frame_gen_detail::Mat4 a;

@@ -1513,15 +1513,16 @@ struct FgSamples {
 /// gap = the slept time before the real present, interval = the raw real interval it halves.
 struct FgStats {
     FgClock::time_point stats_at{};
-    u32 real{}, gen{}, menu{}, noinput{}, hdr{}, acquire{};
+    u32 real{}, gen{}, menu{}, noinput{}, hdr{}, acquire{}, cuts{};
     FgSamples eval, present, gap, interval;
 
     void Print(bool std_sleep) {
         std::printf("FrameGen: real=%u gen=%u skipped(menu=%u noinput=%u hdr=%u acquire=%u) "
                     "eval_ms=%.2f/%.2f present_ms=%.2f gap_ms=%.2f/%.2f real_interval_ms=%.2f "
-                    "std_sleep=%d\n",
+                    "std_sleep=%d cuts=%u\n",
                     real, gen, menu, noinput, hdr, acquire, eval.Mean(), eval.P99(),
-                    present.Mean(), gap.Mean(), gap.P99(), interval.Mean(), std_sleep ? 1 : 0);
+                    present.Mean(), gap.Mean(), gap.P99(), interval.Mean(), std_sleep ? 1 : 0,
+                    cuts);
         std::fflush(stdout);
         *this = FgStats{.stats_at = stats_at};
     }
@@ -1644,6 +1645,14 @@ bool Presenter::PresentGenerated(Frame* frame) {
     const auto real_interval = start - frame_gen_last_real;
     frame_gen_last_real = start;
 
+    // 22 Oct 2026: a camera cut resets NGX (U3 cutscenes with the development nvngx_dlssg.dll
+    // warned "Scene change detected without Reset flag"). Not counted when a reset is pending anyway.
+    const bool camera_cut = Vulkan::IsCameraCut(frame_gen_prev_camera, inputs.camera);
+    frame_gen_prev_camera = inputs.camera;
+    if (camera_cut && !frame_gen_reset) {
+        ++stats.cuts;
+    }
+
     const vk::Image output = vk::Image(frame_gen_output);
     const vk::ImageSubresourceRange color{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
     const auto cmdbuf = scheduler.CommandBuffer();
@@ -1674,7 +1683,7 @@ bool Presenter::PresentGenerated(Frame* frame) {
                     .camera = inputs.camera,
                     .jitter_x = inputs.jitter[0],
                     .jitter_y = inputs.jitter[1],
-                    .reset = frame_gen_reset || inputs.reset,
+                    .reset = frame_gen_reset || inputs.reset || camera_cut,
                     .hdr = frame->is_hdr,
                 });
     // NGX may leave Vulkan state changed (DLSS guide 5.2.5).

@@ -11,6 +11,7 @@
 #include <condition_variable>
 
 #include "core/libraries/videoout/buffer.h"
+#include "video_core/renderer_vulkan/frame_gen_camera.h"
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -173,6 +174,7 @@ private:
     vk::Format frame_gen_format{};
     std::optional<Dlss::FrameGenDesc> frame_gen_failed; ///< creation failed for this one
     bool frame_gen_reset{true};
+    FrameGenCamera frame_gen_prev_camera; ///< the last real frame evaluated, for IsCameraCut
     std::atomic<bool> frame_gen_active{false};
     std::chrono::steady_clock::time_point frame_gen_last_real{};
 };

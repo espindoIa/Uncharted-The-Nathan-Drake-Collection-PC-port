@@ -544,6 +544,41 @@ int main() {
             Fail("InvertMatrix4", "singular matrix refused", 1, 0);
         }
     }
+    // 5. Camera cuts: a small turn is not one; a big turn, a big fov change or an invalid camera is.
+    {
+        const SceneCamera scene = MakeScene(MakePose(0.7, -0.17, 0.05, {12.5, 3.2, -40.1}, false),
+                                            Projection(60.0, aspect, 0.1, 3000.0));
+        // The turn is in the third angle (about_y, the one that moves the forward axis most).
+        const auto camera_at = [&](double extra_turn) {
+            const SceneCamera turned = MakeScene(MakePose(0.7, -0.17, 0.05 + extra_turn,
+                                                          {12.5, 3.2, -40.1}, false),
+                                                 scene.proj);
+            FrameGenCamera c = Vulkan::MakeFrameGenCamera(
+                turned.inv_view, Multiply(scene.view, turned.inv_view), turned.proj, scene.proj);
+            if (!c.valid) {
+                Fail("camera cut", "valid", 0, 1);
+            }
+            return c;
+        };
+        const FrameGenCamera base = camera_at(0.0);
+        if (Vulkan::IsCameraCut(base, base)) {
+            Fail("camera cut", "identical cameras are not a cut", 1, 0);
+        }
+        if (Vulkan::IsCameraCut(base, camera_at(5.0 * kPi / 180.0))) {
+            Fail("camera cut", "5 degree turn is not a cut", 1, 0);
+        }
+        if (!Vulkan::IsCameraCut(base, camera_at(kPi / 2.0))) {
+            Fail("camera cut", "90 degree turn is a cut", 0, 1);
+        }
+        if (!Vulkan::IsCameraCut(FrameGenCamera{}, base) || !Vulkan::IsCameraCut(base, FrameGenCamera{})) {
+            Fail("camera cut", "invalid camera is a cut", 0, 1);
+        }
+        FrameGenCamera wide = base;
+        wide.fov_y = base.fov_y * 1.4f;
+        if (!Vulkan::IsCameraCut(base, wide)) {
+            Fail("camera cut", "40% fov change is a cut", 0, 1);
+        }
+    }
     std::puts("frame gen camera: ok");
     return 0;
 }
