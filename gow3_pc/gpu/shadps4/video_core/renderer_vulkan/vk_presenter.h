@@ -37,7 +37,10 @@ struct Frame {
     u64 ready_tick;
     bool is_hdr{false};
     u8 id{};
-
+    /// gow3 22 Oct 2026: the frame's id for NVIDIA Reflex, the ordinal of the guest flip it shows
+    /// (Gow3Reflex::PreparedFlip, set when the frame is prepared); 0 for the black frames drawn
+    /// without a flip.
+    u64 serial{};
 };
 
 enum SchedulerType {

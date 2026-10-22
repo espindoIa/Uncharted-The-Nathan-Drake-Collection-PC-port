@@ -4,6 +4,7 @@
 // gow3: glue between the C loader and the vendored shadPS4 video core.
 #include "gow3_overlay.h"
 #include "gow3_png.h"
+#include "gow3_reflex.h"
 #include "gow3_settings.h"
 #include "gow3_trophies.h"
 #include "gow3_copy.h"
@@ -624,6 +625,10 @@ ScreenshotRequests ConsumeScreenshotRequests() { return {}; }
 
 extern "C" int gow3gpu_overlay_captures_input(void) {
     return Gow3Overlay::CapturesInput() ? 1 : 0;
+}
+
+extern "C" void gow3gpu_reflex_input_sample(void) {
+    Gow3Reflex::InputSample();
 }
 
 extern "C" int gow3gpu_text_input_begin(const char* initial, const char* prompt) {

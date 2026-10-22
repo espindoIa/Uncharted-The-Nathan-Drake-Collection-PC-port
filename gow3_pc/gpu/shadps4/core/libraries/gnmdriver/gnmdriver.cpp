@@ -4,6 +4,7 @@
 #include <mutex>
 
 #include "gow3_profiler.h"
+#include "gow3_reflex.h"
 #include "gnm_error.h"
 #include "gnmdriver.h"
 
@@ -2215,6 +2216,8 @@ static inline s32 PerformSubmit(u32 count, const u32* dcb_gpu_addrs[], u32* dcb_
     if (DebugState.ShouldPauseInSubmit()) {
         DebugState.PauseGuestThreads();
     }
+    // gow3 22 Oct 2026: the first submit of a frame is where Reflex's render submit starts.
+    Gow3Reflex::GuestSubmit();
 
     if (send_init_packet) {
         if (sdk_version < Common::ElfInfo::FW_200) {
@@ -2347,8 +2350,15 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
         return patch_result;
     }
 
-    return PerformSubmit(count, const_cast<const u32**>(dcb_gpu_addrs), dcb_sizes_in_bytes,
-                         const_cast<const u32**>(ccb_gpu_addrs), ccb_sizes_in_bytes);
+    const s32 submit_result =
+        PerformSubmit(count, const_cast<const u32**>(dcb_gpu_addrs), dcb_sizes_in_bytes,
+                      const_cast<const u32**>(ccb_gpu_addrs), ccb_sizes_in_bytes);
+    if (submit_result == ORBIS_OK) {
+        // gow3 22 Oct 2026: the flip was accepted and its frame submitted (Reflex: the guest's
+        // frame ends, the next one starts; the presenter counts the same flips).
+        Gow3Reflex::GuestFlipRequest();
+    }
+    return submit_result;
 }
 
 s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,

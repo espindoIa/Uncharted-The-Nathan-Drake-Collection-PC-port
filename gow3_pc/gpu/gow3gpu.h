@@ -43,6 +43,11 @@ void gow3gpu_trophy_list(const char *pack_path, int list, const uint32_t earned[
 void gow3gpu_trophy_earned(int id);
 /* 1 while the in-game settings menu is open: the game's pad input is held neutral. */
 int gow3gpu_overlay_captures_input(void);
+/* gow3 22 Oct 2026, NVIDIA Reflex (gpu/shim/gow3_reflex.cpp): the guest is about to read the pad.
+ * The first read after a flip request waits for the driver's frame pacing (setting reflex 1 or 2;
+ * at most 40 ms) and marks the start of the frame's simulation and input sampling; every other
+ * read, and reflex 0 without a log, returns at once. Call it outside any lock. */
+void gow3gpu_reflex_input_sample(void);
 /* Mouse movement since the last call (pixels) and held sources (bit 0 left, 1 middle, 2 right,
  * 3 X1, 4 X2, 5 wheel up, 6 wheel down); returns 1 while the mouse is captured (gow3_mouse.h). */
 int gow3gpu_mouse_take(float *dx, float *dy, unsigned *buttons);

@@ -169,6 +169,10 @@ enum : std::uint64_t {
     /// map (its find/assign were 3.5% of stage B; cs 8f067540 writes the same ~3 pages per
     /// dispatch every frame). GOW3_PAGETICK_VERIFY=1 checks each cached read against the map.
     PageTickCache = 4194304,
+    /// Bit set: NVIDIA Reflex is off (no low latency mode, no sleep before the first pad read of a
+    /// frame, no markers unless GOW3_REFLEX_LOG is set), whatever the `reflex` setting says: a live
+    /// A/B in one run (gow3_reflex.cpp, 22 Oct 2026).
+    ReflexSleep = 8388608,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

@@ -14,6 +14,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
+#include "gow3_reflex.h"
 #include "gow3_settings.h"
 #include "gow3_toggles.h"
 #include "imgui/renderer/imgui_core.h"
@@ -61,7 +62,16 @@ void Swapchain::Create(u32 width_, u32 height_) {
     const vk::SharingMode sharing_mode =
         exclusive ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent;
     const auto format = needs_hdr ? SURFACE_FORMAT_HDR : surface_format;
-    const vk::SwapchainCreateInfoKHR swapchain_info = {
+    // gow3 22 Oct 2026: with VK_NV_low_latency2 (Gow3Reflex) every swapchain is created for low
+    // latency mode, so the menu can switch Reflex off, on and boost live; the mode itself is set
+    // after the swapchain exists (OnSwapchain below). A driver that offers the extension but
+    // refuses such a swapchain (not seen; hybrid laptops are the untested case) must not stop the
+    // game: it gets the plain swapchain, without Reflex, for the rest of the run.
+    static bool latency_swapchains = true;
+    bool latency = latency_swapchains && Gow3Reflex::Available();
+    const vk::SwapchainLatencyCreateInfoNV latency_info = {.latencyModeEnable = true};
+    vk::SwapchainCreateInfoKHR swapchain_info = {
+        .pNext = latency ? &latency_info : nullptr,
         .surface = surface,
         .minImageCount = image_count,
         .imageFormat = format.format,
@@ -81,9 +91,19 @@ void Swapchain::Create(u32 width_, u32 height_) {
     };
 
     auto [swapchain_result, chain] = instance.GetDevice().createSwapchainKHR(swapchain_info);
+    if (latency && swapchain_result != vk::Result::eSuccess) {
+        std::printf("Swapchain: low latency mode refused (%s); no Reflex from now on\n",
+                    vk::to_string(swapchain_result).c_str());
+        latency_swapchains = latency = false;
+        swapchain_info.pNext = nullptr;
+        const auto retry = instance.GetDevice().createSwapchainKHR(swapchain_info);
+        swapchain_result = retry.result;
+        chain = retry.value;
+    }
     ASSERT_MSG(swapchain_result == vk::Result::eSuccess, "Failed to create swapchain: {}",
                vk::to_string(swapchain_result));
     swapchain = chain;
+    Gow3Reflex::OnSwapchain(latency ? swapchain : vk::SwapchainKHR{});
 
     SetupImages();
     RefreshSemaphores();
@@ -356,6 +376,7 @@ void Swapchain::Destroy() {
     images_view.clear();
 
     if (swapchain) {
+        Gow3Reflex::OnSwapchain(vk::SwapchainKHR{}); // no marker or sleep names it from here on
         device.destroySwapchainKHR(swapchain);
     }
 

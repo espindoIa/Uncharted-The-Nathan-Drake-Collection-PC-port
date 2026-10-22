@@ -12,6 +12,7 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/types.h"
+#include "gow3_reflex.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -300,6 +301,7 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
 }
 
 Instance::~Instance() {
+    Gow3Reflex::Shutdown(GetDevice());
     ImGui::Core::Shutdown(GetDevice());
     VideoCore::FlushImageReaper();
     vmaDestroyAllocator(allocator);
@@ -377,7 +379,8 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE,
         vk::PhysicalDevicePipelineBinaryFeaturesKHR,
         vk::PhysicalDeviceMaintenance5FeaturesKHR, vk::PhysicalDeviceMemoryPriorityFeaturesEXT,
-        vk::PhysicalDevicePageableDeviceLocalMemoryFeaturesEXT>();
+        vk::PhysicalDevicePageableDeviceLocalMemoryFeaturesEXT,
+        vk::PhysicalDevicePresentIdFeaturesKHR>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -439,10 +442,38 @@ bool Instance::CreateDevice() {
         std::printf("GPU device fault reports enabled: %d\n",int(device_fault));
     }
     // gow3 diagnostics (GOW3_DISPLAY_LOG): when each frame reached the screen (vk_swapchain).
+    bool present_id = false;
     if (const char* log = std::getenv("GOW3_DISPLAY_LOG"); log && log[0]) {
-        present_wait = add_extension(VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
-                       add_extension(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+        present_id = add_extension(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+        present_wait = present_id && add_extension(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
         std::printf("Display log: present wait %s\n", present_wait ? "on" : "unavailable");
+    }
+    // gow3 22 Oct 2026: NVIDIA Reflex (gow3_reflex.cpp) needs VK_NV_low_latency2 and, as its
+    // dependency, VK_KHR_present_id with its feature (the display log may have added both
+    // already: never twice). Only where the driver offers the extension, so AMD and Intel devices
+    // are created as before. GOW3_REFLEX_EXT=0 keeps it off.
+    bool low_latency = false;
+    u32 low_latency_revision = 0;
+    const bool offers_low_latency = std::any_of(
+        available_extensions.begin(), available_extensions.end(),
+        [](const std::string& name) { return name == VK_NV_LOW_LATENCY_2_EXTENSION_NAME; });
+    if (offers_low_latency && Gow3Reflex::ExtensionWanted()) {
+        if (!present_id && feature_chain.get<vk::PhysicalDevicePresentIdFeaturesKHR>().presentId) {
+            present_id = add_extension(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+        }
+        low_latency = present_id && add_extension(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
+        if (low_latency) {
+            // The driver's revision (2 on 616.92) decides what it does with submissions.
+            const auto [props_result, props] = physical_device.enumerateDeviceExtensionProperties();
+            if (props_result == vk::Result::eSuccess) {
+                for (const auto& prop : props) {
+                    if (std::string_view{prop.extensionName.data()} ==
+                        VK_NV_LOW_LATENCY_2_EXTENSION_NAME) {
+                        low_latency_revision = prop.specVersion;
+                    }
+                }
+            }
+        }
     }
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
     pipeline_binaries = PipelineBinaryCacheRequested() && maintenance_5 &&
@@ -893,8 +924,10 @@ bool Instance::CreateDevice() {
     if (!address_binding_report) {
         device_chain.unlink<vk::PhysicalDeviceAddressBindingReportFeaturesEXT>();
     }
-    if (!present_wait) {
+    if (!present_id) {
         device_chain.unlink<vk::PhysicalDevicePresentIdFeaturesKHR>();
+    }
+    if (!present_wait) {
         device_chain.unlink<vk::PhysicalDevicePresentWaitFeaturesKHR>();
     }
     if (!memory_priority) {
@@ -912,6 +945,7 @@ bool Instance::CreateDevice() {
     device = std::move(dev);
 
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*device);
+    Gow3Reflex::Init(*device, low_latency, low_latency_revision);
     pipeline_binaries =
         InitializePipelineBinaryCache(*device, pipeline_binaries, pipeline_binary_global_key);
     if (Dlss* dlss = Dlss::Get()) {

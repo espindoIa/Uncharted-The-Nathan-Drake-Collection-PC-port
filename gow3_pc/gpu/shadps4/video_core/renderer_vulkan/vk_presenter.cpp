@@ -13,6 +13,7 @@
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "gow3_overlay.h"
+#include "gow3_reflex.h"
 #include "gow3_settings.h"
 #include "gow3_graphics.h"
 #include "gow3_trigger_files.h"
@@ -642,6 +643,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     SubmitLog::Event("F0", "%llx", static_cast<unsigned long long>(cpu_address));
     Frame* frame = GetRenderFrame();
     SubmitLog::Event("F1", "%u", frame->id);
+    // gow3 22 Oct 2026: the frame's Reflex id is its flip's ordinal (the guest counts the same
+    // flips when it asks for them, Gow3Reflex::GuestFlipRequest).
+    frame->serial = Gow3Reflex::PreparedFlip();
 
     const auto frame_subresources = vk::ImageSubresourceRange{
         .aspectMask = vk::ImageAspectFlagBits::eColor,
@@ -874,6 +878,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     draw_scheduler.Flush(info);
     WatchGpuDone(draw_scheduler.GetWorkSemaphore(), frame->ready_tick);
     SubmitLog::Event("F2", "%u %llu", frame->id, static_cast<unsigned long long>(frame->ready_tick));
+    // gow3 22 Oct 2026: the frame's last submission is out, before the wait below: that one is the
+    // GPU's (up to a frame when it is the bottleneck), and counted as render submit time it would
+    // tell the driver the CPU needs that long, so Reflex would release the game that much earlier.
+    Gow3Reflex::RenderSubmitEnd(frame->serial);
 
     // gow3: the GPU command thread runs at most GOW3_FRAMES_AHEAD (default 1) guest frames
     // ahead of the GPU: it waits here for the frame that many flips back. When the GPU is the
@@ -1095,6 +1103,9 @@ static void WatchGpuDone(Semaphore* semaphore, u64 tick) {
 Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     // Request a free presentation frame.
     Frame* frame = GetRenderFrame();
+    // gow3 22 Oct 2026: a blank frame the guest flipped (buffer -1, not the present thread's black
+    // frame) is a flip like any other for Reflex: the guest counted it (GuestFlipRequest).
+    frame->serial = present_thread ? 0 : Gow3Reflex::PreparedFlip();
 
     auto& scheduler = present_thread ? present_scheduler : draw_scheduler;
     scheduler.EndRendering();
@@ -1397,11 +1408,22 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     }
 
     // Present to swapchain.
+    // gow3 22 Oct 2026: Reflex's present markers, for game frames only (not the redraw of the last
+    // frame, nor the black or loading frames), outside the present lock: markers are driver calls.
+    // With the present queue shared with the graphics queue the start marker comes before the wait
+    // for the submit lock, so it also counts that wait.
+    const bool reflex_frame = is_game_frame && !is_reusing_frame && frame->serial != 0;
+    if (reflex_frame) {
+        Gow3Reflex::PresentStart(frame->serial);
+    }
     {
         std::scoped_lock present_lock{PresentLock(instance)};
         if (!swapchain.Present() && window.GetWidth() != 0 && window.GetHeight() != 0) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
+    }
+    if (reflex_frame) {
+        Gow3Reflex::PresentEnd(frame->serial);
     }
     SubmitLog::Event("A3", "%u", frame->id);
 

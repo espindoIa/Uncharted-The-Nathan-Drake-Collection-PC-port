@@ -11,6 +11,7 @@
 #include "core/libraries/videoout/video_out.h"
 #include "core/libraries/videoout/videoout_error.h"
 #include "core/platform.h"
+#include "gow3_reflex.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
@@ -181,6 +182,10 @@ s32 PS4_SYSV_ABI sceVideoOutSubmitFlip(s32 handle, s32 bufferIndex, s32 flipMode
         return ORBIS_VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
     }
 
+    // gow3 22 Oct 2026: an accepted flip (a refused one is not counted) ends the guest's frame for
+    // Reflex; the presenter counts the same flips when it prepares their frames. The flip may be
+    // prepared before this line runs: the lag Reflex prints can show -1 for a moment.
+    Gow3Reflex::GuestFlipRequest();
     return ORBIS_OK;
 }
 

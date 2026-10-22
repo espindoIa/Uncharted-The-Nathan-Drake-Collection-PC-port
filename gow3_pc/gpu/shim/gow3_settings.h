@@ -92,6 +92,10 @@ struct Values {
     /// Set by the presenter: the game's image and the window it is shown in, in pixels.
     std::atomic<int> image_width{0}, image_height{0}, window_width{0}, window_height{0};
     std::atomic<int> frames_queued{1};
+    /// gow3 22 Oct 2026: NVIDIA Reflex (gow3_reflex.h, VK_NV_low_latency2): 0 off, 1 on, 2 on with
+    /// boost. Live. The driver then paces the game's frame start; GPUs or drivers without the
+    /// extension ignore it.
+    std::atomic<int> reflex{0};
     // Startup: run.py turns them into patches and environment variables; "Apply and restart".
     std::atomic<int> render_resolution{0};
     std::atomic<int> engine_fps{120};

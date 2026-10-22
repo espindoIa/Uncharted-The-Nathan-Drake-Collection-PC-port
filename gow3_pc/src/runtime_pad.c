@@ -812,6 +812,7 @@ static ABI int32_t pad_close(int32_t handle) {
 static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!data) return ERR_INVALID_ARG;
+    gow3gpu_reflex_input_sample(); /* before the lock: the first read of a frame may sleep (Reflex) */
     pthread_mutex_lock(&lock);
     sample(data); ++reads;
     pthread_mutex_unlock(&lock);
@@ -831,6 +832,7 @@ static int buffered_report(PadData *out,const PadData *sampled) {
 static ABI int32_t pad_read(int32_t handle, PadData *data, int32_t count) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!data || count<1 || count>64) return ERR_INVALID_ARG;
+    gow3gpu_reflex_input_sample(); /* before the lock, as in pad_read_state */
     pthread_mutex_lock(&lock);
     PadData sampled;
     sample(&sampled); ++reads;
