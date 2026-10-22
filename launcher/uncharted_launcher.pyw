@@ -194,6 +194,7 @@ INI_DEFAULTS = {
     "display_mode": "windowed", "vsync": "1", "fps_limit": "60", "frames_queued": "1",
     "async_shaders": "1", "fsr1": "0", "rcas": "1", "rcas_strength": "75", "show_fps": "1",
     "upscaler": "off", "preset": "0", "dlss_model": "k", "gpu_id": "-1", "anisotropy": "16",
+    "reflex": "0", "frame_gen": "0",
 }
 # FSR/DLSS quality modes (the runtime's preset key, also in the in-game menu): 0 draws the scene at
 # the render resolution (Native AA / DLAA); the others draw it smaller and rebuild it at the render
@@ -212,7 +213,8 @@ DLSS_MODELS = [("j", "Model J"), ("k", "Model K"), ("l", "Model L"), ("m", "Mode
 # downloads it from NVIDIA's DLSS repository and the launcher copies it next to the runtime after
 # checking NVIDIA's signature. gow3_dlss.dll (the bridge) is shipped.
 NGX_DLL = "nvngx_dlss.dll"
-NGX_DOWNLOAD_URL = "https://github.com/NVIDIA/DLSS/tree/main/lib/Windows_x86_64/rel"
+NGX_FG_DLL = "nvngx_dlssg.dll"  # DLSS Frame Generation, same repository and rules
+NGX_DOWNLOAD_URL ="https://github.com/NVIDIA/DLSS/tree/main/lib/Windows_x86_64/rel"
 
 
 def dlss_bridge_present():
@@ -1976,6 +1978,12 @@ class Launcher:
                         "Quality and Balanced; M is made for Performance mode. With DLAA at 4K, M costs about "
                         "5.7 ms more per frame than K (RTX 5070); in Performance mode about 0.9 ms.",
                         DLSS_MODELS, recommended="k")
+        self.ini_choice(page, "frame_gen", "DLSS Frame Generation",
+                        "Adds one AI-generated frame between every two: about twice the frames shown, with a "
+                        "little more input delay. Needs an RTX 40 or newer, an anti-aliasing mode (TAA, FSR or "
+                        "DLSS) and NVIDIA's nvngx_dlssg.dll (add it below). The frame rate limit counts the "
+                        "frames shown. Also in the in-game menu.",
+                        [("0", "Off"), ("1", "On")], recommended="0")
         self.ini_choice(page, "display_mode", "Display mode",
                         "A normal window, a borderless window (quick Alt+Tab) or fullscreen.",
                         [("windowed", "Windowed"), ("borderless", "Borderless"), ("fullscreen", "Fullscreen")])
@@ -1995,6 +2003,17 @@ class Launcher:
                 "NVIDIA RTX GPUs. Needs NVIDIA's nvngx_dlss.dll, which is not included: get it from NVIDIA's "
                 "DLSS page (nvngx_dlss.dll in lib/Windows_x86_64/rel), then add it here. DLSS is then listed "
                 "under Anti-aliasing.", dlss)
+        elif dlss_available() and not (ROOT / "gow3_pc" / "out" / NGX_FG_DLL).is_file():
+            def dlssg(parent):
+                holder = tk.Frame(parent, bg=BG)
+                self.flat_button(holder, "Get from NVIDIA", lambda: webbrowser.open(NGX_DOWNLOAD_URL)).pack(
+                    side="left", padx=(0, self.px(8)))
+                self.flat_button(holder, f"Add {NGX_FG_DLL}...", lambda: self.add_ngx(NGX_FG_DLL)).pack(side="left")
+                return holder
+            self.row(
+                page, "NVIDIA DLSS Frame Generation",
+                "NVIDIA RTX 40 or newer. Needs NVIDIA's nvngx_dlssg.dll, which is not included: get it from "
+                "NVIDIA's DLSS page (nvngx_dlssg.dll in lib/Windows_x86_64/rel), then add it here.", dlssg)
 
         def sharpening(parent):
             value = self.ini.get("rcas_strength", "75") if self.ini.get("rcas", "1") == "1" else "off"
@@ -2015,26 +2034,30 @@ class Launcher:
                             [("-1", "Automatic")] + list(gpus), recommended="-1")
         return page
 
-    def add_ngx(self):
+    def add_ngx(self, dll=NGX_DLL):
         from tkinter import filedialog
         source = filedialog.askopenfilename(
-            title=f"Select {NGX_DLL} downloaded from NVIDIA",
-            filetypes=[(NGX_DLL, NGX_DLL), ("DLL files", "*.dll")],
+            title=f"Select {dll} downloaded from NVIDIA",
+            filetypes=[(dll, dll), ("DLL files", "*.dll")],
             initialdir=str(Path.home() / "Downloads"))
         if not source:
             return
         source = Path(source)
-        if source.name.lower() != NGX_DLL:
-            messagebox.showerror(APP_TITLE, f"Choose the file named {NGX_DLL}.")
+        if source.name.lower() != dll:
+            messagebox.showerror(APP_TITLE, f"Choose the file named {dll}.")
             return
         if not ngx_signature_ok(source):
             messagebox.showerror(APP_TITLE, f"{source.name} has no valid NVIDIA signature. Download it again "
                                             "from NVIDIA's DLSS page.")
             return
         try:
-            shutil.copy2(source, ROOT / "gow3_pc" / "out" / NGX_DLL)
+            shutil.copy2(source, ROOT / "gow3_pc" / "out" / dll)
         except OSError as error:
-            messagebox.showerror(APP_TITLE, f"Could not copy {NGX_DLL}: {error}")
+            messagebox.showerror(APP_TITLE, f"Could not copy {dll}: {error}")
+            return
+        if dll == NGX_FG_DLL:
+            messagebox.showinfo(APP_TITLE, "NVIDIA DLSS Frame Generation is ready. Reopen the launcher, then "
+                                           "switch it on under Display.")
             return
         messagebox.showinfo(APP_TITLE, "NVIDIA DLSS is ready. Reopen the launcher, then choose DLSS under "
                                        "Anti-aliasing.")
@@ -2065,6 +2088,11 @@ class Launcher:
                         "Keep 1. 2 can add a few FPS in heavy scenes, but in Uncharted 2 Nate and other "
                         "characters then float a little above the floor.",
                         [("1", "1"), ("2", "2"), ("0", "Unlimited")], recommended="1")
+        self.ini_choice(page, "reflex", "NVIDIA Reflex",
+                        "NVIDIA RTX cards. Lets the driver time the start of each frame for lower input delay. "
+                        "In this port the game is limited by its own CPU work, so it costs frame rate (Uncharted "
+                        "3 at 4K: about 9 FPS) and did not lower input delay. Keep it off.",
+                        [("0", "Off"), ("1", "On"), ("2", "On + Boost")], recommended="0")
         self.ini_toggle(page, "async_shaders", "Compile shaders in the background",
                         "Fewer stutters when you reach new areas. Recommended on.")
 

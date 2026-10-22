@@ -25,6 +25,7 @@
 #include "core/emulator_settings.h"
 #include "gow3_graphics.h"
 #include "gow3_perf_stats.h"
+#include "gow3_reflex.h"
 
 extern "C" void runtime_restart(void); // src/probe.c: hands restart to the launcher
 extern "C" int runtime_gamesettings_active(void); // src/runtime_gamesettings.c
@@ -455,6 +456,15 @@ void ImageTab() {
                 InfoRow("NVIDIA DLSS", "NVIDIA technology");
                 Help("NVIDIA, RTX and DLSS are trademarks of NVIDIA Corporation.");
             }
+            if (s.frame_gen_supported) {
+                static const char* const fg_labels[] = {"Off", "On"};
+                ChoiceRow("DLSS Frame Generation", s.frame_gen, fg_labels, nullptr, int(std::size(fg_labels)),
+                          "Adds one AI-generated frame between every two: about twice the frames shown, with a "
+                          "little more input delay. Needs an RTX 40 or newer, an anti-aliasing mode (TAA, FSR "
+                          "or DLSS) and NVIDIA's nvngx_dlssg.dll. The frame rate limit counts the frames shown.");
+            } else if (const char* fg_problem = s.frame_gen_problem.load()) {
+                InfoRow("DLSS Frame Generation", fg_problem);
+            }
             const int upscaler = s.upscaler;
             const bool sharpens = upscaler == Gow3Settings::UpscalerFsr3 ||
                                   Gow3Settings::IsFsr4(upscaler) ||
@@ -553,6 +563,13 @@ void PerformanceTab() {
         static const char* const queued_labels[] = {"1 (recommended)", "2 (faster; U2 NPCs float)", "Unlimited"};
         ChoiceRow("Frames queued", s.frames_queued, queued_labels, G::FramesQueued.data(),
                   int(G::FramesQueued.size()), "More frames queued: steadier FPS, slower response to input.");
+        if (Gow3Reflex::Available()) {
+            static const char* const reflex_labels[] = {"Off (recommended)", "On", "On + Boost"};
+            ChoiceRow("NVIDIA Reflex", s.reflex, reflex_labels, nullptr, int(std::size(reflex_labels)),
+                      "Lets the NVIDIA driver time the start of each frame for lower input delay. In this port "
+                      "the game is limited by its own CPU work, so it costs frame rate (Uncharted 3 at 4K: "
+                      "about 9 FPS) and did not lower input delay; off is recommended.");
+        }
         CheckRow("Compile new shaders in the background", s.async_shaders,
                  "Fewer stutters in new areas; an object or effect may appear a moment later.");
         ImGui::EndTable();

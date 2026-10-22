@@ -6,6 +6,17 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **New (22 Oct 2026): NVIDIA Reflex option, off by default.** In the in-game menu (Performance) and
+  the launcher (Performance), on NVIDIA cards: Off, On, On + Boost. It did not pay off here: in
+  Uncharted 3 at 4K (chapter 2, DLAA, RTX 5070) it cost about 9 FPS (53.5 down to 44.1) and the
+  driver's own timing showed no lower input delay. Keep it off.
+- **New (22 Oct 2026): DLSS Frame Generation (2x), off by default.** Adds one AI-generated frame
+  between every two, for about twice the frames shown (Uncharted 3, same scene: 48.5 real, 98.1
+  shown FPS) with a little more input delay. Needs an RTX 40 or newer, an anti-aliasing mode (TAA,
+  FSR or DLSS) and NVIDIA's `nvngx_dlssg.dll`, which is not included: the launcher (Display) adds it
+  like `nvngx_dlss.dll`. The frame rate limit counts the frames shown. It is off in menus, movies
+  and loading. Switch it in the in-game menu (Image) or the launcher (Display).
+
 - **Uncharted 3: about 1 more FPS in crowded scenes where the processor limits the frame rate.**
   The thread that records the GPU work no longer looks up and updates a large table for every
   small GPU write of the crowd's compute dispatches. Those dispatches write the same few memory

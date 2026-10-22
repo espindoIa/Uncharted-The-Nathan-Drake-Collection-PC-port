@@ -3630,3 +3630,24 @@ What would still cut the fence and fault-flush waits (not done):
 - Fault-flush commands (about 9% of stage A, 190 a second, about 480 us each) were not touched.
 
 Not verified: no 4K run, no soak run, no GOW3_READBACK_RACE run; U1 and U2; other U3 chapters (one scene measured); each number is from one run.
+
+## Reflex and DLSS Frame Generation (22 Oct)
+
+Decisions.
+- Reflex goes through VK_NV_low_latency2 directly (no Streamline, no NVAPI). Driver 616.92 reports revision 2, which attributes submits between presents to the later present and ignores VkLatencySubmissionPresentIdNV. The sleep is before the first pad read of each guest frame; markers are keyed on the flip ordinal.
+- Frame Generation goes through NGX directly in the MIT bridge (ABI 3), not Streamline. Streamline's DLSS-G guide section 8.0 requires sl.reflex and rejects other Reflex integrations; NGX-direct does not require Reflex (the DLSS SDK FG guide only says FG "works with" Reflex).
+- Menu and launcher: reflex (Off / On / On + Boost) in the Performance tab/page, frame_gen (Off / On) under anti-aliasing / Display. The launcher adds nvngx_dlssg.dll like nvngx_dlss.dll (signature check); the package refuses it, apply_update.py CARRY and update_port.sh carry it over for the player.
+
+Reflex measurement. U3 chapter 2 save (backup_ch2meat), 4K DLAA, RTX 5070, live A/B, 6+6 windows of 10 s, 95% hierarchical bootstrap.
+- reflex 1 FPS 44.1 vs 53.5: diff -9.5 [-12.4, -6.7]. Median frame +2.9 ms [+1.5, +4.3].
+- Driver timing latency, input sample to GPU render end: +1.7 ms [-2.2, +5.7] (no gain). The driver slept about 10 ms per frame. Flip ids stayed paired (lag 0).
+- PresentMon 2.6 reports no PC latency (InstrumentedLatency NA) for VK_NV_low_latency2, so latency comes from vkGetLatencyTimingsNV (GOW3_REFLEX_LOG).
+- Cause (deduced, not proven): the port's limit is its own stages after the guest (GPU command thread, draw recording), which the driver's pacing model does not see.
+
+Frame Generation smoke run (same scene, DLSS DLAA, window 2560x1440).
+- Feature created at window size with depth/motion 3840x2160. Real 48.5 FPS, displayed 98.1 FPS (PresentMon 978 presents vs 485 real). No NGX errors.
+- Without nvngx_dlssg.dll: no FG, presents equal real frames.
+
+Not verified / open: generated-frame image quality; hudless is not passed (the HUD may ghost; the upscaled scene precedes the game's post/tonemap, so it is not a valid hudless); U2's camera view x points to screen left (NGX documents right); TAA and FSR paths; resize and HDR; live toggling; latency with FG; U1, U2 and other chapters; long soak; GPUs without FG; ring memory about 100 MB per slot at 4K.
+
+Toggle bits: ReflexSleep 8388608, FrameGeneration 16777216. Settings and env: reflex / GOW3_REFLEX, GOW3_REFLEX_EXT=0, GOW3_REFLEX_LOG; frame_gen / GOW3_FRAME_GEN, GOW3_FRAME_GEN_EXT=0, GOW3_NGX_LOG.

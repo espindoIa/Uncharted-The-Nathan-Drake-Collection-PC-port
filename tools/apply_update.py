@@ -19,8 +19,8 @@ from pathlib import Path
 DEFAULTS = ("analysis/uncharted-user/disabled-optimizations.txt",)
 KEEP = {"analysis", "update"}
 # Files the player added to program folders, carried into the new version when it has none:
-# NVIDIA's nvngx_dlss.dll (not packaged; installed from the launcher's Display tab).
-CARRY = ("gow3_pc/out/nvngx_dlss.dll",)
+# NVIDIA's nvngx_dlss.dll and nvngx_dlssg.dll (not packaged; installed from the launcher's Display tab).
+CARRY = ("gow3_pc/out/nvngx_dlss.dll", "gow3_pc/out/nvngx_dlssg.dll")
 TITLE = "Uncharted: The Nathan Drake Collection - Launcher by BilalReloaded"
 
 

@@ -87,3 +87,6 @@ NVIDIA's, under NVIDIA's license; the port loads it at run time through gow3_dls
 licenses\gow3-dlss-bridge\LICENSE.txt; it contains NVIDIA's NGX library, under
 licenses\nvidia-dlss\LICENSE.txt). Without it, or on other GPUs, the port uses its other
 upscalers.
+
+DLSS Frame Generation (RTX 40 or newer) also needs NVIDIA's nvngx_dlssg.dll, from the same NVIDIA
+page. It is not included either: in the launcher, Display -> "Add nvngx_dlssg.dll...".

@@ -49,6 +49,7 @@ if [[ -n ${DLSS_BRIDGE:-} || -n ${DLSS_SDK:-} ]]; then
     echo "DLSS: gow3_dlss.dll included (nvngx_dlss.dll comes from NVIDIA, added in the launcher)"
 fi
 [[ ! -e $stage/gow3_pc/out/nvngx_dlss.dll ]] || { echo "nvngx_dlss.dll must not be packaged" >&2; exit 1; }
+[[ ! -e $stage/gow3_pc/out/nvngx_dlssg.dll ]] || { echo "nvngx_dlssg.dll must not be packaged" >&2; exit 1; }
 
 cp gow3_pc/scripts/*.py "$stage/gow3_pc/scripts/"
 cp tools/probe_uncharted.py tools/hang_report.py tools/apply_update.py tools/play.py tools/install_update.py "$stage/tools/"
@@ -121,6 +122,7 @@ if [[ -f gow3_pc/out/gow3_dlss.dll && ! -f $stage/gow3_pc/out/gow3_dlss.dll ]] &
     cp gow3_pc/gpu/dlss_bridge/LICENSE.txt "$licenses/gow3-dlss-bridge/LICENSE.txt"
 fi
 [[ ! -e $stage/gow3_pc/out/nvngx_dlss.dll ]] || { echo "nvngx_dlss.dll must not be packaged" >&2; exit 1; }
+[[ ! -e $stage/gow3_pc/out/nvngx_dlssg.dll ]] || { echo "nvngx_dlssg.dll must not be packaged" >&2; exit 1; }
 if [[ -f gow3_pc/fsr4_shaders/fsr4_model_v07_i8_native_1080_pre.spv ]]; then
     mkdir -p "$stage/gow3_pc/fsr4_shaders" "$licenses/fsr4"
     cp gow3_pc/fsr4_shaders/LICENSE-FSR4-v07.txt gow3_pc/fsr4_shaders/*.spv gow3_pc/fsr4_shaders/*.bin \
