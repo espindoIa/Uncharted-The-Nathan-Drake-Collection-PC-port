@@ -3630,3 +3630,43 @@ What would still cut the fence and fault-flush waits (not done):
 - Fault-flush commands (about 9% of stage A, 190 a second, about 480 us each) were not touched.
 
 Not verified: no 4K run, no soak run, no GOW3_READBACK_RACE run; U1 and U2; other U3 chapters (one scene measured); each number is from one run.
+
+## 22 October 2026: phase 5c, A-to-B draw pipe measurements
+
+Diagnostic only, no behaviour change. Commit 70e0627 adds `GOW3_DRAWREC_STATS=1` (off by default, independent of `GOW3_FRAME_STATS`): counters in `DrawPipe` (vk_draw_pipe.h) and `Submission` new/reuse counters (vk_draw_prep.cpp), reported as two lines (`DrawRec A:`, `DrawRec B:`) about every 5 s. Stage A counters are plain members (the GPU command thread is the only producer); stage B publishes relaxed atomics in batches; none of them takes part in the queue's control flow, the sleep protocol and every memory order are untouched. Time unit is TSC ticks (not ordered, can include preemption); percentages are of the window's elapsed ticks.
+
+Setup (22 Oct, U3 chapter 2 meat market from `C:\dev\bench\backup_ch2meat`, 1080p, DLSS model K, player's other settings, `tools/play.py measure` 10 s windows, build 70e0627 from this worktree, full `build.sh` exit 0). The default `bench.sh` save is a lighter scene capped at 120 FPS with about 435 draws a frame: six windows there were discarded.
+
+Counter coherence (ON1 19 windows, ON2 32 windows of ~5 s):
+- Exact (A-side cumulative, window deltas): byte residue 0 in every window checked (payload + header + slack + pad64 + wrap = physical advance of `head`); no non-finite values printed.
+- Sampled: depth after each Commit (mean, window max, both histograms; not the time distribution of occupancy). Max depth 0.87 MiB of 16 MiB.
+- Approximate: pending packets (A's count minus B's batched count): median about 2, mean 79 (spikes to 745).
+- Unavailable: B's percentage per window (printed `unavailable`, not zero) and B's maxima per window (printed as since start).
+
+Measured, ON1 (19 windows, about 93 FPS, p50 10.6 ms, p99 13.1 ms):
+- 4,560 packets a frame (about 425,000/s): about 700 draw, 2,006 task, 1,854 dispatch, 5 special, 8 indirect. Payload per packet: draw 1.7 KiB, dispatch 0.9 KiB, task 48 B.
+- 281 MB/s physical, about 3 MB a frame: 96.5% payload, 1.2% header, 1.8% pad64, about 0 wrap, 0 slack.
+- Depth after Commit: mean 89 KB, 100% of commits in (0, 25%] of capacity; fine histogram 42% <= 4 KiB, 26% <= 64 KiB, 32% <= 1 MiB, 0% above. Space waits: 0.
+- Stage A write path (Begin to Commit minus WaitForSpace): about 307 ticks a packet, 3.7% of the window. It excludes the preparation before Begin (CollectRingBindings and others) and includes preemption.
+- Drains: about 4,027/s (about 43 a frame), 3,460/s waited (86%), 567/s found the pipe empty. Post-drain-to-commit gap: about 3,460 observations/s, mean 22 us (overlapping intervals after consecutive drains, not exclusive time, not "A idle"); typical window max 1-2 ms, two windows 20-22 ms.
+- Stage B completed intervals: idle spin about 149 ms/s (14.9%), wake.wait about 37 ms/s (3.7%), so about 18.6% of the time idle; this agrees with "stage B busy 81.4%" of the earlier trace. About 115 sleeps/s, 115 wake returns/s (no skipped waits), 446 notify calls/s.
+- Submission: about 2,570 built/s, all new allocations, 0 pool reuses (`GOW3_PREP_POOL` was off).
+
+Overhead of the diagnostic (stats ON vs OFF; the gate is read once at start, so each state is a separate session; order ON1, OFF1, ON2, OFF2; 6 windows of 10 s each; port FPS):
+- Session means: ON1 92.80, OFF1 89.93, ON2 95.05, OFF2 95.62 FPS (within-session SD 0.3-0.8).
+- Pooled ON 93.92, OFF 92.77 (+1.15). Pair differences ON - OFF: +2.87 and -0.57. p50 10.52 vs 10.61 ms; p99 12.96 vs 13.65 ms.
+- No slowdown is visible, but the design cannot prove an overhead under 1 FPS: the two OFF sessions differ by 5.7 FPS, more than any effect seen. More alternating sessions would be needed for a bound.
+
+Reading (hypotheses, not measured as causes):
+- The queue is never full and stage B keeps up (pending about 2, B idle about 18.6%): the ring capacity is not the limit, and packet size is not either (write path 3.7% of A, under the 5% line that would justify compacting records).
+- Stage A is interrupted often: about 37 drains a frame wait for stage B to run dry. This matches the 22 Oct wait trace (about 3,400 slow-path fence drains/s, about 190 fault-flush commands/s). The drains-to-empty cost stage A about 18.5% of its time in that trace.
+- The `Submission` pool was not exercised; its effect is unknown.
+
+Not verified: other scenes and chapters, U1 and U2, 4K, a long soak; the diagnostic's overhead below 1 FPS; B's per-window percentage. Four sessions, one machine (Ryzen 5 5600), logs kept outside the repository in `C:\dev\uncharted\analysis\d5c_logs`.
+
+Next step (proposed, not started): cut the waits of stage A on the pipe, starting with the deferred-fence drains.
+1. Land the fence tick as an in-order pipe task (`RunInOrder`) so stage A waits for that task, not for the whole queue (`LandDeferredFenceFor`, about 9.4% of A in the 22 Oct trace; upper bound if both drain waits vanished: A 21.8% shorter, real gain smaller).
+2. Behind a new `Disabled2` bit (read live, bit set = old behaviour) so it can be A/B'd in one session with `ab2.sh` at 1080p and 4K, DLAA K, meat market, at least 6 + 6 windows.
+3. Risk to test first: stage B owns the readbacks while it runs (the 18 Oct race, `GOW3_READBACK_RACE`), so stage A must not land ticks beside it. Test with the readback race check, `GOW3_STAGEA_VERIFY`-style equivalence counters, and the floating-NPC / U2 cases from 16 Oct before any claim.
+4. Re-run `GOW3_DRAWREC_STATS=1` afterwards: waited drains a frame, post-drain-to-commit and B idle should move; FPS gain must beat the run-to-run noise measured above.
+5. Smaller, independent: try `GOW3_PREP_POOL=1` once with the same A/B (about 2,570 allocations/s today).
