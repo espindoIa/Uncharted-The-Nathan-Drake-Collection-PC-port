@@ -73,6 +73,19 @@ struct State {
     std::atomic<unsigned> timeouts_in_row{0};
     std::atomic<u64> sleeps{0}, sleep_ns{0}, timeouts{0};
 
+    /// GOW3_REFLEX_VARIANT, read once in Init. 22 Oct 2026, DIAGNOSTIC ONLY, not a default: where
+    /// RenderSubmitStart is sent. 0 = today (first submit after a flip); 2 "chain" = frame N+1's
+    /// start follows RenderSubmitEnd(N), so the span is stage B's whole frame; 3 "zero" = start
+    /// right before RenderSubmitEnd (near-zero span). Tests whether the driver's pacing models
+    /// simulation and render-submit as sequential CPU work while the port overlaps them.
+    int variant = 0;
+    std::atomic<bool> chain_started{false}; ///< variant 2: the first GuestSubmit sent frame 1's start
+
+    /// Per frame id % 1024, for the log: 0 Reflex off, 1 on with sleep, 2 on with the sleep disabled
+    /// by the ReflexNoSleep toggle. Rows carry it so an A/B needs no join by time (the driver's
+    /// timestamps are not on the host clock).
+    std::array<std::atomic<u8>, 1024> frame_state{};
+
     std::mutex report_mutex; ///< guards the log file and last_logged
     u64 last_logged = 0;     ///< the newest presentID written to the log
 };
@@ -201,9 +214,11 @@ void PrintStats() {
     const double mean_ms = count ? double(sleep_ns - last_sleep_ns) / double(count) / 1e6 : 0.0;
     const long long lag = static_cast<long long>(g.guest_flips.load(std::memory_order_relaxed)) -
                           static_cast<long long>(g.prepared_flips.load(std::memory_order_relaxed));
-    std::printf("Reflex: mode=%d sleeps=%llu avg_sleep_ms=%.2f timeouts=%llu lag=%lld\n",
-                EffectiveMode(), static_cast<unsigned long long>(count), mean_ms,
-                static_cast<unsigned long long>(timeouts - last_timeouts), lag);
+    std::printf(
+        "Reflex: mode=%d sleeps=%llu avg_sleep_ms=%.2f timeouts=%llu lag=%lld nosleep=%d variant=%d\n",
+        EffectiveMode(), static_cast<unsigned long long>(count), mean_ms,
+        static_cast<unsigned long long>(timeouts - last_timeouts), lag,
+        Gow3Toggle::Disabled2(Gow3Toggle::ReflexNoSleep) ? 1 : 0, g.variant);
     std::fflush(stdout);
     last_sleeps = sleeps;
     last_sleep_ns = sleep_ns;
@@ -256,11 +271,15 @@ void Init(vk::Device device, bool extension_enabled, u32 revision) {
                          "renderSubmitStartTimeUs renderSubmitEndTimeUs presentStartTimeUs "
                          "presentEndTimeUs driverStartTimeUs driverEndTimeUs "
                          "osRenderQueueStartTimeUs osRenderQueueEndTimeUs gpuRenderStartTimeUs "
-                         "gpuRenderEndTimeUs\n");
+                         "gpuRenderEndTimeUs state\n");
             std::fflush(g.log);
         }
         std::printf("Reflex: driver timings %s %s\n", g.log ? "go to" : "cannot be written to",
                     path);
+    }
+    if (const char* v = std::getenv("GOW3_REFLEX_VARIANT"); v && (v[0] == '2' || v[0] == '3')) {
+        g.variant = v[0] - '0'; // diagnostic (22 Oct 2026); anything else stays 0
+        std::printf("Reflex: marker variant %d (diagnostic)\n", g.variant);
     }
     g.available.store(true, std::memory_order_release);
     std::printf("Reflex: VK_NV_low_latency2 revision %u\n", revision);
@@ -319,10 +338,14 @@ void InputSample() {
         !g.first_read.exchange(false, std::memory_order_relaxed)) {
         return;
     }
-    if (EffectiveMode() != 0) {
+    const bool reflex_on = EffectiveMode() != 0;
+    const bool sleeps = reflex_on && !Gow3Toggle::Disabled2(Gow3Toggle::ReflexNoSleep);
+    const u8 state = sleeps ? 1 : reflex_on ? 2 : 0;
+    if (sleeps) {
         Sleep();
     }
     const u64 id = g.guest_flips.load(std::memory_order_relaxed) + 1;
+    g.frame_state[id % g.frame_state.size()].store(state, std::memory_order_relaxed);
     std::scoped_lock lock{g.mutex};
     if (g.swapchain) {
         MarkerLocked(id, vk::LatencyMarkerNV::eSimulationStart);
@@ -332,6 +355,14 @@ void InputSample() {
 
 void GuestSubmit() {
     if (!g.active.load(std::memory_order_relaxed)) {
+        return;
+    }
+    if (g.variant != 0) {
+        // Diagnostic variants (22 Oct 2026): variant 2 only starts the chain, with frame 1.
+        if (g.variant == 2 && g.guest_flips.load(std::memory_order_relaxed) == 0 &&
+            !g.chain_started.exchange(true, std::memory_order_relaxed)) {
+            Marker(1, vk::LatencyMarkerNV::eRendersubmitStart);
+        }
         return;
     }
     if (!g.first_submit.load(std::memory_order_relaxed) ||
@@ -346,6 +377,11 @@ void GuestFlipRequest() {
     // Counted while idle too, as PreparedFlip is: the ids must still agree when the mode is
     // switched on in the middle of a run.
     const u64 flips = g.guest_flips.fetch_add(1, std::memory_order_relaxed);
+    if (g.log) {
+        // The next frame's id is flips + 2: a defined state (off) even if InputSample never runs
+        // for it; InputSample overwrites it. Before first_read is armed below.
+        g.frame_state[(flips + 2) % g.frame_state.size()].store(0, std::memory_order_relaxed);
+    }
     if (!g.active.load(std::memory_order_relaxed)) {
         return;
     }
@@ -360,7 +396,13 @@ u64 PreparedFlip() {
 
 void RenderSubmitEnd(u64 serial) {
     if (g.active.load(std::memory_order_relaxed)) {
+        if (g.variant == 3) { // diagnostic (22 Oct 2026): near-zero render-submit span
+            Marker(serial, vk::LatencyMarkerNV::eRendersubmitStart);
+        }
         Marker(serial, vk::LatencyMarkerNV::eRendersubmitEnd);
+        if (g.variant == 2) { // diagnostic (22 Oct 2026): chain, next span starts as this one ends
+            Marker(serial + 1, vk::LatencyMarkerNV::eRendersubmitStart);
+        }
     }
 }
 
@@ -390,6 +432,18 @@ void PresentEnd(u64 serial) {
     if (now - stats_at >= StatsNs) {
         stats_at = now;
         PrintStats();
+    }
+}
+
+void GeneratedPresentStart(u64 serial) {
+    if (g.active.load(std::memory_order_relaxed)) {
+        Marker(serial, vk::LatencyMarkerNV::eOutOfBandPresentStart);
+    }
+}
+
+void GeneratedPresentEnd(u64 serial) {
+    if (g.active.load(std::memory_order_relaxed)) {
+        Marker(serial, vk::LatencyMarkerNV::eOutOfBandPresentEnd);
     }
 }
 
@@ -430,7 +484,7 @@ void Report() {
             continue;
         }
         std::fprintf(g.log,
-                     "%llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu\n",
+                     "%llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %u\n",
                      static_cast<unsigned long long>(r.presentID),
                      static_cast<unsigned long long>(r.inputSampleTimeUs),
                      static_cast<unsigned long long>(r.simStartTimeUs),
@@ -444,7 +498,9 @@ void Report() {
                      static_cast<unsigned long long>(r.osRenderQueueStartTimeUs),
                      static_cast<unsigned long long>(r.osRenderQueueEndTimeUs),
                      static_cast<unsigned long long>(r.gpuRenderStartTimeUs),
-                     static_cast<unsigned long long>(r.gpuRenderEndTimeUs));
+                     static_cast<unsigned long long>(r.gpuRenderEndTimeUs),
+                     unsigned(g.frame_state[r.presentID % g.frame_state.size()].load(
+                         std::memory_order_relaxed)));
         g.last_logged = r.presentID;
     }
     std::fflush(g.log);

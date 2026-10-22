@@ -6,6 +6,7 @@
 #include "common/io_file.h"
 #include "common/path_util.h"
 #include "common/singleton.h"
+#include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "sdl_window.h"
@@ -15,6 +16,7 @@
 #include "gow3_overlay.h"
 #include "gow3_reflex.h"
 #include "gow3_settings.h"
+#include "gow3_toggles.h"
 #include "gow3_graphics.h"
 #include "gow3_trigger_files.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
@@ -1456,6 +1458,78 @@ void Presenter::BlitToSwapchain(vk::CommandBuffer cmdbuf, vk::Image source, u32 
     }
 }
 
+namespace {
+
+// gow3 22 Oct 2026: DLSS Frame Generation pacing (swap thread only): the real frame half the last
+// real interval after the generated present returns. A deadline pacer (absolute deadlines half a
+// filtered period apart) was measured and removed the same day (U3 chapter 2, 1080p DLAA, limit
+// 160): it took the real rate from 80 to 52-65 FPS and put 37-48% of displayed intervals above
+// 1.5x the median (3% with this sleep), because its period came from arrival intervals it shaped
+// itself and could only ratchet up (period_ms 19.3, wait_ms 17.7 of 19).
+using FgClock = std::chrono::steady_clock;
+
+double FgMs(FgClock::duration d) {
+    return std::chrono::duration<double, std::milli>(d).count();
+}
+
+/// Sleeps until `deadline` on common/thread.cpp's high-resolution waitable timer (libc++'s
+/// sleep_until rounds up to whole milliseconds on Windows: up to ~1 ms late, driver.cpp's note of
+/// 20 Oct). Returns the milliseconds slept.
+double FgSleepUntil(FgClock::time_point deadline) {
+    const auto now = FgClock::now();
+    if (deadline <= now) {
+        return 0.0;
+    }
+    Common::AccurateSleep(std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - now),
+                          nullptr, false);
+    return FgMs(FgClock::now() - now);
+}
+
+/// 5 s of samples: the mean of all, the p99 of the last 512.
+struct FgSamples {
+    std::array<float, 512> ring{};
+    u32 count{};
+    double sum{};
+    void Add(double ms) {
+        ring[count % ring.size()] = float(ms);
+        ++count;
+        sum += ms;
+    }
+    double Mean() const {
+        return count ? sum / count : 0.0;
+    }
+    double P99() {
+        const u32 n = std::min<u32>(count, u32(ring.size()));
+        if (n == 0) {
+            return 0.0;
+        }
+        const auto it = ring.begin() + (n - 1) * 99 / 100;
+        std::nth_element(ring.begin(), it, ring.begin() + n);
+        return *it;
+    }
+};
+
+/// Statistics, printed every 5 s: eval = evaluate+flush, present = acquire..present return,
+/// gap = the slept time before the real present, interval = the raw real interval it halves.
+struct FgStats {
+    FgClock::time_point stats_at{};
+    u32 real{}, gen{}, menu{}, noinput{}, hdr{}, acquire{};
+    FgSamples eval, present, gap, interval;
+
+    void Print(bool std_sleep) {
+        std::printf("FrameGen: real=%u gen=%u skipped(menu=%u noinput=%u hdr=%u acquire=%u) "
+                    "eval_ms=%.2f/%.2f present_ms=%.2f gap_ms=%.2f/%.2f real_interval_ms=%.2f "
+                    "std_sleep=%d\n",
+                    real, gen, menu, noinput, hdr, acquire, eval.Mean(), eval.P99(),
+                    present.Mean(), gap.Mean(), gap.P99(), interval.Mean(), std_sleep ? 1 : 0);
+        std::fflush(stdout);
+        *this = FgStats{.stats_at = stats_at};
+    }
+};
+FgStats fg_stats;
+
+} // namespace
+
 bool Presenter::PresentGenerated(Frame* frame) {
     auto& settings = Gow3Settings::Get();
     if (settings.frame_gen_supported) {
@@ -1469,8 +1543,31 @@ bool Presenter::PresentGenerated(Frame* frame) {
     // Not for frames without an upscale (menus, movies, loading), with the in-game menu open (it
     // is drawn over both frames and would smear), or right after an HDR switch (the frame image
     // and the feature still have the other format).
-    if (!frame->frame_gen || !Dlss::FrameGenWanted() || Gow3Overlay::CapturesInput() ||
-        frame->is_hdr != swapchain.GetHDR()) {
+    if (!Dlss::FrameGenWanted()) {
+        return false; // frame generation off: no pacing, no statistics
+    }
+    auto& stats = fg_stats;
+    const bool std_sleep = Gow3Toggle::Disabled2(Gow3Toggle::FrameGenStdSleep);
+    {
+        const auto now = FgClock::now();
+        if (stats.stats_at == FgClock::time_point{}) {
+            stats.stats_at = now;
+        } else if (now - stats.stats_at >= std::chrono::seconds(5)) {
+            stats.stats_at = now;
+            stats.Print(std_sleep);
+        }
+    }
+    ++stats.real;
+    if (!frame->frame_gen) {
+        ++stats.noinput;
+        return false;
+    }
+    if (Gow3Overlay::CapturesInput()) {
+        ++stats.menu;
+        return false;
+    }
+    if (frame->is_hdr != swapchain.GetHDR()) {
+        ++stats.hdr;
         return false;
     }
     Dlss* dlss = Dlss::Get();
@@ -1603,7 +1700,10 @@ bool Presenter::PresentGenerated(Frame* frame) {
         info.AddWait(frame->ready_semaphore, frame->ready_tick);
         scheduler.Flush(info);
     }
+    stats.eval.Add(FgMs(FgClock::now() - start));
+    const auto present_start = FgClock::now();
     if (!swapchain.AcquireNextImage()) {
+        ++stats.acquire;
         // 22 Oct review: eSuboptimalKHR still acquires an image and signals the semaphore, but
         // frame_index does not advance; Present would acquire again on the same semaphore
         // (VUID 01286) and leak the image. Recreate here as Present does. The output and the
@@ -1620,19 +1720,40 @@ bool Presenter::PresentGenerated(Frame* frame) {
         info.AddSignal(swapchain.GetPresentReadySemaphore());
         scheduler.Flush(info);
     }
-    // No Reflex markers: they belong to the real frame's present.
+    // 22 Oct 2026: out-of-band present markers with the real frame's id (VK_NV_low_latency2
+    // revision 2: a present without markers counts as a new application frame).
+    const bool reflex_marked = frame->serial != 0;
+    if (reflex_marked) {
+        Gow3Reflex::GeneratedPresentStart(frame->serial);
+    }
+    bool present_failed = false;
     {
         std::scoped_lock present_lock{PresentLock(instance)};
         if (!swapchain.Present() && window.GetWidth() != 0 && window.GetHeight() != 0) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
-            return false;
+            present_failed = true;
         }
     }
+    if (reflex_marked) {
+        Gow3Reflex::GeneratedPresentEnd(frame->serial);
+    }
+    if (present_failed) {
+        return false;
+    }
     frame_gen_active.store(true, std::memory_order_relaxed);
+    ++stats.gen;
+    stats.present.Add(FgMs(FgClock::now() - present_start));
     // The real frame half a real interval after the generated one (DLSS-FG guide 7: equal
     // spacing). The first frame after a pause (an interval over 100 ms) does not wait.
     if (real_interval < std::chrono::milliseconds(100)) {
-        std::this_thread::sleep_until(std::chrono::steady_clock::now() + real_interval / 2);
+        stats.interval.Add(FgMs(real_interval));
+        const auto slept_from = FgClock::now();
+        if (std_sleep) {
+            std::this_thread::sleep_until(slept_from + real_interval / 2);
+            stats.gap.Add(FgMs(FgClock::now() - slept_from));
+        } else {
+            stats.gap.Add(FgSleepUntil(slept_from + real_interval / 2));
+        }
     }
     return true;
 }

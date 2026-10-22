@@ -64,6 +64,13 @@ void RenderSubmitEnd(u64 serial);
 void PresentStart(u64 serial);
 void PresentEnd(u64 serial);
 
+/// Swap thread, around vkQueuePresentKHR of the DLSS Frame Generation frame shown before the real
+/// frame `serial`. 22 Oct 2026: a present without a PRESENT_START marker for its id counts as a new
+/// application frame (VK_NV_low_latency2 revision 2); the extension's way for the extra presents
+/// of one frame is the out-of-band present markers with the frame's id. No sleep, no mode update.
+void GeneratedPresentStart(u64 serial);
+void GeneratedPresentEnd(u64 serial);
+
 /// Appends the driver's timings of frames not written yet to GOW3_REFLEX_LOG (PresentEnd calls it
 /// every 48 game frames: the driver holds 64 reports).
 void Report();

@@ -176,6 +176,15 @@ enum : std::uint64_t {
     /// Bit set: DLSS Frame Generation is off (real frames only, the plain frame limit), whatever
     /// the `frame_gen` setting says: a live A/B in one run (vk_presenter.cpp, 22 Oct 2026).
     FrameGeneration = 16777216,
+    /// Bit set: Reflex keeps its low latency mode and markers but never sleeps (diagnostic for
+    /// isolating the sleep's cost; the ReflexSleep bit still turns everything off), 22 Oct 2026
+    /// (gow3_reflex.cpp).
+    ReflexNoSleep = 33554432,
+    /// Bit set: DLSS Frame Generation's sleep between the generated and the real present (half the
+    /// last real interval) uses std::this_thread::sleep_until, which on Windows rounds to whole
+    /// milliseconds; clear, the high-resolution waitable timer. A live A/B (vk_presenter.cpp,
+    /// 22 Oct 2026).
+    FrameGenStdSleep = 67108864,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;
