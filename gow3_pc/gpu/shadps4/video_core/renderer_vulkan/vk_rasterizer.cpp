@@ -7,6 +7,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <thread>
 #include <filesystem>
 #include <boost/container/small_vector.hpp>
@@ -1949,6 +1950,223 @@ struct DispatchStatsScope {
         }
     }
 };
+
+// 21 Oct 2026: GOW3_DISPATCH_TRACE=<hash>, can a run of single-group dispatches be merged
+// (roadmap phase 3). Logs once the bindings of up to 64 consecutive dispatches of that compute
+// shader, the first after 600 flips (past loading). BindBuffers notes each guest binding while a
+// capture is on, DispatchRecord adds the dispatch (dims, user data, barrier) once bound. Ranges
+// overlap by the exact tracked extent (as the barrier tracker sees them). Runs on stage B (or the
+// GPU command thread when not pipelined; never both at once).
+u64 DispatchTraceTarget() {
+    static const u64 hash = [] {
+        const char* env = std::getenv("GOW3_DISPATCH_TRACE");
+        return env ? std::strtoull(env, nullptr, 16) : 0ull;
+    }();
+    return hash;
+}
+
+struct DispatchTraceBinding {
+    u32 index;
+    u64 base, size, range;
+    bool written;
+    const char* path; // where BindBuffers put it
+    const void* host;
+    u64 host_size, host_offset;
+};
+
+struct DispatchTraceRange {
+    u64 lo, hi;
+    u32 dispatch, index;
+    bool written;
+};
+
+struct DispatchTraceState {
+    int phase = 0; // 0 waiting, 1 capturing, 2 done
+    u32 n = 0, barriers = 0, ww = 0, raw = 0, war = 0, reads = 0, reads_not_static = 0;
+    u64 written_bytes = 0;
+    std::vector<DispatchTraceBinding> pending;
+    std::vector<DispatchTraceRange> ranges;
+    std::vector<u32> prev_ud;
+    u32 ud_changed = 0;
+    std::set<std::pair<u64, u64>> distinct_reads;
+};
+
+DispatchTraceState& DispatchTrace() {
+    static DispatchTraceState state;
+    return state;
+}
+
+bool DispatchTraceCapturing() {
+    return DispatchTraceTarget() && DispatchTrace().phase == 1;
+}
+
+void DispatchTraceFinish(const char* why, u64 hash) {
+    auto& s = DispatchTrace();
+    std::string ud;
+    for (u32 i = 0; i < 32; ++i) {
+        if (s.ud_changed >> i & 1) {
+            ud += fmt::format(" {}", i);
+        }
+    }
+    std::printf("Dispatch trace: run ended (%s %llx) after %u dispatches\n", why,
+                static_cast<unsigned long long>(hash), s.n);
+    std::printf("Dispatch trace: summary: %u dispatches, %zu distinct guest buffers read, reads "
+                "outside the static arena %u of %u, written %llu bytes, write-write overlaps %u, "
+                "read-after-write overlaps %u, write-after-read overlaps %u, barriers after the "
+                "first dispatch %u, user-data dwords that change:%s\n",
+                s.n, s.distinct_reads.size(), s.reads_not_static, s.reads,
+                static_cast<unsigned long long>(s.written_bytes), s.ww, s.raw, s.war,
+                s.barriers, ud.empty() ? " none" : ud.c_str());
+    std::fflush(stdout);
+    s.phase = 2;
+}
+
+// Every dispatch on entry: starts the capture, or ends it when another shader's dispatch comes.
+void DispatchTraceEnter(u64 hash) {
+    auto& s = DispatchTrace();
+    if (s.phase == 1 && hash != DispatchTraceTarget()) {
+        DispatchTraceFinish("broken by dispatch", hash);
+    } else if (s.phase == 0 && hash == DispatchTraceTarget() &&
+               AmdGpu::g_gow3_flips.load(std::memory_order_relaxed) >= 600) {
+        s.phase = 1;
+    }
+    s.pending.clear();
+}
+
+void DispatchTraceDraw() {
+    if (DispatchTraceCapturing()) {
+        DispatchTraceFinish("broken by a draw, hash", 0);
+    }
+}
+
+// BindBuffers, a guest buffer of the compute stage: where the cache put it.
+// Every non-special path: ring copy, null (unbound or garbage V#), cache buffer.
+void DispatchTraceBind(u32 index, const Shader::BufferResource& desc, const AmdGpu::Buffer& sharp,
+                       u64 base, u64 size, const char* path, const void* host, u64 host_size,
+                       u64 offset) {
+    u64 range = size;
+    const u32 extent = desc.access_extent;
+    if (extent != 0 && extent != ~0u && sharp.stride != 0 && extent < sharp.stride &&
+        sharp.num_records != 0 && !sharp.swizzle_enable && !sharp.add_tid_enable) {
+        range = std::min<u64>(size, u64(sharp.num_records - 1) * sharp.stride + extent);
+    }
+    DispatchTrace().pending.push_back(
+        {index, base, size, range, desc.is_written, path, host, host_size, offset});
+}
+
+void DispatchTraceDispatch(const Shader::Info& cs, const AmdGpu::ComputeProgram& regs,
+                           bool barrier) {
+    auto& s = DispatchTrace();
+    if (s.phase != 1 || cs.pgm_hash != DispatchTraceTarget()) {
+        return;
+    }
+    const auto ud = cs.UserData();
+    if (s.n == 0) {
+        std::printf("Dispatch trace: shader %016llx: workgroup %ux%ux%u (partial %u,%u,%u), %zu "
+                    "buffers, %zu images, %zu samplers, uses_dma %d, shared memory %u bytes "
+                    "(regs %u)\n",
+                    static_cast<unsigned long long>(cs.pgm_hash), regs.num_thread_x.full,
+                    regs.num_thread_y.full, regs.num_thread_z.full, regs.num_thread_x.partial,
+                    regs.num_thread_y.partial, regs.num_thread_z.partial, cs.buffers.size(),
+                    cs.images.size(), cs.samplers.size(), int(cs.uses_dma),
+                    cs.shared_memory_scratch_size, regs.SharedMemSize());
+        static constexpr const char* types[] = {"buffer", "flatbuf", "bda-pagetable", "fault",
+                                                "gds", "shared", "clip-planes"};
+        for (u32 i = 0; i < cs.buffers.size(); ++i) {
+            const auto& desc = cs.buffers[i];
+            const auto sharp = desc.IsSpecial() ? AmdGpu::Buffer::Null() : desc.GetSharp(cs);
+            std::printf("Dispatch trace:   res %u: %s, %s (read-only unless written), %s sharp "
+                        "(load mask %#x), stride %u, extent %#x, formatted %d\n",
+                        i, types[std::min<u32>(u32(desc.buffer_type), 6)],
+                        desc.is_written ? "written" : "read",
+                        desc.sharp_fetch.load_mask ? "user-data" : "constant",
+                        desc.sharp_fetch.load_mask, u32(sharp.stride), desc.access_extent,
+                        int(desc.is_formatted));
+        }
+        std::string text;
+        for (const u32 v : ud) {
+            text += fmt::format(" {:#x}", v);
+        }
+        std::printf("Dispatch trace: first user data (%zu dwords):%s\n", ud.size(), text.c_str());
+    }
+    const u32 n = ++s.n;
+    if (n <= 3) {
+        // The raw 16-byte V# of res 0-8 as the shader's sharp fetch reads them (before filters).
+        for (u32 i = 0; i < std::min<size_t>(cs.buffers.size(), 9); ++i) {
+            const auto& desc = cs.buffers[i];
+            AmdGpu::Buffer raw{};
+            u32 dw[4]{};
+            if (!desc.IsSpecial() && desc.sharp_fetch.Fetch(cs.FlatUserData().data(), &raw)) {
+                std::memcpy(dw, &raw, sizeof(dw));
+            }
+            std::printf("Dispatch trace: #%u V# res %u: %08x %08x %08x %08x%s\n", n, i, dw[0],
+                        dw[1], dw[2], dw[3], desc.IsSpecial() ? " (special)" : "");
+        }
+    }
+    std::string line = fmt::format("Dispatch trace: #{} dims {}x{}x{} base {},{},{} barrier {}", n,
+                                   regs.dim_x, regs.dim_y, regs.dim_z, regs.start_x, regs.start_y,
+                                   regs.start_z, int(barrier));
+    if (n > 1 && barrier) {
+        ++s.barriers;
+    }
+    line += " ud[";
+    u32 shown = 0;
+    for (u32 i = 0; i < std::min<size_t>(ud.size(), 16); ++i) {
+        if (n > 1 && (i >= s.prev_ud.size() || s.prev_ud[i] != ud[i])) {
+            s.ud_changed |= 1u << i;
+            if (shown++ < 16) {
+                line += fmt::format(" {}:{:#x}", i, ud[i]);
+            }
+        }
+    }
+    line += " ]";
+    s.prev_ud.assign(ud.begin(), ud.end());
+    std::string overlaps;
+    std::vector<DispatchTraceRange> mine;
+    for (const auto& b : s.pending) {
+        line += fmt::format(" | b{} {:#x}+{} {}{} host {}+{}/{}", b.index, b.base, b.size,
+                            b.written ? "W " : "R ",
+                            b.path,
+                            b.host, b.host_offset, b.host_size);
+        if (b.range != b.size) {
+            line += fmt::format(" (tracked {})", b.range);
+        }
+        const u64 lo = b.base, hi = b.base + b.range;
+        if (b.written) {
+            s.written_bytes += b.range;
+        } else {
+            ++s.reads;
+            s.reads_not_static += std::strcmp(b.path, "static-arena") != 0;
+            s.distinct_reads.emplace(b.base, b.size);
+        }
+        for (const auto& r : s.ranges) {
+            if (r.lo >= hi || lo >= r.hi) {
+                continue;
+            }
+            if (b.written && r.written) {
+                ++s.ww;
+            } else if (!b.written && r.written) {
+                ++s.raw;
+            } else if (b.written && !r.written) {
+                ++s.war;
+            } else {
+                continue;
+            }
+            overlaps += fmt::format(" b{} {} range {} by dispatch {} (b{});", b.index,
+                                    b.written ? "writes" : "reads", r.written ? "written" : "read",
+                                    r.dispatch, r.index);
+        }
+        mine.push_back({lo, hi, n, b.index, b.written});
+    }
+    s.ranges.insert(s.ranges.end(), mine.begin(), mine.end());
+    s.pending.clear();
+    line += overlaps.empty() ? " | no overlap" : " | overlap:" + overlaps;
+    std::printf("%s\n", line.c_str());
+    std::fflush(stdout);
+    if (n >= 64) {
+        DispatchTraceFinish("64 dispatches, last", cs.pgm_hash);
+    }
+}
 } // namespace
 
 void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_prepared,
@@ -2548,6 +2766,9 @@ static bool JitterFullScreenPass(u64 hash) {
 
 void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                             bool is_indexed, u32 index_offset) {
+    if (DispatchTraceTarget()) [[unlikely]] {
+        DispatchTraceDraw();
+    }
     const auto* fragment=pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
     if (SkippedShader(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
                       fragment ? fragment->pgm_hash : 0,
@@ -3080,6 +3301,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
 void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_indexed,
                                     const IndirectDraw& indirect) {
+    if (DispatchTraceTarget()) [[unlikely]] {
+        DispatchTraceDraw();
+    }
     if (DrawPipe::OnStageB()) {
         FrameCapture::Poll();
         scheduler.PopPendingOperations();
@@ -3292,6 +3516,9 @@ void Rasterizer::DispatchDirect() {
 }
 
 void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
+    if (DispatchTraceTarget()) [[unlikely]] {
+        DispatchTraceEnter(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash);
+    }
     if (BarrierStatsEnabled()) {
         g_barrier_stats_shader = pipeline->GetStage(Shader::SwStage::Compute).pgm_hash;
     }
@@ -3373,6 +3600,9 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         return;
     }
 
+    if (DispatchTraceTarget()) [[unlikely]] {
+        DispatchTraceDispatch(cs, cs_program, needs_barrier);
+    }
     if (needs_barrier) {
         runtime.FlushBarriers();
     }
@@ -5422,6 +5652,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                                      reinterpret_cast<const void*>(ring->address), ring->size);
             }
             if (!desc.IsSpecial()) {
+                if (compute_stage && DispatchTraceCapturing()) [[unlikely]] {
+                    DispatchTraceBind(buffer_index, desc, AmdGpu::Buffer{}, ring->address, ring->size,
+                                      "constant-ring-copy", nullptr, 0, ring->offset);
+                }
                 if (ring->size == 864 && gbuffer_draw &&
                     memory->IsValidGpuMapping(ring->address, 0)) {
                     camera_motion->OnConstants(reinterpret_cast<const float*>(ring->address));
@@ -5539,6 +5773,11 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 }
             }
             if (unbound || garbage) {
+                if (compute_stage && DispatchTraceCapturing()) [[unlikely]] {
+                    DispatchTraceBind(buffer_index, desc, vsharp, vsharp.base_address,
+                                      vsharp.GetSize(), garbage ? "null-garbage-sharp" : "null-unbound",
+                                      nullptr, 0, 0);
+                }
                 buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
             } else {
                 const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
@@ -5601,6 +5840,13 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                         : 0;
                 const auto [buffer, offset] = buffer_cache.ObtainBuffer(
                     vsharp.base_address, size, desc.is_written, desc.is_formatted);
+                if (compute_stage && DispatchTraceCapturing()) [[unlikely]] {
+                    DispatchTraceBind(buffer_index, desc, vsharp, vsharp.base_address, size,
+                                      desc.is_written ? "gpu-written-buffer"
+                                      : VideoCore::g_obtained_static ? "static-arena"
+                                                                     : "stream-copy-or-gpu-buffer",
+                                      buffer, buffer->SizeBytes(), offset);
+                }
                 if (cloth_peek && (stage.pgm_hash == 0x1c957b01 || stage.pgm_hash == 0x809864d3) &&
                     size <= 1_MB) {
                     cloth_peeks.push_back({vsharp.base_address, size, stage.pgm_hash, buffer_index,

@@ -3445,3 +3445,12 @@ Reading:
 - Estimate, not measured: removing ~5.5 ms from both stages moves these views toward the GPU limit.
 
 Not verified: what 8f067540 binds per dispatch (how many buffers, arena vs stream, whether outputs alias), so whether a run can be merged is open. Numbers are with stats on (mutex in stage B, FPS ~54), so absolute us are inflated vs a normal run; only two views in one chapter.
+
+What 8f067540 binds (GOW3_DISPATCH_TRACE=8f067540, new diagnostic in `vk_rasterizer.cpp`; U3 meat market, backup_ch2meat, one captured run of 64 consecutive dispatches):
+- Shader: workgroup 1024x1x1, 10 buffers, no images. Res 0-3 formatted reads (stride 8/12/8/8), res 4-5 raw reads, res 6-8 writes (one interleaved vertex stream, stride 28), res 9 flatbuf. `num_records` 0x189 = 393 vertices for the first mesh: one group skins one mesh instance.
+- V#s come from a per-dispatch table in memory, pointed to by user data 0 and 2. Only those two dwords change between dispatches, by +0xd0 each time.
+- Reads: res 0-4 are the mesh (same guest ranges for consecutive instances of one mesh, e.g. 0x1195625200+3144). Res 5 is 240 bytes of per-instance bones (0x10e08adcd0, -0x13c0 per dispatch). All six reads go through the constant ring (copied by stage A): ~15.9 KB per dispatch, ~24 MB per frame at 1,529 dispatches.
+- Writes: res 6-8 go to consecutive, non-overlapping ranges of one 4 GiB GPU buffer (0x1100000000 upward). 64 dispatches wrote 1.83 MB.
+- Hazards in the run: write-write 0, read-after-write 0, write-after-read 0 overlaps. Still 54 of 63 dispatches after the first got a barrier (the tracker sees writes to the same host buffer).
+- Verdict: in data terms a run can be merged (one shader, regular table stride, no dependencies inside the run). It needs a shader variant that fetches its V#s per workgroup (table base + group id * 0xd0) and reaches buffers by address (the DMA/BDA path), so it is recompiler work. Cheaper steps first: (1) skip barriers between non-overlapping writes in the same buffer (54/63 here); (2) do not re-copy the mesh ranges res 0-4 into the ring for every instance of the same mesh (check why constant-ring reuse does not catch them).
+- Not verified: other runs/meshes, other scenes, whether the table stride is always 0xd0, the ring-reuse behaviour for these ranges.
