@@ -6,6 +6,13 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Improved (22 Oct 2026): NVIDIA Reflex loses less frame rate at 4K.** While Reflex sleeps, the
+  GPU work of a frame is now handed to the graphics card in several parts instead of only at the
+  end, so the card waits less. Uncharted 3 at 4K (chapter 2, DLAA, RTX 5070): about 2 to 3 FPS more
+  with Reflex on (for example 54.8 against 52.5), about 4-5%. Reflex is still about 11 to 19%
+  below Reflex off, and it stays off by default. Not measured again: the input delay with this
+  change, and 1080p.
+
 - **New (22 Oct 2026): NVIDIA Reflex option, off by default.** In the in-game menu (Performance) and
   the launcher (Performance), on NVIDIA cards: Off, On, On + Boost. It trades frame rate for input
   delay, and only when the graphics card limits the frame rate. Uncharted 3 at 4K (chapter 2, DLAA,

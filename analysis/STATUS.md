@@ -3729,3 +3729,60 @@ Frame Generation smoke run (same scene, DLSS DLAA, window 2560x1440).
 Not verified / open: generated-frame image quality; hudless is not passed (the HUD may ghost; the upscaled scene precedes the game's post/tonemap, so it is not a valid hudless); U2's camera view x points to screen left (NGX documents right); TAA and FSR paths; resize and HDR; live toggling; latency with FG; U1, U2 and other chapters; long soak; GPUs without FG; ring memory about 100 MB per slot at 4K.
 
 Toggle bits: ReflexSleep 8388608, FrameGeneration 16777216, ReflexNoSleep 33554432, FrameGenStdSleep 67108864. Settings and env: reflex / GOW3_REFLEX, GOW3_REFLEX_EXT=0, GOW3_REFLEX_LOG (15th column `state`), GOW3_REFLEX_VARIANT (diagnostic, 2/3); frame_gen / GOW3_FRAME_GEN, GOW3_FRAME_GEN_EXT=0, GOW3_NGX_LOG.
+
+## Reflex: GPU idle diagnosis and early submit (22 Oct 2026)
+
+Setup (all numbers measured 22 Oct): U3 chapter 2 Mercado de Carne, 4K DLAA, RTX 5070, frame generation off, reflex 1, GOW3_GPU_PROFILE=1. Toggle files switch the states live inside one session; windows of 15 s (30 s in the diagnosis session), 2 per state, no confidence intervals, one session each.
+
+### Diagnosis: where the Reflex frame rate goes
+
+Diagnosis session, 4 windows of 30 s in the order on, off, off, on:
+
+| Measure | Reflex on | Reflex off (toggle ReflexSleep set; the log shows mode 0) |
+|---|---|---|
+| FPS, two windows | 53.5 and 52.6 | 63.7 and 65.1 (about -19% with Reflex on) |
+| GPU time per frame (profiler) | 18.9 ms | 15.65 ms |
+| DLSS evaluate | 8.0 ms | 8.2 ms |
+| GPU clock mean, two windows | 2955 / 2956 MHz | 2932 / 2926 MHz |
+| GPU utilization | 79% | 96-97% |
+| Power | 172 W | 204 W |
+| "(between submissions: GPU idle)", total | 4.12 ms/frame | 0.48 ms/frame |
+| of which at Process loop -> Rasterizer::Flush (sceGnmSubmitDone tail, liverpool.cpp ~:659) | 3.48 ms (5.6 events/frame) | 0.21 ms (3.0 events/frame) |
+
+- The GPU work itself is unchanged (DLSS evaluate 8.0 vs 8.2 ms) and the clocks do not explain the loss (they are higher with the sleep). All of the extra GPU time per frame is idle time between submissions, mostly at the end-of-batch flush of sceGnmSubmitDone.
+- Mean sleep 8 ms. Reflex timeouts 0.
+
+### Early submit (change)
+
+While Reflex sleeps, the GPU command thread now submits the recorded work of a sceGnmSubmitDone batch every N draws and dispatches instead of only at the batch end (liverpool.cpp, EarlySubmit). Toggle bit ReflexEarlySubmit 134217728 in Disabled2 (bit set = old behaviour). Env GOW3_REFLEX_EARLY_DRAWS, default 80, 0 = never. Active only while Reflex sleeps (gow3_reflex SleepActive()).
+
+| Session | Early submit | No early submit | Sleep off |
+|---|---|---|---|
+| Threshold 80, FPS | 54.8, 54.9 | 52.5, 52.5 | 65.7, 67.5 |
+| Threshold 80, GPU ms/frame | 18.2 | 19.1 | - |
+| Threshold 80, GPU idle ms/frame | 3.9 | about 4.5 | - |
+| Threshold 24, FPS | 53.4, 53.2 | 50.9, 50.6 | 60.3 (one window had a 246 ms hitch) |
+| Threshold 24, GPU ms/frame | 18.8 | 19.6 | - |
+| Threshold 24, GPU idle ms/frame | 4.2 | 4.5 | - |
+
+- Gain: about +2.3 to +2.6 FPS (about 4-5%), independent of the threshold (80 or 24). Reflex stays well below sleep off.
+- The 3.4-3.5 ms gap at the SubmitDone flush stack did not move: it stays 3.41-3.48 ms with early submit on.
+
+INFERENCE, not proven: with the sleep the GPU is drained at each batch, so the frame time follows the CPU chain (guest simulation and command production, stage A) instead of overlapping the previous frame's GPU work. The loss is then largely inherent to less pipelining, not a port stall that early submission removes. This fits the unchanged flush-stack gap above; no test isolated it.
+
+### Frame Generation model (NGX)
+
+NGX SDK 310.9.16 (tag v310.9.16) has no documented application-side parameter to choose the DLSS-G model or preset. The model (Preset B) can only be set through the NVIDIA App, so no launcher or menu selector was added. Header evidence: nvsdk_ngx_defs_dlssg.h has no preset or model parameter; the creation parameters include UserInterfaceRecompositionEnabled and LiteCandidateBlendingEnabled, which are not model selectors. Whether the NVIDIA App override reaches this NGX-direct port is unknown.
+
+Also: a build made during packaging (gow3-probe.exe 12:56) exited silently right after boot twice; a rebuild with build.sh fixed it. Cause unknown, not investigated.
+
+Not verified:
+- Input latency with early submit was not re-measured.
+- 1080p was not re-run.
+- Frame Generation together with Reflex at 4K is untested.
+- No confidence intervals: 2 windows per state, one session each.
+- No independent concurrency review of EarlySubmit.
+- Reflex logs (driver timings) were not collected in these sessions.
+- Cause of the silent boot exit of the packaged build is unknown.
+
+Toggle bit: ReflexEarlySubmit 134217728. Env: GOW3_REFLEX_EARLY_DRAWS.
