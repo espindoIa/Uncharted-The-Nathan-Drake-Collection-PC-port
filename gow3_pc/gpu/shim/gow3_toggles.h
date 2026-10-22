@@ -173,6 +173,9 @@ enum : std::uint64_t {
     /// frame, no markers unless GOW3_REFLEX_LOG is set), whatever the `reflex` setting says: a live
     /// A/B in one run (gow3_reflex.cpp, 22 Oct 2026).
     ReflexSleep = 8388608,
+    /// Bit set: DLSS Frame Generation is off (real frames only, the plain frame limit), whatever
+    /// the `frame_gen` setting says: a live A/B in one run (vk_presenter.cpp, 22 Oct 2026).
+    FrameGeneration = 16777216,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

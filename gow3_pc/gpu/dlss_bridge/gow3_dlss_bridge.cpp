@@ -197,8 +197,10 @@ void DropFrameGen() {
 
 void ReleaseFeature() {
     std::lock_guard lock(ngx_mutex);
+    // 22 Oct review: super resolution only. The draw thread calls this on a resize/HDR/model
+    // change after waiting for its own scheduler, while the swap thread may still have a frame
+    // generation evaluate in flight; FrameGenRelease frees that feature (Shutdown drops both).
     DropFeature();
-    DropFrameGen();
 }
 
 int32_t CreateFeature(VkCommandBuffer command, const Gow3DlssFeature* desc) {

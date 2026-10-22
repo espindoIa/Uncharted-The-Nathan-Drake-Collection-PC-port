@@ -171,6 +171,7 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
         frame.present_done = fence;
         free_queue.push(&frame);
     }
+    rasterizer->GetUpscaler().SetFrameGenRing(num_images + 1);
 
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
@@ -646,6 +647,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // gow3 22 Oct 2026: the frame's Reflex id is its flip's ordinal (the guest counts the same
     // flips when it asks for them, Gow3Reflex::GuestFlipRequest).
     frame->serial = Gow3Reflex::PreparedFlip();
+    // gow3 22 Oct 2026: the upscale this flip shows recorded them before (same command stream).
+    frame->frame_gen = rasterizer->GetUpscaler().TakeFrameGenInputs(frame->frame_gen_inputs);
 
     const auto frame_subresources = vk::ImageSubresourceRange{
         .aspectMask = vk::ImageAspectFlagBits::eColor,
@@ -1106,6 +1109,7 @@ Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     // gow3 22 Oct 2026: a blank frame the guest flipped (buffer -1, not the present thread's black
     // frame) is a flip like any other for Reflex: the guest counted it (GuestFlipRequest).
     frame->serial = present_thread ? 0 : Gow3Reflex::PreparedFlip();
+    frame->frame_gen = false;
 
     auto& scheduler = present_thread ? present_scheduler : draw_scheduler;
     scheduler.EndRendering();
@@ -1258,6 +1262,14 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
 
+    // gow3 22 Oct 2026: DLSS Frame Generation presents its frame first. Any frame without one
+    // (frame generation off or skipped, black, loading or repeated frames) makes the next
+    // evaluation a reset: the two frames it would interpolate between are not neighbours.
+    if (!is_game_frame || is_reusing_frame || !PresentGenerated(frame)) {
+        frame_gen_reset = true;
+        frame_gen_active.store(false, std::memory_order_relaxed);
+    }
+
     const bool acquired = swapchain.AcquireNextImage();
     SubmitLog::Event("A1", "%u", frame->id);
     if (!acquired) {
@@ -1265,6 +1277,10 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         if (!swapchain.AcquireNextImage()) {
             // User resizes the window too fast and GPU can't keep up. Skip this frame.
             LOG_WARNING(Render_Vulkan, "Skipping frame!");
+            // 22 Oct review: PresentGenerated may have submitted an evaluation reading
+            // frame->image and the ring slot, and present_done is still the old signaled fence,
+            // so GetRenderFrame would not wait for it. Rare path: wait for the present queue.
+            present_scheduler.Finish();
             free_frame();
             return;
         }
@@ -1278,7 +1294,6 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                "Unexpected error resetting present done fence: {}", vk::to_string(reset_result));
 
     // gow3: the game frame is blitted (letterboxed) straight into the swapchain image.
-    const vk::Image swapchain_image = swapchain.Image();
     auto& scheduler = present_scheduler;
     const auto cmdbuf = scheduler.CommandBuffer();
 
@@ -1291,104 +1306,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     {
         const vk::Extent2D extent = swapchain.GetExtent();
         SetExpectedGameSize(s32(extent.width), s32(extent.height));
-        const vk::ImageSubresourceRange color_range{
-            .aspectMask = vk::ImageAspectFlagBits::eColor,
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = VK_REMAINING_ARRAY_LAYERS,
-        };
-        const std::array pre_barriers{
-            vk::ImageMemoryBarrier{
-                .srcAccessMask = vk::AccessFlagBits::eNone,
-                .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
-                .oldLayout = vk::ImageLayout::eUndefined,
-                .newLayout = vk::ImageLayout::eTransferDstOptimal,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = swapchain_image,
-                .subresourceRange = color_range,
-            },
-            vk::ImageMemoryBarrier{
-                .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
-                .dstAccessMask = vk::AccessFlagBits::eTransferRead,
-                .oldLayout = vk::ImageLayout::eGeneral,
-                .newLayout = vk::ImageLayout::eTransferSrcOptimal,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = frame->image,
-                .subresourceRange = color_range,
-            },
-        };
-        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
-                               vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
-                               {}, {}, pre_barriers);
-        const vk::ImageBlit blit =
-            MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height);
-        // 20 Oct audit: the 4K clear cost GPU time every present; only letterbox bars need it.
-        const bool covers = blit.dstOffsets[0].x == 0 && blit.dstOffsets[0].y == 0 &&
-                            blit.dstOffsets[1].x == s32(extent.width) &&
-                            blit.dstOffsets[1].y == s32(extent.height);
-        if (!covers) {
-            const vk::ClearColorValue black{std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}};
-            cmdbuf.clearColorImage(swapchain_image, vk::ImageLayout::eTransferDstOptimal, black,
-                                   color_range);
-            const vk::MemoryBarrier clear_done{
-                .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
-                .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
-            };
-            cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
-                                   vk::PipelineStageFlagBits::eTransfer,
-                                   vk::DependencyFlagBits::eByRegion, clear_done, {}, {});
-        }
-        cmdbuf.blitImage(frame->image, vk::ImageLayout::eTransferSrcOptimal, swapchain_image,
-                         vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
-        // gow3: the settings menu / FPS counter over the frame, at display resolution.
-        const bool overlay = Gow3Overlay::Visible();
-        const std::array post_barriers{
-            vk::ImageMemoryBarrier{
-                .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
-                .dstAccessMask = overlay ? vk::AccessFlagBits::eColorAttachmentRead |
-                                               vk::AccessFlagBits::eColorAttachmentWrite
-                                         : vk::AccessFlagBits::eNone,
-                .oldLayout = vk::ImageLayout::eTransferDstOptimal,
-                .newLayout = overlay ? vk::ImageLayout::eColorAttachmentOptimal
-                                     : vk::ImageLayout::ePresentSrcKHR,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = swapchain_image,
-                .subresourceRange = color_range,
-            },
-            vk::ImageMemoryBarrier{
-                .srcAccessMask = vk::AccessFlagBits::eTransferRead,
-                .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
-                .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
-                .newLayout = vk::ImageLayout::eGeneral,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = frame->image,
-                .subresourceRange = color_range,
-            },
-        };
-        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
-                               vk::PipelineStageFlagBits::eAllCommands,
-                               vk::DependencyFlagBits::eByRegion, {}, {}, post_barriers);
-        if (overlay) {
-            Gow3Overlay::Render(cmdbuf, swapchain.ImageView(), extent);
-            const vk::ImageMemoryBarrier to_present{
-                .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
-                .dstAccessMask = vk::AccessFlagBits::eNone,
-                .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
-                .newLayout = vk::ImageLayout::ePresentSrcKHR,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = swapchain_image,
-                .subresourceRange = color_range,
-            };
-            cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
-                                   vk::PipelineStageFlagBits::eBottomOfPipe,
-                                   vk::DependencyFlagBits::eByRegion, {}, {}, to_present);
-        }
+        BlitToSwapchain(cmdbuf, frame->image, frame->width, frame->height);
     }
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.endDebugUtilsLabelEXT();
@@ -1431,6 +1349,292 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     if (!is_reusing_frame && is_game_frame) {
         DebugState.IncFlipFrameNum();
     }
+}
+
+void Presenter::BlitToSwapchain(vk::CommandBuffer cmdbuf, vk::Image source, u32 width,
+                                u32 height) {
+    const vk::Image swapchain_image = swapchain.Image();
+    {
+        const vk::Extent2D extent = swapchain.GetExtent();
+        const vk::ImageSubresourceRange color_range{
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = VK_REMAINING_ARRAY_LAYERS,
+        };
+        const std::array pre_barriers{
+            vk::ImageMemoryBarrier{
+                .srcAccessMask = vk::AccessFlagBits::eNone,
+                .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+                .oldLayout = vk::ImageLayout::eUndefined,
+                .newLayout = vk::ImageLayout::eTransferDstOptimal,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = swapchain_image,
+                .subresourceRange = color_range,
+            },
+            vk::ImageMemoryBarrier{
+                .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+                .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+                .oldLayout = vk::ImageLayout::eGeneral,
+                .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = source,
+                .subresourceRange = color_range,
+            },
+        };
+        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+                               vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
+                               {}, {}, pre_barriers);
+        const vk::ImageBlit blit = MakeImageBlitFit(width, height, extent.width, extent.height);
+        // 20 Oct audit: the 4K clear cost GPU time every present; only letterbox bars need it.
+        const bool covers = blit.dstOffsets[0].x == 0 && blit.dstOffsets[0].y == 0 &&
+                            blit.dstOffsets[1].x == s32(extent.width) &&
+                            blit.dstOffsets[1].y == s32(extent.height);
+        if (!covers) {
+            const vk::ClearColorValue black{std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}};
+            cmdbuf.clearColorImage(swapchain_image, vk::ImageLayout::eTransferDstOptimal, black,
+                                   color_range);
+            const vk::MemoryBarrier clear_done{
+                .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+                .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+            };
+            cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                                   vk::PipelineStageFlagBits::eTransfer,
+                                   vk::DependencyFlagBits::eByRegion, clear_done, {}, {});
+        }
+        cmdbuf.blitImage(source, vk::ImageLayout::eTransferSrcOptimal, swapchain_image,
+                         vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
+        // gow3: the settings menu / FPS counter over the frame, at display resolution.
+        const bool overlay = Gow3Overlay::Visible();
+        const std::array post_barriers{
+            vk::ImageMemoryBarrier{
+                .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+                .dstAccessMask = overlay ? vk::AccessFlagBits::eColorAttachmentRead |
+                                               vk::AccessFlagBits::eColorAttachmentWrite
+                                         : vk::AccessFlagBits::eNone,
+                .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+                .newLayout = overlay ? vk::ImageLayout::eColorAttachmentOptimal
+                                     : vk::ImageLayout::ePresentSrcKHR,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = swapchain_image,
+                .subresourceRange = color_range,
+            },
+            vk::ImageMemoryBarrier{
+                .srcAccessMask = vk::AccessFlagBits::eTransferRead,
+                .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+                .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
+                .newLayout = vk::ImageLayout::eGeneral,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = source,
+                .subresourceRange = color_range,
+            },
+        };
+        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                               vk::PipelineStageFlagBits::eAllCommands,
+                               vk::DependencyFlagBits::eByRegion, {}, {}, post_barriers);
+        if (overlay) {
+            Gow3Overlay::Render(cmdbuf, swapchain.ImageView(), extent);
+            const vk::ImageMemoryBarrier to_present{
+                .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+                .dstAccessMask = vk::AccessFlagBits::eNone,
+                .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
+                .newLayout = vk::ImageLayout::ePresentSrcKHR,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = swapchain_image,
+                .subresourceRange = color_range,
+            };
+            cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
+                                   vk::PipelineStageFlagBits::eBottomOfPipe,
+                                   vk::DependencyFlagBits::eByRegion, {}, {}, to_present);
+        }
+    }
+}
+
+bool Presenter::PresentGenerated(Frame* frame) {
+    auto& settings = Gow3Settings::Get();
+    if (settings.frame_gen_supported) {
+        // 22 Oct 2026: the inputs are the upscaler's depth and motion vectors; with anti-aliasing
+        // off there are none.
+        settings.frame_gen_problem =
+            settings.frame_gen && settings.upscaler == Gow3Settings::UpscalerOff
+                ? "needs anti-aliasing (TAA, FSR or DLSS) for its depth and motion vectors"
+                : nullptr;
+    }
+    // Not for frames without an upscale (menus, movies, loading), with the in-game menu open (it
+    // is drawn over both frames and would smear), or right after an HDR switch (the frame image
+    // and the feature still have the other format).
+    if (!frame->frame_gen || !Dlss::FrameGenWanted() || Gow3Overlay::CapturesInput() ||
+        frame->is_hdr != swapchain.GetHDR()) {
+        return false;
+    }
+    Dlss* dlss = Dlss::Get();
+    const auto& inputs = frame->frame_gen_inputs;
+    const vk::Format format = swapchain.GetSurfaceFormat().format;
+    const Dlss::FrameGenDesc desc{frame->width, frame->height, inputs.depth.width,
+                                  inputs.depth.height, format};
+    if (frame_gen_failed == desc) {
+        return false;
+    }
+    static const bool storable = [&] {
+        const auto features = instance.GetPhysicalDevice().getFormatProperties(format);
+        const bool ok = bool(features.optimalTilingFeatures & vk::FormatFeatureFlagBits::eStorageImage);
+        if (!ok) {
+            std::printf("Frame generation: off (%s cannot be a storage image)\n",
+                        vk::to_string(format).c_str());
+        }
+        return ok;
+    }();
+    if (!storable) {
+        return false;
+    }
+    auto& scheduler = present_scheduler;
+    const vk::Device device = instance.GetDevice();
+    if (!frame_gen_output || frame_gen_width != frame->width ||
+        frame_gen_height != frame->height || frame_gen_format != format ||
+        !dlss->HasFrameGenFeature(desc)) {
+        // The previous output and feature may still be in use by submitted presents (a window
+        // resize, an HDR switch or a new render size: rare).
+        scheduler.Finish();
+        if (!frame_gen_output || frame_gen_width != frame->width ||
+            frame_gen_height != frame->height || frame_gen_format != format) {
+            frame_gen_output_view.reset();
+            frame_gen_output = VideoCore::UniqueImage(device, instance.GetAllocator());
+            frame_gen_output.Create(vk::ImageCreateInfo{
+                .imageType = vk::ImageType::e2D,
+                .format = format,
+                .extent = {frame->width, frame->height, 1},
+                .mipLevels = 1,
+                .arrayLayers = 1,
+                .samples = vk::SampleCountFlagBits::e1,
+                .tiling = vk::ImageTiling::eOptimal,
+                .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
+                         vk::ImageUsageFlagBits::eTransferSrc,
+                .initialLayout = vk::ImageLayout::eUndefined,
+            });
+            frame_gen_output_view = Check(device.createImageViewUnique({
+                .image = vk::Image(frame_gen_output),
+                .viewType = vk::ImageViewType::e2D,
+                .format = format,
+                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+            }));
+            frame_gen_width = frame->width;
+            frame_gen_height = frame->height;
+            frame_gen_format = format;
+        }
+        if (!dlss->HasFrameGenFeature(desc)) {
+            if (!dlss->FrameGenCreate(scheduler.CommandBuffer(), desc)) {
+                std::printf("Frame generation: feature creation failed (%ux%u, depth and motion "
+                            "%ux%u); off for this size\n",
+                            desc.width, desc.height, desc.render_width, desc.render_height);
+                frame_gen_failed = desc;
+                return false;
+            }
+            std::printf("Frame generation: feature created (%ux%u, depth and motion %ux%u, %s)\n",
+                        desc.width, desc.height, desc.render_width, desc.render_height,
+                        vk::to_string(format).c_str());
+            frame_gen_reset = true;
+        }
+    }
+
+    // The real frames' interval, for the pacing below.
+    const auto start = std::chrono::steady_clock::now();
+    const auto real_interval = start - frame_gen_last_real;
+    frame_gen_last_real = start;
+
+    const vk::Image output = vk::Image(frame_gen_output);
+    const vk::ImageSubresourceRange color{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+    const auto cmdbuf = scheduler.CommandBuffer();
+    // The last blit read the output: its contents are not needed.
+    const vk::ImageMemoryBarrier2 to_write{
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eNone,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eGeneral,
+        .image = output,
+        .subresourceRange = color,
+    };
+    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_write});
+    // The backbuffer is the frame image as Present shows it (game HUD included; the overlay is
+    // drawn after, on both frames). No hudless image: the upscaled scene the port has is before
+    // the game's post, tonemap or the presenter's sharpening, and NGX needs it equal to the
+    // backbuffer outside the HUD (DLSS-FG guide, pHudless).
+    const bool ok = dlss->FrameGenEvaluate(
+        cmdbuf, {
+                    .backbuffer = {frame->image, frame->image_view, format,
+                                   vk::ImageAspectFlagBits::eColor, frame->width, frame->height},
+                    .depth = inputs.depth,
+                    .motion = inputs.motion,
+                    .output = {output, *frame_gen_output_view, format,
+                               vk::ImageAspectFlagBits::eColor, frame->width, frame->height},
+                    .camera = inputs.camera,
+                    .jitter_x = inputs.jitter[0],
+                    .jitter_y = inputs.jitter[1],
+                    .reset = frame_gen_reset || inputs.reset,
+                    .hdr = frame->is_hdr,
+                });
+    // NGX may leave Vulkan state changed (DLSS guide 5.2.5).
+    scheduler.GetDynamicState().Invalidate();
+    if (!ok) {
+        static bool printed = false;
+        if (!printed) {
+            printed = true;
+            std::printf("Frame generation: evaluation failed; real frames only\n");
+        }
+        return false; // the barrier above goes out with the real frame's present
+    }
+    frame_gen_reset = false;
+    const vk::MemoryBarrier2 written{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                                     .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                                     .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                                     .dstAccessMask = vk::AccessFlagBits2::eTransferRead};
+    cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &written});
+    // A submission of its own: its first wait (the frame's rendering) covers all stages, NGX's
+    // compute included (Scheduler::Flush: the second wait covers color output only).
+    {
+        SubmitInfo info{};
+        info.AddWait(frame->ready_semaphore, frame->ready_tick);
+        scheduler.Flush(info);
+    }
+    if (!swapchain.AcquireNextImage()) {
+        // 22 Oct review: eSuboptimalKHR still acquires an image and signals the semaphore, but
+        // frame_index does not advance; Present would acquire again on the same semaphore
+        // (VUID 01286) and leak the image. Recreate here as Present does. The output and the
+        // feature follow the frame and format checks above on the next call; Present resets.
+        if (window.GetWidth() != 0 && window.GetHeight() != 0) {
+            swapchain.Recreate(window.GetWidth(), window.GetHeight());
+        }
+        return false;
+    }
+    BlitToSwapchain(scheduler.CommandBuffer(), output, frame->width, frame->height);
+    {
+        SubmitInfo info{};
+        info.AddWait(swapchain.GetImageAcquiredSemaphore());
+        info.AddSignal(swapchain.GetPresentReadySemaphore());
+        scheduler.Flush(info);
+    }
+    // No Reflex markers: they belong to the real frame's present.
+    {
+        std::scoped_lock present_lock{PresentLock(instance)};
+        if (!swapchain.Present() && window.GetWidth() != 0 && window.GetHeight() != 0) {
+            swapchain.Recreate(window.GetWidth(), window.GetHeight());
+            return false;
+        }
+    }
+    frame_gen_active.store(true, std::memory_order_relaxed);
+    // The real frame half a real interval after the generated one (DLSS-FG guide 7: equal
+    // spacing). The first frame after a pause (an interval over 100 ms) does not wait.
+    if (real_interval < std::chrono::milliseconds(100)) {
+        std::this_thread::sleep_until(std::chrono::steady_clock::now() + real_interval / 2);
+    }
+    return true;
 }
 
 Frame* Presenter::GetRenderFrame() {

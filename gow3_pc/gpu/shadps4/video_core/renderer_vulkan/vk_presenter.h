@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <deque>
+#include <optional>
 
 #include <condition_variable>
 
@@ -14,6 +17,7 @@
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
+#include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/texture_cache/texture_cache.h"
 
 namespace Frontend {
@@ -41,6 +45,10 @@ struct Frame {
     /// (Gow3Reflex::PreparedFlip, set when the frame is prepared); 0 for the black frames drawn
     /// without a flip.
     u64 serial{};
+    /// gow3 22 Oct 2026: the frame's DLSS Frame Generation inputs (Presenter::PresentGenerated),
+    /// taken from the upscaler when the frame is prepared; false for frames without an upscale.
+    bool frame_gen{};
+    TemporalUpscaler::FrameGenInputs frame_gen_inputs{};
 };
 
 enum SchedulerType {
@@ -110,8 +118,21 @@ public:
     void PresentLoadingFrame();
     Frame* PrepareLastFrame();
 
+    /// gow3 22 Oct 2026: the last game frame was presented with a generated frame before it
+    /// (the frame limiter paces real frames at half the limit then).
+    [[nodiscard]] bool FrameGenActive() const noexcept {
+        return frame_gen_active.load(std::memory_order_relaxed);
+    }
+
 private:
     Frame* GetRenderFrame();
+
+    /// DLSS Frame Generation: evaluates and presents the frame between the last one and `frame`,
+    /// then waits until `frame` is due. False (nothing presented) when it does not apply.
+    bool PresentGenerated(Frame* frame);
+    /// Blits `source` (General layout, kept) letterboxed into the acquired swapchain image and
+    /// draws the overlay over it; the image ends in the present layout.
+    void BlitToSwapchain(vk::CommandBuffer cmdbuf, vk::Image source, u32 width, u32 height);
 
     void RecreateFrame(Frame* frame, u32 width, u32 height);
 
@@ -145,6 +166,15 @@ private:
     std::condition_variable free_cv;
     std::condition_variable_any frame_cv;
     std::vector<VAddr> vo_buffers_addr;
+    // DLSS Frame Generation (swap thread).
+    VideoCore::UniqueImage frame_gen_output;
+    vk::UniqueImageView frame_gen_output_view;
+    u32 frame_gen_width{}, frame_gen_height{};
+    vk::Format frame_gen_format{};
+    std::optional<Dlss::FrameGenDesc> frame_gen_failed; ///< creation failed for this one
+    bool frame_gen_reset{true};
+    std::atomic<bool> frame_gen_active{false};
+    std::chrono::steady_clock::time_point frame_gen_last_real{};
 };
 
 } // namespace Vulkan

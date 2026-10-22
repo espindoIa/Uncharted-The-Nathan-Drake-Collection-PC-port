@@ -1115,6 +1115,12 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     auto frame_period = frame_limit ? std::chrono::nanoseconds(1000000000 / frame_limit)
                                     : std::chrono::nanoseconds(0);
     auto next_flip = std::chrono::steady_clock::now();
+    // gow3 22 Oct 2026: while DLSS Frame Generation shows a generated frame before each real one
+    // (Presenter::PresentGenerated), the limit is the rate shown: the real frames get half of it.
+    // When it is skipped (menus, movies, loading) the frames are shown alone at the full limit.
+    const auto flip_period = [&] {
+        return presenter->FrameGenActive() ? frame_period * 2 : frame_period;
+    };
     std::printf("VideoOut: vblank %u Hz, frame limit %u FPS\n",
                 EmulatorSettings.GetVblankFrequency(), frame_limit);
 
@@ -1300,7 +1306,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         if (flip_slot && vblank_status.count % (main_port.flip_rate + 1) == 0) {
             const auto request = receive_request();
             if (request && frame_limit) {
-                next_flip = std::max(next_flip + frame_period, now - frame_period);
+                next_flip = std::max(next_flip + flip_period(), now - flip_period());
             }
             if (!request) {
                 if (timer.GetTotalWait().count() < 0) { // Dont draw too fast
@@ -1370,7 +1376,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                 const auto now = std::chrono::steady_clock::now();
                 const auto request = receive_request();
                 if (request) {
-                    next_flip = std::max(next_flip + frame_period, now - frame_period);
+                    next_flip = std::max(next_flip + flip_period(), now - flip_period());
                     Flip(request);
                     FRAME_END;
                 }
@@ -1404,7 +1410,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             const auto now = std::chrono::steady_clock::now();
             const auto request = receive_request();
             if (request) {
-                next_flip = std::max(next_flip + frame_period, now - frame_period);
+                next_flip = std::max(next_flip + flip_period(), now - flip_period());
                 Flip(request);
                 FRAME_END;
             }

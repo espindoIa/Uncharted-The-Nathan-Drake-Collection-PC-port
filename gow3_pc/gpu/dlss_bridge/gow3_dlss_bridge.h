@@ -113,8 +113,8 @@ typedef struct Gow3DlssApi {
                           PFN_vkGetDeviceProcAddr get_device_proc);
     int32_t (*CreateFeature)(VkCommandBuffer command, const Gow3DlssFeature* feature);
     int32_t (*Evaluate)(VkCommandBuffer command, const Gow3DlssEvaluate* evaluate);
-    // The caller must have waited for the GPU work that used the feature. Releases the frame
-    // generation feature too.
+    // The caller must have waited for the GPU work that used the feature. Super resolution only:
+    // the frame generation feature stays (FrameGenRelease; Shutdown drops both).
     void (*ReleaseFeature)(void);
     void (*Shutdown)(void);
 
