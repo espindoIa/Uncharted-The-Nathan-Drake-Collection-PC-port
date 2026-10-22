@@ -15,7 +15,7 @@ see the screen as it is now, in a loop (look, decide, act).
                                                inputs since the mark (pauses between steps shortened)
     python tools/play.py replay <route> [--times N]        played back by the game itself
                          [--marks 10,30 --prefix P]        shots at those seconds and at the end
-    python tools/play.py measure 20 [--route R] [--tag T]  frame times (port and PresentMon), GPU use
+    python tools/play.py measure 20 [--route R] [--tag T]  frame times (port and PresentMon), GPU use, CPU threads
     python tools/play.py presentmon file.csv   the same PresentMon summary for any capture
     python tools/play.py compare a.png b.png   SSIM and changed pixels of two shots
     python tools/play.py stop
@@ -525,6 +525,115 @@ def cmd_presentmon(args):
     print("\n".join(presentmon_lines(args.tag or Path(args.csv).stem, args.csv)))
 
 
+def game_pid():
+    out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Uncharted.exe", "/NH", "/FO", "CSV"],
+                         capture_output=True, text=True, errors="replace").stdout
+    rows = [l.split('","') for l in out.splitlines() if l.startswith('"')]  # "no tasks" text is localized
+    if not rows:
+        raise OSError("Uncharted.exe is not running")
+    return int(rows[0][1])
+
+
+def cpu_snapshot(pid):
+    """22 Oct 2026 (roadmap: measure thread usage in every test). Idle and busy ticks (100 ns) of each
+    logical CPU, and name, kernel and user ticks of each thread of pid. Win32 calls through ctypes,
+    not PDH/typeperf: their counter names are localized. Threads that ended before the snapshot are lost."""
+    import ctypes
+    from ctypes import wintypes as w
+    k32, nt = ctypes.WinDLL("kernel32"), ctypes.WinDLL("ntdll")
+    vp = ctypes.c_void_p
+    k32.CreateToolhelp32Snapshot.restype, k32.CreateToolhelp32Snapshot.argtypes = vp, [w.DWORD, w.DWORD]
+    for fn in (k32.Thread32First, k32.Thread32Next):
+        fn.argtypes = [vp, ctypes.POINTER(w.DWORD)]
+    k32.OpenThread.restype, k32.OpenThread.argtypes = vp, [w.DWORD, w.BOOL, w.DWORD]
+    k32.GetThreadTimes.argtypes = [vp] * 5
+    k32.GetThreadDescription.argtypes = [vp, vp]
+    k32.LocalFree.argtypes = k32.CloseHandle.argtypes = [vp]
+
+    class CpuPerf(ctypes.Structure):  # SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION; Kernel includes Idle
+        _fields_ = [(n, ctypes.c_longlong) for n in ("idle", "kernel", "user", "dpc", "intr")] + [("n", ctypes.c_ulong)]
+
+    perf, size = (CpuPerf * 256)(), ctypes.c_ulong()
+    status = nt.NtQuerySystemInformation(8, perf, ctypes.sizeof(perf), ctypes.byref(size))
+    if status:
+        raise OSError(f"NtQuerySystemInformation 0x{status & 0xffffffff:x}")
+    cpus = [(c.idle, c.kernel + c.user) for c in perf[:size.value // ctypes.sizeof(CpuPerf)]]
+    now, tids = time.perf_counter(), []
+    snap = k32.CreateToolhelp32Snapshot(4, 0)  # TH32CS_SNAPTHREAD
+    if snap in (None, vp(-1).value):
+        raise OSError("CreateToolhelp32Snapshot failed")
+    entry = (w.DWORD * 7)(28)  # THREADENTRY32: size, usage, tid, owner pid, 3 more
+    ok = k32.Thread32First(snap, entry)
+    while ok:
+        if entry[3] == pid:
+            tids.append(entry[2])
+        ok = k32.Thread32Next(snap, entry)
+    k32.CloseHandle(snap)
+    threads = {}
+    for tid in tids:
+        h = k32.OpenThread(0x800, False, tid)  # THREAD_QUERY_LIMITED_INFORMATION
+        if not h:  # ended already, or access denied
+            continue
+        try:
+            t, text = (ctypes.c_ulonglong * 4)(), vp()  # FILETIMEs: creation, exit, kernel, user
+            if not k32.GetThreadTimes(h, *(ctypes.byref(t, 8 * i) for i in range(4))):
+                continue
+            name = ""
+            if k32.GetThreadDescription(h, ctypes.byref(text)) >= 0 and text.value:
+                name = ctypes.wstring_at(text.value)
+                k32.LocalFree(text)
+            threads[tid] = (name or f"tid {tid}", t[2], t[3])
+        finally:
+            k32.CloseHandle(h)
+    if not threads:
+        raise OSError(f"no readable threads for pid {pid} (not running, or access denied)")
+    return {"t": now, "pid": pid, "cpus": cpus, "threads": threads}
+
+
+def cpu_snap(prev=None):
+    """cpu_snapshot of the game, or the error instead of raising: measure must not fail on it."""
+    try:
+        return cpu_snapshot(prev["pid"] if isinstance(prev, dict) else game_pid())
+    except Exception as e:
+        return e
+
+
+def cpu_use_lines(tag, out_dir, a, b):
+    """Per-CPU busy% and per-thread CPU time between two cpu_snap()s (100% = one full core); also
+    saved as <tag>.cpu.json."""
+    try:
+        for s in (a, b):
+            if isinstance(s, Exception):
+                raise s
+        secs = b["t"] - a["t"]
+        cpus = [100 * (1 - (i1 - i0) / max(1, t1 - t0)) for (i0, t0), (i1, t1) in zip(a["cpus"], b["cpus"])]
+        rows, groups = [], {}
+        for tid, (name, kern, user) in b["threads"].items():
+            _, kern0, user0 = a["threads"].get(tid, (name, 0, 0))  # a thread born in the window starts at 0
+            row = {"tid": tid, "name": name, "busy_pct": round((kern - kern0 + user - user0) / 1e5 / secs, 2),
+                   "kernel_pct": round((kern - kern0) / 1e5 / secs, 2)}
+            rows.append(row)
+            group = groups.setdefault(name, [0, 0.0])
+            group[0] += 1
+            group[1] += row["busy_pct"]
+        rows.sort(key=lambda r: -r["busy_pct"])
+        cores = sum(r["busy_pct"] for r in rows) / 100
+        pct_of_machine = 100 * cores / len(cpus)
+        (out_dir / f"{tag}.cpu.json").write_text(json.dumps({
+            "window_s": round(secs, 3), "pid": a["pid"], "logical_cpus": len(cpus),
+            "cpu_busy_pct": [round(c, 1) for c in cpus], "process_cores": round(cores, 3),
+            "process_machine_pct": round(pct_of_machine, 1), "threads": rows}, indent=1), encoding="utf-8")
+        top_groups = sorted(groups.items(), key=lambda kv: -kv[1][1])[:12]
+        return [
+            f"{tag} CPU threads: process {cores:.2f} cores busy of {len(cpus)} logical ({pct_of_machine:.0f}% of the machine); "
+            "logical CPUs busy%: " + ", ".join(f"c{i} {c:.0f}" for i, c in enumerate(cpus)),
+            f"{tag} CPU top threads: " + ", ".join(f"{r['name']} {r['busy_pct']:.0f}%" for r in rows[:12]),
+            f"{tag} CPU thread groups: " + ", ".join(
+                f"{n} x{c} {p:.0f}%" if c > 1 else f"{n} {p:.0f}%" for n, (c, p) in top_groups)]
+    except Exception as e:
+        return [f"{tag} CPU threads: unavailable ({str(e) or type(e).__name__})"]
+
+
 def cmd_measure(args):
     state = load_state()
     tag = args.tag or "measure"
@@ -547,6 +656,7 @@ def cmd_measure(args):
                             "-lms", "500"], stdout=subprocess.PIPE, text=True) if shutil.which("nvidia-smi") else None
     before = len(read_frametimes())
     log_before = len(frame_stats(state, 100000))
+    cpu_a = cpu_snap()
     started = time.time()
     if args.route:
         path = route_path(args.route)
@@ -556,6 +666,7 @@ def cmd_measure(args):
             time.sleep(min(length + 0.6, max(0, args.seconds - (time.time() - started))))
     else:
         time.sleep(args.seconds)
+    cpu_b = cpu_snap(cpu_a)
     if smi:
         smi.terminate()
         samples = [l.split(",") for l in smi.communicate()[0].splitlines() if "," in l]
@@ -587,6 +698,7 @@ def cmd_measure(args):
         lines.append(f"{tag} GPU {util:.0f}% busy, {watts:.0f} W (nvidia-smi)")
     for line in frame_stats(state, 100000)[log_before:][-1:]:
         lines.append(f"{tag} last {line[:400]}")
+    lines.extend(cpu_use_lines(tag, out_dir, cpu_a, cpu_b))
     with (out_dir / "results.txt").open("a", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     print("\n".join(lines))
