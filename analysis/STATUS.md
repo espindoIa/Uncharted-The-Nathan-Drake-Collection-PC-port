@@ -3423,3 +3423,25 @@ Same session, other findings:
 - Model M gave 55% less high frequency than K at Performance and costs +0.85 ms.
 
 Not verified: flicker and moire in motion (the guide warns about them with a negative bias); U1 and U2 at DLAA; cost in heavy scenes (the finer mip raises texture bandwidth); one wall crop in one scene is the only sharpness evidence. Toggle bits: 4096 is no longer free.
+
+## 21 October 2026 (late night): which compute shaders fill the pipe
+
+New diagnostic `GOW3_DISPATCH_STATS=1` (`vk_rasterizer.cpp`): per compute shader it reports count per frame, dims, stage A and stage B microseconds per dispatch, consecutive share and max run. Stage B takes a mutex per packet while it is on.
+
+Setup: U3 4K, repo settings (DLAA M, MT on), stats on, so FPS is ~54 instead of ~67-75. Two runs, last 5 s window of each.
+
+Meat market (backup_ch2meat): 2263 draws + 1894 dispatches per frame; dispatches are 45.6% of pipe items. Stage A dispatch 6.92 ms/frame; stage B dispatch 6.78 ms/frame vs draws 6.15 ms/frame.
+- cs 8f067540 (crowd skinning, see the 17 Oct static ranges note): 1529/frame, 1x1x1 in 96%, A 3.7 us + B 3.5 us each (~5.7 ms A + ~5.4 ms B per frame), consecutive 100%, max run 960.
+- cs 0c936dd6: 130/frame, 1x1x1 100%, A 4.4 + B 4.3 us, consecutive 99%, max run 130.
+- cs 7d7e7206 (cloth skinning): 81/frame, 1x1x1 70%, A 4.9 + B 4.1 us, consecutive 98%.
+- cs 2d215c3b: 82/frame, 16x1x1, A 0.8 + B 1.9 us.
+- Once a frame: upscaler/scene cs aec539f0 B 169 us; cloth solvers 1c957b01 / 809864d3 B 58 / 37 us.
+
+Chase (backup_ch2chase): 1705 draws + 1581 dispatches per frame (48.1% of pipe items). Dispatch A 6.21 ms, B 6.00 ms vs draws 4.85 ms/frame. 8f067540 runs 1232/frame with the same per-dispatch costs and runs.
+
+Reading:
+- One shader issued in back-to-back runs of up to 960 single-group dispatches is ~30% of each stage's time.
+- Merging a run into one dispatch (one group per original dispatch, per-group bindings from a table) is the phase-3 candidate of the multi-core roadmap.
+- Estimate, not measured: removing ~5.5 ms from both stages moves these views toward the GPU limit.
+
+Not verified: what 8f067540 binds per dispatch (how many buffers, arena vs stream, whether outputs alias), so whether a run can be merged is open. Numbers are with stats on (mutex in stage B, FPS ~54), so absolute us are inflated vs a normal run; only two views in one chapter.

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <chrono>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -1819,6 +1820,137 @@ void Rasterizer::CheckRingReuse(VAddr address, const u8* copy, u64 size) {
     }
 }
 
+namespace {
+// 21 Oct 2026: GOW3_DISPATCH_STATS=1, which compute shaders fill the pipe (roadmap phase 3).
+// Stage A (GPU command thread) times the dispatch handling up to the pipe commit and counts
+// dims and runs per shader; stage B (draw recording thread) adds its record time under a mutex
+// (only taken with the env set). Stage A prints every 5 s.
+bool DispatchStatsEnabled() {
+    static const bool on = std::getenv("GOW3_DISPATCH_STATS") != nullptr;
+    return on;
+}
+
+struct DispatchStatsA {
+    u64 n = 0, ns = 0, small = 0, consecutive = 0, run = 0, max_run = 0;
+    std::map<std::array<u32, 3>, u32> dims; // {0,0,0}: indirect
+};
+
+struct DispatchStatsState {
+    std::unordered_map<u64, DispatchStatsA> a;
+    u64 last_hash = 0, draws = 0, dispatches = 0, a_ns = 0;
+    std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+    u64 last_flips = AmdGpu::g_gow3_flips.load(std::memory_order_relaxed);
+    std::mutex b_mutex;
+    std::unordered_map<u64, std::pair<u64, u64>> b; // hash -> {dispatches, ns}
+    u64 b_dispatch_ns = 0, b_draw_ns = 0;
+};
+
+DispatchStatsState& DispatchStats() {
+    static DispatchStatsState state;
+    return state;
+}
+
+void DispatchStatsDraw() {
+    auto& s = DispatchStats();
+    ++s.draws;
+    s.last_hash = 0;
+}
+
+void DispatchStatsRecordB(bool dispatch, u64 hash, u64 ns) {
+    auto& s = DispatchStats();
+    std::lock_guard lock{s.b_mutex};
+    if (dispatch) {
+        auto& entry = s.b[hash];
+        ++entry.first;
+        entry.second += ns;
+        s.b_dispatch_ns += ns;
+    } else {
+        s.b_draw_ns += ns;
+    }
+}
+
+void DispatchStatsPrint(std::chrono::steady_clock::time_point now) {
+    auto& s = DispatchStats();
+    const u64 flips = AmdGpu::g_gow3_flips.load(std::memory_order_relaxed);
+    const double frames = std::max<u64>(flips - s.last_flips, 1);
+    std::unordered_map<u64, std::pair<u64, u64>> b;
+    u64 b_dispatch_ns, b_draw_ns;
+    {
+        std::lock_guard lock{s.b_mutex};
+        b.swap(s.b);
+        b_dispatch_ns = std::exchange(s.b_dispatch_ns, 0);
+        b_draw_ns = std::exchange(s.b_draw_ns, 0);
+    }
+    const double items = double(s.draws + s.dispatches);
+    std::printf("Dispatch stats: %.0f frames, %.0f draws/frame, %.0f dispatches/frame (%.1f%% of "
+                "pipe items), stage A dispatch %.2f ms/frame, stage B dispatch %.2f ms/frame vs "
+                "draw %.2f ms/frame\n",
+                frames, s.draws / frames, s.dispatches / frames,
+                items > 0 ? 100.0 * s.dispatches / items : 0.0, s.a_ns / 1e6 / frames,
+                b_dispatch_ns / 1e6 / frames, b_draw_ns / 1e6 / frames);
+    std::vector<std::pair<u64, u64>> order; // {A + B ns, hash}
+    for (const auto& [hash, entry] : s.a) {
+        order.emplace_back(entry.ns + b[hash].second, hash);
+    }
+    std::ranges::sort(order, std::greater<>{});
+    for (size_t i = 0; i < std::min<size_t>(order.size(), 12); ++i) {
+        const u64 hash = order[i].second;
+        const auto& e = s.a[hash];
+        const auto common = std::ranges::max_element(
+            e.dims, [](const auto& l, const auto& r) { return l.second < r.second; });
+        const auto& d = common->first;
+        const auto& bb = b[hash];
+        std::printf("  cs %016llx: %.1f/frame, dims %s, 1x1x1 %.0f%%, A %.1f us/each, B %.1f "
+                    "us/each, consecutive %.0f%%, max run %llu\n",
+                    static_cast<unsigned long long>(hash), e.n / frames,
+                    (d[0] ? fmt::format("{}x{}x{}", d[0], d[1], d[2]) : std::string("indirect"))
+                        .c_str(),
+                    100.0 * e.small / e.n, e.ns / 1e3 / e.n, bb.first ? bb.second / 1e3 / bb.first : 0.0,
+                    100.0 * e.consecutive / e.n, static_cast<unsigned long long>(e.max_run));
+    }
+    std::fflush(stdout);
+    s.a.clear();
+    s.draws = s.dispatches = s.a_ns = 0;
+    s.last_hash = 0;
+    s.window = now;
+    s.last_flips = flips;
+}
+
+struct DispatchStatsScope {
+    const bool on = DispatchStatsEnabled();
+    std::chrono::steady_clock::time_point t0;
+    u64 hash = 0;
+    std::array<u32, 3> dims{};
+    DispatchStatsScope() {
+        if (on) {
+            t0 = std::chrono::steady_clock::now();
+        }
+    }
+    ~DispatchStatsScope() {
+        if (!on || !hash) {
+            return;
+        }
+        auto& s = DispatchStats();
+        const auto now = std::chrono::steady_clock::now();
+        const u64 ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - t0).count();
+        auto& e = s.a[hash];
+        ++e.n;
+        e.ns += ns;
+        e.small += dims == std::array<u32, 3>{1, 1, 1};
+        ++e.dims[dims];
+        e.run = (s.last_hash == hash) ? e.run + 1 : 1;
+        e.consecutive += s.last_hash == hash;
+        e.max_run = std::max(e.max_run, e.run);
+        s.last_hash = hash;
+        ++s.dispatches;
+        s.a_ns += ns;
+        if (now - s.window >= std::chrono::seconds(5)) {
+            DispatchStatsPrint(now);
+        }
+    }
+};
+} // namespace
+
 void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_prepared,
                           bool is_indexed, u32 index_offset, const AmdGpu::ComputeProgram* cs,
                           const IndirectDraw* indirect) {
@@ -2110,6 +2242,8 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     stage_regs = &regs;
     self.pipe_cb_extent = packet.cb_extent;
     self.pipe_db_extent = packet.db_extent;
+    const bool ds = DispatchStatsEnabled();
+    const auto ds_t0 = ds ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (packet.kind == PacketKind::Special) {
         // A draw FilterDraw handles (fast clear elimination, resolve, depth copy, skip).
         FrameCapture::Poll();
@@ -2130,6 +2264,18 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     } else {
         self.DrawRecord(static_cast<const GraphicsPipeline*>(packet.pipeline), packet.prepared,
                         packet.is_indexed, packet.index_offset);
+    }
+    if (ds && packet.kind != PacketKind::Special) {
+        const u64 ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - ds_t0)
+                           .count();
+        const bool dispatch = cs != nullptr;
+        DispatchStatsRecordB(dispatch,
+                             dispatch ? static_cast<const ComputePipeline*>(packet.pipeline)
+                                            ->GetStage(Shader::SwStage::Compute)
+                                            .pgm_hash
+                                      : 0,
+                             ns);
     }
     Shader::Info::num_ud_snapshots = 0;
     self.num_ring_stages = 0;
@@ -2244,6 +2390,9 @@ bool Rasterizer::FilterDrawPasses() const {
 void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
     RENDERER_TRACE;
     Gow3Stats::draws.fetch_add(1, std::memory_order_relaxed);
+    if (DispatchStatsEnabled()) {
+        DispatchStatsDraw();
+    }
 
     // gow3: with the draw pipeline this thread only selects the pipeline and hands the draw
     // to the recording thread (DrawRecord there); draws FilterDraw handles itself run here.
@@ -3082,6 +3231,7 @@ static void RecordFullBarrier(vk::CommandBuffer cmdbuf) {
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
     Gow3Stats::dispatches.fetch_add(1, std::memory_order_relaxed);
+    DispatchStatsScope stats;
     // gow3: like draws, handed to the draw recording thread after the pipeline selection.
     bool pipelined = UseDrawPipe() && !Gow3Toggle::Disabled(Gow3Toggle::PipelinedDispatch);
     if (!pipelined) {
@@ -3090,6 +3240,10 @@ void Rasterizer::DispatchDirect() {
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
     if (!pipeline) {
         return;
+    }
+    if (stats.on) {
+        stats.hash = pipeline->GetStage(Shader::SwStage::Compute).pgm_hash;
+        stats.dims = {CsRegs().dim_x, CsRegs().dim_y, CsRegs().dim_z};
     }
     // gow3 18 Oct: GOW3_DRAIN_CS=<hex hash>[,<hash>...]: these dispatches run here after a drain
     // (diagnostics). Uncharted 2's train flashed white with multithreaded rendering: later draws
@@ -3292,6 +3446,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     RENDERER_TRACE;
+    DispatchStatsScope stats;
     // gow3: handed to the recording thread like direct dispatches.
     const bool pipelined = UseDrawPipe() && !Gow3Toggle::Disabled(Gow3Toggle::PipelinedIndirectDraws);
     if (!pipelined) {
@@ -3300,6 +3455,9 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
     if (!pipeline) {
         return;
+    }
+    if (stats.on) {
+        stats.hash = pipeline->GetStage(Shader::SwStage::Compute).pgm_hash;
     }
     if (pipelined) {
         const IndirectDraw indirect = {address + offset, 0, size, 1};
