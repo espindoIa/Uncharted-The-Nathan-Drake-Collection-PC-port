@@ -618,6 +618,15 @@ HOR_PLUS_PATCHES = {
         hor_plus_variant("c4c17a108554020000 c5da5ec8", 0x254, 0x250,
                          [(0x0, "r13", 0, 1)],
                          [(0x2189, 0x35, bytes.fromhex("488b0568c186004885c0"))]),
+    ]),
+    # The water's planar reflection camera 0xc902b4 is square (aspect 1.0, so the camera update
+    # leaves it alone) with the render camera's own zoom: it kept the 16:9 horizontal view, and
+    # past the 16:9 edges the water sampled outside the reflection (streaks). Its zoom load takes
+    # the render camera's (rdx) aspect instead; the stub goes in the dead assert branch 0xc90485.
+    ("Uncharted 2 ultrawide: water reflections as wide as the view", [
+        hor_plus_variant("c5fa108a54020000 c5f82815 ????????", 0x254, 0x250,
+                         [(0, "rdx", 1, 2)],
+                         [(0x1d1, 0x35, bytes.fromhex("488b05ecda8d004885c0"))]),
     ])],
     # Infinite far 0x11c1107 (both of its paths), finite 0x11c11e1 and 0x11c1406, frustum planes
     # 0x11c1f21 (Uncharted 3 1.02).
