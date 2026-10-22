@@ -2617,7 +2617,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
         out += sizeof(AmdGpu::Regs);
     }
     dirty.Clear();
-    draw_pipe->Commit(static_cast<u32>(out - start));
+    draw_pipe->Commit(static_cast<u32>(out - start), static_cast<u32>(packet.kind));
     if (!uncommitted_indices.empty() || copy_uncommitted) {
         // GOW3_PIPE_WRITE_END: this packet's writes are done once stage B is past its end.
         const u64 end = draw_pipe->Head();
@@ -2674,7 +2674,7 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
     u8* out = draw_pipe->Begin(total);
     *reinterpret_cast<TaskPacket*>(out) = {PacketKind::Task, size, task};
     std::memcpy(out + sizeof(TaskPacket), data, size);
-    draw_pipe->Commit(total);
+    draw_pipe->Commit(total, static_cast<u32>(PacketKind::Task));
     if (!writes_noted) {
         pending_task_position = draw_pipe->Head();
     }

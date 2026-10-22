@@ -12,6 +12,7 @@
 #include "common/thread.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
+#include "video_core/renderer_vulkan/vk_draw_pipe.h"
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include <xxhash.h>
@@ -353,6 +354,14 @@ std::shared_ptr<DrawPreparation::Submission> DrawPreparation::Build(
             }
         }
         Submission* submission = reused ? reused : new Submission;
+        if (DrawPipe::StatsEnabled()) {
+            // GOW3_DRAWREC_STATS: a reuse still makes the shared_ptr control block below and may
+            // grow the vectors, so reuse is not zero allocation.
+            auto& stats = draw_pipe_submission_stats;
+            stats.submissions.fetch_add(1, std::memory_order_relaxed);
+            (reused ? stats.pool_reuses : stats.new_allocations)
+                .fetch_add(1, std::memory_order_relaxed);
+        }
         submission->seq = 0;
         submission->commands.assign(commands.begin(), commands.end());
         submission->num_draws = 0;
@@ -376,6 +385,10 @@ std::shared_ptr<DrawPreparation::Submission> DrawPreparation::Build(
         submission->claimed.store(false, std::memory_order_relaxed);
         submission->gpu_done.store(false, std::memory_order_relaxed);
         return std::shared_ptr<Submission>(submission, &RecycleSubmission);
+    }
+    if (DrawPipe::StatsEnabled()) {
+        draw_pipe_submission_stats.submissions.fetch_add(1, std::memory_order_relaxed);
+        draw_pipe_submission_stats.new_allocations.fetch_add(1, std::memory_order_relaxed);
     }
     auto submission = std::make_shared<Submission>();
     submission->commands.assign(commands.begin(), commands.end());
