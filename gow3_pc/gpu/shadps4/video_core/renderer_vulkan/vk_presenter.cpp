@@ -1485,11 +1485,15 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     if (reflex_frame) {
         Gow3Reflex::PresentStart(frame->serial);
     }
+    bool presented;
     {
         std::scoped_lock present_lock{PresentLock(instance)};
-        if (!swapchain.Present() && window.GetWidth() != 0 && window.GetHeight() != 0) {
-            swapchain.Recreate(window.GetWidth(), window.GetHeight());
-        }
+        presented = swapchain.Present();
+    }
+    // Recreate waits for device idle under the submit lock. Release the present lock first
+    // because the shared-queue path uses that same mutex.
+    if (!presented && window.GetWidth() != 0 && window.GetHeight() != 0) {
+        swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
     if (reflex_frame) {
         Gow3Reflex::PresentEnd(frame->serial);
@@ -1887,10 +1891,12 @@ bool Presenter::PresentGenerated(Frame* frame) {
     bool present_failed = false;
     {
         std::scoped_lock present_lock{PresentLock(instance)};
-        if (!swapchain.Present() && window.GetWidth() != 0 && window.GetHeight() != 0) {
-            swapchain.Recreate(window.GetWidth(), window.GetHeight());
-            present_failed = true;
-        }
+        present_failed = !swapchain.Present();
+    }
+    // Recreate waits for device idle under the submit lock (not under the present lock, which
+    // the shared-queue path uses too).
+    if (present_failed && window.GetWidth() != 0 && window.GetHeight() != 0) {
+        swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
     if (reflex_marked) {
         Gow3Reflex::GeneratedPresentEnd(frame->serial);
