@@ -14,6 +14,7 @@ unless it sits behind the game-hooks gate (below).
 - Never commit `gow3_pc/stat-multipliers-test.ini` or the dirty submodule `gow3_pc/gpu/third_party/fsr-vulkan`. Stage files by name.
 - No game files, dumps, saves or logs in commits (`export_github.sh` refuses them too).
 - Only one game instance at a time (the player may be playing too).
+- Push to `origin` only when explicitly asked; committing locally is fine.
 
 **Locations.**
 - The repo is `C:\dev\uncharted` (a real folder since 19 Oct; the old `Downloads\Projetos\Uncharted-PC-Port` copy and junction are gone). The CMake cache in `gow3_pc/out/gpu` was generated at this path.
@@ -21,7 +22,7 @@ unless it sits behind the game-hooks gate (below).
 - Scripts outside the repo, in `C:\dev`: `update_port.sh` installs `dist/Uncharted-windows.zip` as the player's `Uncharted\` (replaces the old one; `analysis/uncharted-user` with saves and the player's `nvngx_dlss.dll` carried over). `pkgclean.sh` boots U3 from the zip extracted into an empty folder (delete that folder afterwards). `bench/` holds the benchmark and frame-pacing scripts (`bench.sh <u1|u2|u3> <name>`, `pace.sh`, `timeline.py`). Close the player's launcher/game before `update_port.sh`.
 - Remotes:
   - `origin` is the fork, `espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port`, and the work is on `main` (the former `claude/dlss-uncharted` branch was merged into it and removed, 19 Oct).
-  - `upstream` is BilalReloaded's repo. Its 0.3.0 is merged into the branch; the merge choices are listed under "Fork (espindoIa) notes" in `analysis/STATUS.md`.
+  - `upstream` is BilalReloaded's repo. Its releases up to 0.3.1 are merged (19 Oct); the merge choices are listed under "Fork (espindoIa) notes" in `analysis/STATUS.md`.
 - Both sides patch some of the same game bytes. When taking more upstream work, look for duplicate patch tables in `tools/probe_uncharted.py`: a patch applied first keeps a later one's signature from matching.
 
 ## Commands
@@ -37,7 +38,7 @@ The toolchain is MSYS2 CLANG64. From Git Bash, wrap commands like this:
 - **Python tests:** `unittest` files in `gow3_pc/tests/` that import `paths.py`; run one from that folder, e.g. `python -m unittest test_prepare`.
 - **Launcher syntax check:** `python -c "import ast; ast.parse(open('launcher/uncharted_launcher.pyw', encoding='utf-8').read())"`.
 - **Run from source:** `Start-Uncharted.cmd` (launcher), or `python tools/probe_uncharted.py --boot --seconds 0 --executable big3-ps4_Shipping.elf --game <CUSA02320 or CUSA02344 folder>` (`eboot.bin` = U1 / Collection menu, `big2-…` = U2, `big3-…` = U3). Logs go to `analysis/<executable>/boot.log`.
-- **Package:** run from Git Bash, not the CLANG64 shell. In CLANG64 it picks MSYS2's Python, and Python copying fails:
+- **Package:** run from Git Bash, not the CLANG64 shell. In CLANG64 it picks MSYS2's Python, and Python copying fails. It needs a Windows Python 3.10+ with Pillow (`PYTHON_HOME` overrides; the `python` on PATH here is 3.12 and has no Pillow — 3.13 is installed):
   `DLSS_BRIDGE=/c/dev/uncharted/gow3_pc/out/gow3_dlss.dll DLSS_SDK=/c/dev/DLSS tools/package_windows.sh` → `dist/Uncharted-windows.zip`. The pacman "Import PGP key?" lines in its output are noise. The zip must contain `gow3_dlss.dll` and must **not** contain `nvngx_dlss.dll` (NVIDIA's license does not fit the GPL; the launcher has the player add it). Test it extracted into an empty folder.
 - **Release / public sync:** `tools/release.sh <version>` (needs `tools/release-notes/v<version>.md`); `tools/export_github.sh` copies source only (no game files) into a separate repo for GitHub Actions (`.github/workflows/build-windows.yml`).
 
@@ -85,15 +86,14 @@ The toolchain is MSYS2 CLANG64. From Git Bash, wrap commands like this:
 - `analysis/STATUS.md` is the detailed engineering log: measurements, causes ruled out, open issues. Read its index block at the top before digging. `analysis/PLAN.md` is the old 13-15 Oct plan; the current plan is `ROADMAP.md`.
 
 **Gotchas.**
-- The packaged `gow3-probe.exe` is stripped (14 MB); `gow3_pc/out/gow3-probe.exe` is the 165 MB build. If the game exits silently right after boot, run `build.sh` first.
+- The packaged `gow3-probe.exe` is stripped (`llvm-strip` in the packaging script); `gow3_pc/out/gow3-probe.exe` is the ~160 MB unstripped build. If the game exits silently right after boot, run `build.sh` first.
 - `update_port.sh` needs the launcher and the game closed.
 - When a task prompt says "do not commit" (or to commit only on the user's explicit authorization), do not; the orchestrator or the user commits.
 
 ## Conventions
 
 - Commits and pull requests follow `CONTRIBUTING.md`: subject `<area>: <what is now true>` (max 72 chars, English; areas u1 u2 u3 games gpu runtime launcher package tools docs merge release), body with Why / What changed / Tested / Not tested; PRs use `.github/pull_request_template.md`. One change per commit.
-- Every behaviour change gets a `CHANGELOG.md` entry (newest date first, player-facing wording). `analysis/STATUS.md` gets the technical detail: evidence, measurements, what was not verified.
+- Every behaviour change gets a `CHANGELOG.md` entry under the top, unreleased section (newest date first, player-facing wording). `analysis/STATUS.md` gets the technical detail: evidence, measurements, what was not verified.
 - Code comments explain the why with dated evidence (e.g. "17 Oct profile: …"); match that density and style.
-- Never commit `gow3_pc/stat-multipliers-test.ini` or the dirty submodule `gow3_pc/gpu/third_party/fsr-vulkan`. Stage files by name. `.claude/ship.md` has these ship rules.
-- No game files, dumps, saves or logs in commits (`export_github.sh` refuses them too).
-- Game test runs: short by default (tens of seconds); long runs only for stability soaks or bug hunting. Only one game instance at a time (the player may be playing too); performance claims need an A/B at the player's settings (4K, 120 FPS cap, DLAA, multithreading on) that beats run-to-run noise.
+- `.claude/ship.md` has the ship rules: the commit rules above, plus the build and test commands.
+- Game test runs: short by default (tens of seconds); long runs only for stability soaks or bug hunting. Performance claims need an A/B at the player's settings (4K, 120 FPS cap, DLAA, multithreading on) that beats run-to-run noise.
