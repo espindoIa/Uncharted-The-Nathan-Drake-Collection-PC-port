@@ -148,6 +148,12 @@ enum : std::uint64_t {
     /// Bit set: off. Scene samplers keep the game's anisotropy (A/B of the anisotropy setting,
     /// Rasterizer::ForceAnisotropy). Was 4096 until the 21 Oct merge with upstream (DlaaMipBias).
     ForcedAniso = 65536,
+    /// Bit set: old behaviour. 22 Oct U3 meat market: per compute dispatch, adjacent GPU-written
+    /// ranges join one pending interval (one interval set insert per run), page write ticks
+    /// already noted at this tick and resident blocks are not looked up again, and a shader that
+    /// writes no metadata surface skips the metadata-clear check of its reads. (131072 and 262144
+    /// are taken by work in progress.)
+    DispatchBindFastPaths = 524288,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

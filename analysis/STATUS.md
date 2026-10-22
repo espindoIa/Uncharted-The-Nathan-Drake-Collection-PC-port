@@ -3454,3 +3454,26 @@ What 8f067540 binds (GOW3_DISPATCH_TRACE=8f067540, new diagnostic in `vk_rasteri
 - Hazards in the run: write-write 0, read-after-write 0, write-after-read 0 overlaps. Still 54 of 63 dispatches after the first got a barrier (the tracker sees writes to the same host buffer).
 - Verdict: in data terms a run can be merged (one shader, regular table stride, no dependencies inside the run). It needs a shader variant that fetches its V#s per workgroup (table base + group id * 0xd0) and reaches buffers by address (the DMA/BDA path), so it is recompiler work. Cheaper steps first: (1) skip barriers between non-overlapping writes in the same buffer (54/63 here); (2) do not re-copy the mesh ranges res 0-4 into the ring for every instance of the same mesh (check why constant-ring reuse does not catch them).
 - Not verified: other runs/meshes, other scenes, whether the table stride is always 0xd0, the ring-reuse behaviour for these ranges.
+
+## 22 October 2026: stage B dispatch fast paths (roadmap phase 4)
+
+Profile (prof_b4, U3 meat market, 1080p DLAA K, ~82 FPS): stage B RunDrawPacket 76%; DispatchRecord 53%; BindBuffers 29.6%; ObtainBuffer 20-21%; GpuRangesAdd 10.5-12.7% (boost::icl inserts); CompleteReadbacks 11% (LandGuarded 8.5%); NoteGpuWriteWindows 3.3-4.6% (an unordered_map lookup ~5% self); IsComputeMetaClear 4%; WaitHostCopies 4%. Stage A waits on B 17-22% (DrainDrawPipe); CollectRingBindings 33%.
+
+Changes (Disabled2 bit 524288 DispatchBindFastPaths, bit set = old path, read live; draws take the same paths):
+- gpu_modified_ranges is a GpuRangeSet with one pending interval that adjacent or overlapping GpuRangesAdd calls extend. Readers test the set plus the pending interval; ForEachInRange / Count / Subtract flush it first. A joined icl set is canonical, so the result equals eager inserts.
+- NoteGpuWriteWindows skips pages already noted at the current tick (ticks only grow; both erase sites clear the memo).
+- EnsureResident skips the gap walk for blocks known resident (ReleaseArenaBlocks clears the memo).
+- IsComputeMetaClear returns false early when no written buffer is a meta surface: 3 V# reads instead of 9 for cs 8f067540.
+- Counters on the GOW3_DISPATCH_STATS line "fast paths per frame" (ranges joined / started / set inserts, page ticks skipped / written, residency memo hits / walks, metadata-clear checks skipped / in full).
+
+Dropped, not equivalent or not redundant:
+- CompleteReadbacks / LandGuarded: 98% of samples land real data, and PollReadbacks already returns early.
+- SynchronizeMemory skip: needs a CPU-write epoch in the region / page manager.
+- Per-program meta-clear memo: the texture cache has no version counter.
+
+Results (ab2.sh live toggle in one session; abstats bootstrap, 95% interval):
+- 1080p DLAA K, 6+6 windows: FPS 86.19 on vs 84.04 off, +2.15 [+1.35, +2.92]; median -0.28 ms [-0.35, -0.21]; p99 -0.37 [-1.00, +0.50]; 1% low +0.16 [-7.00, +7.86].
+- 4K DLAA K, 4+4 windows: FPS 83.76 vs 81.79, +1.97 [+0.74, +3.30]; median -0.29 ms [-0.40, -0.18]; p99 +0.07 [-2.42, +1.30].
+- No hang, image normal.
+
+Not verified: U1 and U2; other U3 chapters; 4K DLAA M (GPU-bound, likely no change); a long soak. p99 and 1% low intervals include 0, so no tail-latency claim. Toggle bits: 131072 and 262144 are taken by work in progress.

@@ -6,6 +6,18 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Uncharted 3: about 2 more FPS in crowded areas limited by the processor.** In the chapter 2
+  meat market the benchmark went from 84 to 86 FPS at 1080p and from 82 to 84 at 4K (DLAA, DLSS
+  model K; 6+6 and 4+4 measured windows, switched on and off in the same session, gain +2.15 FPS
+  [+1.35, +2.92] at 1080p and +1.97 [+0.74, +3.30] at 4K, 95% interval). The game's many small
+  compute dispatches (the crowd's skinning) now spend less time on the render thread's bookkeeping:
+  neighbouring GPU-written ranges are recorded together, memory pages and blocks already handled
+  are not looked up again, and a shader that writes no metadata surface skips that check. The
+  median frame is about 0.3 ms shorter; the worst frames (p99) and the 1% low did not change
+  beyond noise. No hang, image normal. Not tested: Uncharted 1 and 2, other Uncharted 3 chapters,
+  4K with DLSS model M (limited by the graphics card, so likely no change), a long session. Toggle
+  bit 524288 in `disabled-optimizations.txt` (second number) restores the old path without a restart.
+
 - **DLAA: sharper textures (hair, walls).** DLSS at native resolution (DLAA) now uses NVIDIA's
   recommended texture detail bias (-1, the same rule Performance and Quality already followed).
   In the Uncharted 3 bar scene a wall's fine detail went from 5.3 to 13.4 on our sharpness measure,

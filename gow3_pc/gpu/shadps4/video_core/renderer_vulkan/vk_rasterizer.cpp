@@ -1844,6 +1844,7 @@ struct DispatchStatsState {
     std::mutex b_mutex;
     std::unordered_map<u64, std::pair<u64, u64>> b; // hash -> {dispatches, ns}
     u64 b_dispatch_ns = 0, b_draw_ns = 0;
+    std::array<u64, 9> fast_paths{}; // VideoCore::g_bind_fast_paths at the last print
 };
 
 DispatchStatsState& DispatchStats() {
@@ -1889,6 +1890,26 @@ void DispatchStatsPrint(std::chrono::steady_clock::time_point now) {
                 frames, s.draws / frames, s.dispatches / frames,
                 items > 0 ? 100.0 * s.dispatches / items : 0.0, s.a_ns / 1e6 / frames,
                 b_dispatch_ns / 1e6 / frames, b_draw_ns / 1e6 / frames);
+    {
+        // 22 Oct 2026: the binding fast paths (Gow3Toggle::DispatchBindFastPaths), draws included.
+        const auto& f = VideoCore::g_bind_fast_paths;
+        const std::array<const std::atomic<u64>*, 9> counters = {
+            &f.ranges_extended,    &f.ranges_started,  &f.ranges_flushed,
+            &f.page_ticks_skipped, &f.page_ticks_written, &f.resident_hits,
+            &f.resident_checks,    &f.meta_clear_skips, &f.meta_clear_checks};
+        std::array<double, 9> per_frame{};
+        for (size_t i = 0; i < counters.size(); ++i) {
+            const u64 value = counters[i]->load(std::memory_order_relaxed);
+            per_frame[i] = (value - s.fast_paths[i]) / frames;
+            s.fast_paths[i] = value;
+        }
+        std::printf("  fast paths per frame: GPU-written ranges %.0f joined the pending one, %.0f "
+                    "started one, %.0f set inserts; page ticks %.0f skipped, %.0f written; "
+                    "residency %.0f memo hits, %.0f walks; metadata-clear check %.0f skipped, %.0f "
+                    "in full\n",
+                    per_frame[0], per_frame[1], per_frame[2], per_frame[3], per_frame[4],
+                    per_frame[5], per_frame[6], per_frame[7], per_frame[8]);
+    }
     std::vector<std::pair<u64, u64>> order; // {A + B ns, hash}
     for (const auto& [hash, entry] : s.a) {
         order.emplace_back(entry.ns + b[hash].second, hash);
@@ -5277,6 +5298,25 @@ bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
     // intended to be consumed and in such rare cases (e.g. HTile introspection, CRAA) we
     // will need its full emulation anyways.
     const auto& info = pipeline->GetStage(Shader::SwStage::Compute);
+
+    // gow3 22 Oct 2026 (Gow3Toggle::DispatchBindFastPaths): the answer is true only when a
+    // written buffer is a metadata surface (and no read one is), so the written ones are looked
+    // at first. U3 meat market profile: this check was 4% of the draw recording thread, a V# read
+    // and lookup per binding; cs 8f067540 (~1,530 dispatches a frame) has 6 read and 3 written.
+    if (!Gow3Toggle::Disabled2(Gow3Toggle::DispatchBindFastPaths)) {
+        // The XOR heuristic below: such a shader is never taken for a clear.
+        bool meta_write = false;
+        for (u32 i = 0; i < info.buffers.size() && !info.has_bitwise_xor && !meta_write; ++i) {
+            const auto& desc = info.buffers[i];
+            meta_write = !desc.IsSpecial() && desc.is_written &&
+                         texture_cache.IsMeta(desc.GetSharp(info).base_address).has_value();
+        }
+        if (!meta_write) {
+            VideoCore::CountFastPath(VideoCore::g_bind_fast_paths.meta_clear_skips);
+            return false;
+        }
+        VideoCore::CountFastPath(VideoCore::g_bind_fast_paths.meta_clear_checks);
+    }
 
     // gow3: the cheap descriptor tests come before reading the V# (GetSharp: user data or the
     // flattened SRT, and for the effect shaders a mapped-memory query) on every dispatch; a

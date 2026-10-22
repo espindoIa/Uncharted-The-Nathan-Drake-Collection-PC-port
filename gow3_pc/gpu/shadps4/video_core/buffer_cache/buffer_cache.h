@@ -9,6 +9,7 @@
 #include <string>
 
 #include "gow3_copy.h"
+#include "gow3_toggles.h"
 
 #include <array>
 #include <atomic>
@@ -93,6 +94,20 @@ void NoteReadbackKind(VAddr address, u64 size, u32 kind);
 
 /// gow3: GPU-to-guest downloads done by this thread (fault statistics, page_manager.cpp).
 inline thread_local u64 gow3_downloads = 0;
+
+/// gow3 22 Oct 2026 (GOW3_DISPATCH_STATS=1): how often the binding fast paths of
+/// Gow3Toggle::DispatchBindFastPaths took effect. One writer at a time (the thread recording
+/// draws and dispatches), so a relaxed load and store; the statistics print differences.
+struct BindFastPathStats {
+    std::atomic<u64> ranges_extended{0}, ranges_started{0}, ranges_flushed{0};
+    std::atomic<u64> page_ticks_skipped{0}, page_ticks_written{0};
+    std::atomic<u64> resident_hits{0}, resident_checks{0};
+    std::atomic<u64> meta_clear_skips{0}, meta_clear_checks{0};
+};
+inline BindFastPathStats g_bind_fast_paths;
+inline void CountFastPath(std::atomic<u64>& counter, u64 n = 1) {
+    counter.store(counter.load(std::memory_order_relaxed) + n, std::memory_order_relaxed);
+}
 
 
 class TextureCache;
@@ -431,12 +446,81 @@ private:
     /// 0: stream it; 1: arena, synchronize (first use); 2: arena, already uploaded and clean.
     int UseArenaForStatic(VAddr device_addr, u32 size);
     Buffer gds_buffer;
-    RangeSet gpu_modified_ranges;
+    /// gow3: held exclusively while gpu_modified_ranges changes, shared by IsRangeGpuWrittenShared.
+    mutable std::shared_mutex gpu_ranges_mutex;
+    /// gow3 22 Oct 2026 (Gow3Toggle::DispatchBindFastPaths): the GPU-written ranges are `set` plus
+    /// one pending interval that GpuRangesAdd grows while each add touches or overlaps it. U3
+    /// meat market profile (1080p DLAA, ~82 FPS): GpuRangesAdd was 10.5-12.7% of the draw
+    /// recording thread, ~6-7% of it interval set inserts; crowd skinning (cs 8f067540, ~1,530
+    /// dispatches a frame) writes three overlapping views per dispatch, each dispatch's right
+    /// after the previous one's. Readers see the union: Intersects tests both; ForEachInRange,
+    /// Count and Subtract move the pending interval into the set first (joined intervals are
+    /// canonical: the set is then the one eager inserts build). The pending interval changes
+    /// under the exclusive lock only, so IsRangeGpuWrittenShared (shared lock) sees it whole;
+    /// otherwise the set's own rule holds (the thread recording draws and dispatches, or the GPU
+    /// command thread with it drained). ForEachInRange and Count take the lock when an interval
+    /// is pending: never called with gpu_ranges_mutex held.
+    struct GpuRangeSet {
+        explicit GpuRangeSet(std::shared_mutex& mutex_) : mutex{mutex_} {}
+        std::shared_mutex& mutex;
+        mutable RangeSet set;
+        mutable VAddr pending_lo = 0, pending_hi = 0;
+
+        /// gpu_ranges_mutex held exclusively.
+        void FlushLocked() const {
+            if (pending_hi > pending_lo) {
+                set.Add(pending_lo, pending_hi - pending_lo);
+                pending_lo = pending_hi = 0;
+                CountFastPath(g_bind_fast_paths.ranges_flushed);
+            }
+        }
+        void Flush() const {
+            if (pending_hi > pending_lo) {
+                std::unique_lock lock{mutex};
+                FlushLocked();
+            }
+        }
+        /// gpu_ranges_mutex held exclusively (both).
+        void Add(VAddr address, u64 size) {
+            set.Add(address, size);
+        }
+        void AddPending(VAddr address, u64 size) {
+            const VAddr end = address + size;
+            if (pending_hi > pending_lo && address <= pending_hi && pending_lo <= end) {
+                pending_lo = std::min(pending_lo, address);
+                pending_hi = std::max(pending_hi, end);
+                CountFastPath(g_bind_fast_paths.ranges_extended);
+                return;
+            }
+            FlushLocked();
+            pending_lo = address;
+            pending_hi = end;
+            CountFastPath(g_bind_fast_paths.ranges_started);
+        }
+        /// gpu_ranges_mutex held exclusively.
+        void Subtract(VAddr address, u64 size) {
+            FlushLocked();
+            set.Subtract(address, size);
+        }
+        bool Intersects(VAddr address, u64 size) const {
+            const VAddr end = address + size; // empty when end <= address, as in the set
+            return (address < end && address < pending_hi && pending_lo < end) ||
+                   set.Intersects(address, size);
+        }
+        template <typename Func>
+        void ForEachInRange(VAddr address, u64 size, Func&& func) const {
+            Flush();
+            set.ForEachInRange(address, size, std::forward<Func>(func));
+        }
+        size_t Count() const {
+            Flush();
+            return set.Count();
+        }
+    };
+    GpuRangeSet gpu_modified_ranges{gpu_ranges_mutex};
     /// gow3: 64 KiB windows of the 40-bit guest address space a GPU write ever reached.
     static constexpr u64 GpuWindowBits = u64(1) << 24;
     std::unique_ptr<std::atomic<u64>[]> gpu_window_bits{new std::atomic<u64>[GpuWindowBits / 64]{}};
-    /// gow3: held exclusively while gpu_modified_ranges changes, shared by IsRangeGpuWrittenShared.
-    mutable std::shared_mutex gpu_ranges_mutex;
     void GpuRangesAdd(VAddr address, u64 size) {
         if (size) {
             const u64 first = address >> 16;
@@ -472,7 +556,11 @@ private:
             }
             entry = {address, size, tick};
         }
-        gpu_modified_ranges.Add(address, size);
+        if (Gow3Toggle::Disabled2(Gow3Toggle::DispatchBindFastPaths)) {
+            gpu_modified_ranges.Add(address, size);
+        } else if (size) {
+            gpu_modified_ranges.AddPending(address, size);
+        }
         if (size) {
             NoteGpuWriteWindows(address, size);
         }
@@ -494,6 +582,12 @@ private:
     /// and of the newest smaller one into each 4 KiB page: when the GPU data of a page is final.
     std::unordered_map<u64, u64> gpu_write_window_tick;
     std::unordered_map<u64, u64> gpu_write_page_tick;
+    /// gow3 22 Oct 2026 (DispatchBindFastPaths): pages [first, last] of gpu_write_page_tick all
+    /// hold `tick` (noted at it; any erase clears this). Guarded by gpu_ranges_mutex.
+    struct PageTickMemo {
+        u64 first = 1, last = 0, tick = 0;
+    };
+    PageTickMemo page_tick_memo;
     /// gow3: the page's GPU bytes are final and in mapped memory: copied to guest memory, page
     /// no longer GPU-written. False: not possible (in flight, unmapped, readbacks pending).
     bool ReadFinishedGpuPage(VAddr page);
@@ -558,6 +652,9 @@ private:
         }
     };
     IntervalList<Backing> resident_ranges;
+    /// gow3 22 Oct 2026 (DispatchBindFastPaths): blocks [first, last] are resident (seen so since
+    /// the last ReleaseArenaBlocks, the only removal from resident_ranges).
+    u64 resident_memo_first = 1, resident_memo_last = 0;
     std::unordered_map<u64, std::chrono::steady_clock::time_point> cpu_write_hot; ///< see IsCpuWriteHot
     /// gow3: page_writes and cpu_write_hot are swept every two seconds (SweepTracking).
     std::chrono::steady_clock::time_point last_tracking_sweep{};

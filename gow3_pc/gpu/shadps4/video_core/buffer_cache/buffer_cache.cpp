@@ -606,6 +606,7 @@ bool BufferCache::DiscardCpuWritePage(VAddr page) {
         }
         gpu_modified_ranges.Subtract(page, 4096);
         gpu_write_page_tick.erase(page >> 12);
+        page_tick_memo = {};
         // Window ticks and the ever-written window bits still cover neighboring pages.
     }
     page_writes.erase(page >> 12);
@@ -2594,6 +2595,7 @@ void BufferCache::SweepTracking() {
             return semaphore->IsFree(entry.second) &&
                    !gpu_modified_ranges.Intersects(entry.first << 12, 4096);
         });
+        page_tick_memo = {};
     }
     g_swept_pages += static_cast<u32>(std::erase_if(page_writes, [&](const auto& entry) {
         return std::ranges::all_of(entry.second, [&](const PageWrite& w) {
@@ -2926,9 +2928,37 @@ void BufferCache::NoteGpuWriteWindows(VAddr address, u64 size) {
         }
         return;
     }
-    for (u64 page = address >> 12; page <= (address + size - 1) >> 12; ++page) {
-        gpu_write_page_tick[page] = tick;
+    const u64 first = address >> 12;
+    const u64 last = (address + size - 1) >> 12;
+    if (Gow3Toggle::Disabled2(Gow3Toggle::DispatchBindFastPaths)) {
+        for (u64 page = first; page <= last; ++page) {
+            gpu_write_page_tick[page] = tick;
+        }
+        return;
     }
+    // gow3 22 Oct 2026: U3 meat market profile, this map's lookups were 3.3-4.6% of the draw
+    // recording thread; cs 8f067540's views and dispatches mostly write pages noted just before.
+    // A page in the memo already holds this tick (ticks only grow), so its write changes nothing.
+    auto& memo = page_tick_memo;
+    if (memo.tick != tick) {
+        memo = {1, 0, tick};
+    }
+    u64 written = 0;
+    for (u64 page = first; page <= last; ++page) {
+        if (page < memo.first || page > memo.last) {
+            gpu_write_page_tick[page] = tick;
+            ++written;
+        }
+    }
+    if (memo.first <= memo.last && first <= memo.last + 1 && memo.first <= last + 1) {
+        memo.first = std::min(memo.first, first);
+        memo.last = std::max(memo.last, last);
+    } else {
+        memo.first = first;
+        memo.last = last;
+    }
+    CountFastPath(g_bind_fast_paths.page_ticks_written, written);
+    CountFastPath(g_bind_fast_paths.page_ticks_skipped, last - first + 1 - written);
 }
 
 
@@ -3817,6 +3847,17 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
 }
 
 void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_block) {
+    // gow3 22 Oct 2026: U3 meat market profile, this gap walk was 1-1.4% of the draw recording
+    // thread, nearly always for the blocks the previous binding was in. Blocks stay resident
+    // until ReleaseArenaBlocks, which clears the memo.
+    const bool memo = !Gow3Toggle::Disabled2(Gow3Toggle::DispatchBindFastPaths);
+    if (memo && first_block >= resident_memo_first && last_block <= resident_memo_last) {
+        CountFastPath(g_bind_fast_paths.resident_hits);
+        return;
+    }
+    if (memo) {
+        CountFastPath(g_bind_fast_paths.resident_checks);
+    }
     u32 resident_blocks{};
     IntervalList bind_ranges;
     resident_ranges.ForEachGap(first_block, last_block + 1, [&](u64 start, u64 end) {
@@ -3825,6 +3866,16 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     });
 
     if (bind_ranges.Empty()) {
+        if (memo) {
+            if (resident_memo_first <= resident_memo_last && first_block <= resident_memo_last + 1 &&
+                resident_memo_first <= last_block + 1) {
+                resident_memo_first = std::min(resident_memo_first, first_block);
+                resident_memo_last = std::max(resident_memo_last, last_block);
+            } else {
+                resident_memo_first = first_block;
+                resident_memo_last = last_block;
+            }
+        }
         return;
     }
     Gow3Stats::Timer timer{Gow3Stats::t_resident};
@@ -3971,6 +4022,8 @@ u64 BufferCache::ReleaseArenaBlocks(u64 first_block, u64 end_block) {
     if (pieces.empty()) {
         return 0;
     }
+    resident_memo_first = 1;
+    resident_memo_last = 0;
     resident_ranges.Remove(first_block, end_block, [this](const Backing& backing, u64 a, u64 b) {
         Backing part = backing;
         part.start = a;
