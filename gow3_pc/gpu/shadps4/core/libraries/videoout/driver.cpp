@@ -404,8 +404,10 @@ void VideoOutDriver::Flip(const Request& req) {
     // present thread only, whatever GOW3_FRAME_STATS says: the numbers before a one-frame flash.
     Gow3Flight::OnFlip(MovieActive(std::chrono::steady_clock::now()), presenter->FrameGenActive());
     // Update HDR status before presenting, then present the frame (gow3: on the swap thread).
+    // gow3: the menu's HDR setting outputs HDR10 for games that only render SDR.
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
-        presenter->SetHDR(hdr);
+        const bool own_hdr = Gow3Settings::Get().hdr && !hdr;
+        presenter->SetHDR(hdr || own_hdr, own_hdr);
         presenter->Present(frame);
     });
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left

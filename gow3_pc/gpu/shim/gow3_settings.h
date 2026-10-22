@@ -106,6 +106,14 @@ struct Values {
     /// frame between two real ones (vk_presenter.cpp). Live; needs an upscaler (TAA, FSR, DLSS):
     /// its depth and motion vectors are the inputs.
     std::atomic<int> frame_gen{0};
+    /// HDR10 output (Rec. 2020 PQ swapchain), live. Brightness in nits: the peak the image may
+    /// reach, the game's diffuse white (SDR 1.0) and the HUD/menus.
+    std::atomic<bool> hdr{false};
+    std::atomic<int> hdr_peak_nits{1000};
+    std::atomic<int> hdr_game_nits{203};
+    std::atomic<int> hdr_ui_nits{203};
+    /// Set by the presenter: the display accepts HDR10 (the swapchain offers Rec. 2020 PQ).
+    std::atomic<bool> hdr_supported{false};
     // Startup: run.py turns them into patches and environment variables; "Apply and restart".
     std::atomic<int> render_resolution{0};
     std::atomic<int> engine_fps{120};

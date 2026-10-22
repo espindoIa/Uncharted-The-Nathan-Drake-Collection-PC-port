@@ -182,6 +182,14 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.reflex = std::clamp(i, 0, 2);
     } else if (key == "frame_gen") {
         v.frame_gen = std::clamp(i, 0, 1);
+    } else if (key == "hdr") {
+        v.hdr = i != 0;
+    } else if (key == "hdr_peak_nits") {
+        v.hdr_peak_nits = std::clamp(i, 400, 10000);
+    } else if (key == "hdr_game_nits") {
+        v.hdr_game_nits = std::clamp(i, 80, 500);
+    } else if (key == "hdr_ui_nits") {
+        v.hdr_ui_nits = std::clamp(i, 80, 500);
     } else if (key == "render_resolution") {
         v.render_resolution = Gow3Graphics::ParseResolution(value);
     } else if (key == "engine_fps") {
@@ -295,6 +303,7 @@ void Load() {
         {"GOW3_DLSS_MODEL", "dlss_model"},            {"GOW3_ANISOTROPY", "anisotropy"},
         {"GOW3_HD_UI", "hd_ui"},
         {"GOW3_REFLEX", "reflex"},                    {"GOW3_FRAME_GEN", "frame_gen"},
+        {"GOW3_HDR_OUTPUT", "hdr"},
         {"GOW3_PAD_MAP", "pad_map"},                  {"GOW3_KEY_MAP", "key_map"},
         {"GOW3_MOUSE_MAP", "mouse_map"},              {"GOW3_MOUSE", "mouse"},
         {"GOW3_MOUSE_SENS", "mouse_sens"},            {"GOW3_MOUSE_INVERT", "mouse_invert"},
@@ -475,6 +484,8 @@ KeyValues Current() {
                  int(v.deferred_readback.load()), int(v.stale_readback.load()),
                  int(v.restart_unconfirmed.load()));
     Append(text, "reflex=%d\nframe_gen=%d\n", v.reflex.load(), v.frame_gen.load());
+    Append(text, "hdr=%d\nhdr_peak_nits=%d\nhdr_game_nits=%d\nhdr_ui_nits=%d\n", int(v.hdr.load()),
+           v.hdr_peak_nits.load(), v.hdr_game_nits.load(), v.hdr_ui_nits.load());
     // Read by run.sh at start.
     Append(text, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
                                                   : v.live_resolution ? "1" : "0");
