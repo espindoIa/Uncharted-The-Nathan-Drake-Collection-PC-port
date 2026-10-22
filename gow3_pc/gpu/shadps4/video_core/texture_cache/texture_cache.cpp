@@ -147,7 +147,7 @@ bool TextureCache::ResolveReadbacks(VAddr address, u64 size, bool assume_locks,
         if (diag) readback_sources.Record(source, waited, wait_ns, size);
     };
     if (assume_locks) resolve();
-    else liverpool->SendCommand<true>(resolve);
+    else liverpool->SendCommand<true>(resolve, "texture-resolve");
     return true;
 }
 

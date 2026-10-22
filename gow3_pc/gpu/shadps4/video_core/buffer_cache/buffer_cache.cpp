@@ -700,7 +700,7 @@ void BufferCache::ReleaseStuckPage(VAddr page, bool is_write, bool assume_locks)
     if (assume_locks) {
         release();
     } else {
-        liverpool->SendCommand<true>(release);
+        liverpool->SendCommand<true>(release, "readback-release");
     }
 }
 
@@ -1468,7 +1468,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         const auto queued = std::chrono::steady_clock::now();
         // gow3 21 Oct 2026: a fault request (GOW3_WAIT_SERVICES_FAULTS=1: the command thread's
         // frames-ahead wait serves it too; otherwise SendCommand<true> as before).
-        liverpool->SendFaultCommand(flush_request);
+        liverpool->SendFaultCommand(flush_request, "fault-flush");
         // gow3 21 Oct 2026 (GOW3_FETCH_NO_BLOCK=1): the GPU write the fetch needs finished is
         // waited for here; the request starts over (the page may have changed meanwhile). After
         // three such waits the old path (the command thread waits) ends it.
@@ -1477,7 +1477,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             scheduler.GetWorkSemaphore()->Wait(tick);
             allow_defer = attempt < 3;
             g_fetch_deferrals.fetch_add(1, std::memory_order_relaxed);
-            liverpool->SendFaultCommand(flush_request);
+            liverpool->SendFaultCommand(flush_request, "fault-flush");
         }
         if (!is_write) {
             g_read_queue_us += std::chrono::duration_cast<std::chrono::microseconds>(

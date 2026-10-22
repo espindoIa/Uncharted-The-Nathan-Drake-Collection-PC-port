@@ -226,6 +226,125 @@ void Liverpool::ScanPackets(u32 queue, std::span<const u32> words, int depth) {
     }
 }
 
+namespace {
+// gow3 22 Oct 2026 (GOW3_WAIT_TRACE=1, default off): which sources make the GPU command thread
+// (stage A) wait for the draw recording thread (stage B), printed every 5 s. 22 Oct U3 profile:
+// ProcessCommands 9.6%, LandDeferredFenceFor 8.8%, ProcessCompute 2.3% of stage A. Everything
+// below runs on the GPU command thread only (no locks); off: no clock read, no allocation.
+// The draw pipe's queued item count is not exposed (vk_draw_pipe.h keeps `consumed` private):
+// "busy" counts drains that found work queued instead.
+bool WaitTrace() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_WAIT_TRACE");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+using TraceClock = std::chrono::steady_clock;
+
+/// Drains before one command (or the slow path of fence waits), summed.
+struct DrainSample {
+    u64 ns = 0, drains = 0, busy = 0;
+};
+
+/// Times one DrainDrawPipe call; inert (no clock read) when tracing is off.
+struct DrainTrace {
+    bool on = false, busy = false;
+    TraceClock::time_point start{};
+    explicit DrainTrace(const Vulkan::Rasterizer* rasterizer) {
+        if (WaitTrace() && rasterizer) {
+            on = true;
+            busy = !rasterizer->DrawPipeIdle();
+            start = TraceClock::now();
+        }
+    }
+    void End(DrainSample& sample) const {
+        if (on) {
+            sample.ns += std::chrono::duration_cast<std::chrono::nanoseconds>(TraceClock::now() - start)
+                             .count();
+            ++sample.drains;
+            sample.busy += busy;
+        }
+    }
+};
+
+struct WaitTraceStats {
+    struct Source {
+        u64 runs = 0, body_ns = 0;
+        DrainSample drain;
+    };
+    std::map<std::string_view, Source> sources;
+    u64 fence_fast = 0, fence_met = 0, fence_unmet = 0;
+    DrainSample fence_drain;
+    TraceClock::time_point window = TraceClock::now();
+};
+
+WaitTraceStats& TraceStats() {
+    static WaitTraceStats stats;
+    return stats;
+}
+
+/// Prints and resets the block once 5 s passed since the last one.
+void WaitTracePrint(TraceClock::time_point now) {
+    auto& s = TraceStats();
+    const double seconds = std::chrono::duration<double>(now - s.window).count();
+    if (seconds < 5.0) {
+        return;
+    }
+    for (const auto& [tag, src] : s.sources) {
+        std::printf("Wait trace (%.1f s): command %.*s: %llu run, drains %llu (%llu entered busy) "
+                    "%llu us, body %llu us\n",
+                    seconds, static_cast<int>(tag.size()), tag.data(),
+                    static_cast<unsigned long long>(src.runs),
+                    static_cast<unsigned long long>(src.drain.drains),
+                    static_cast<unsigned long long>(src.drain.busy),
+                    static_cast<unsigned long long>(src.drain.ns / 1000),
+                    static_cast<unsigned long long>(src.body_ns / 1000));
+    }
+    std::printf("Wait trace (%.1f s): fence waits: %llu met on the fast path; slow path %llu "
+                "drains (%llu entered busy) %llu us, %llu met, %llu not met after the drain\n",
+                seconds, static_cast<unsigned long long>(s.fence_fast),
+                static_cast<unsigned long long>(s.fence_drain.drains),
+                static_cast<unsigned long long>(s.fence_drain.busy),
+                static_cast<unsigned long long>(s.fence_drain.ns / 1000),
+                static_cast<unsigned long long>(s.fence_met),
+                static_cast<unsigned long long>(s.fence_unmet));
+    std::fflush(stdout);
+    s.sources.clear();
+    s.fence_fast = s.fence_met = s.fence_unmet = 0;
+    s.fence_drain = {};
+    s.window = now;
+}
+
+/// One command ran (`body_start`: when its body began; `drain`: the drains before it).
+void WaitTraceCommand(const char* tag, const DrainSample& drain, TraceClock::time_point body_start) {
+    const auto now = TraceClock::now();
+    auto& src = TraceStats().sources[tag];
+    ++src.runs;
+    src.body_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(now - body_start).count();
+    src.drain.ns += drain.ns;
+    src.drain.drains += drain.drains;
+    src.drain.busy += drain.busy;
+    WaitTracePrint(now);
+}
+
+enum class FenceOutcome { Fast, Met, Unmet };
+
+/// LandDeferredFenceFor: counts how a wait ended (the fast path, or the slow path after its
+/// drain); returns `result`.
+bool WaitTraceFence(FenceOutcome outcome, bool result) {
+    if (WaitTrace()) {
+        auto& s = TraceStats();
+        (outcome == FenceOutcome::Fast ? s.fence_fast
+         : outcome == FenceOutcome::Met ? s.fence_met
+                                        : s.fence_unmet)++;
+        WaitTracePrint(TraceClock::now());
+    }
+    return result;
+}
+} // namespace
+
 void Liverpool::ProcessCommands() {
     // gow3: interrupts held by a guest fault this thread handled (IrqController::HoldScope):
     // here no cache lock is held.
@@ -249,20 +368,26 @@ void Liverpool::ProcessCommands() {
         // recording thread: both changed the pending readbacks, the range tree got a cycle and
         // this thread looped forever (Uncharted 3, multithreaded rendering, 18 Oct; found with
         // GOW3_READBACK_RACE=1). Free when the pipe is already empty.
+        DrainSample drained; // GOW3_WAIT_TRACE: both drains around this command
         if (rasterizer) {
+            const DrainTrace trace{rasterizer};
             rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands);
+            trace.End(drained);
         }
         Common::UniqueFunction<void> callback{};
+        const char* tag = "other";
         {
             std::scoped_lock lk{submit_mutex};
             // gow3 21 Oct 2026 (GOW3_WAIT_SERVICES_FAULTS=1): fault requests have a queue of
             // their own (empty otherwise).
             if (!fault_queue.empty()) {
-                callback = std::move(fault_queue.front());
+                callback = std::move(fault_queue.front().func);
+                tag = fault_queue.front().tag;
                 fault_queue.pop();
                 --num_fault_commands;
             } else {
-                callback = std::move(command_queue.front());
+                callback = std::move(command_queue.front().func);
+                tag = command_queue.front().tag;
                 command_queue.pop();
             }
             --num_commands;
@@ -273,11 +398,18 @@ void Liverpool::ProcessCommands() {
         // (SubmitFlipInternal -> RunInOrder), run while it landed readbacks. One atomic load when
         // it is idle.
         if (rasterizer) {
+            const DrainTrace trace{rasterizer};
             rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands);
+            trace.End(drained);
         }
+        const bool tracing = WaitTrace();
+        const auto body_start = tracing ? TraceClock::now() : TraceClock::time_point{};
         ++command_depth;
         callback();
         --command_depth;
+        if (tracing) {
+            WaitTraceCommand(tag, drained, body_start);
+        }
     }
 }
 
@@ -301,19 +433,26 @@ bool Liverpool::ServiceQueuedCommands() {
     bool serviced = false;
     for (;;) {
         Common::UniqueFunction<void> callback{};
+        const char* tag = "other";
         {
             std::scoped_lock lk{submit_mutex};
             if (fault_queue.empty()) {
                 break;
             }
-            callback = std::move(fault_queue.front());
+            callback = std::move(fault_queue.front().func);
+            tag = fault_queue.front().tag;
             fault_queue.pop();
             --num_fault_commands;
             --num_commands;
         }
+        const bool tracing = WaitTrace();
+        const auto body_start = tracing ? TraceClock::now() : TraceClock::time_point{};
         ++command_depth;
         callback();
         --command_depth;
+        if (tracing) {
+            WaitTraceCommand(tag, {}, body_start); // no drain: the pipe is idle here
+        }
         serviced = true;
     }
     return serviced;
@@ -1177,17 +1316,23 @@ bool Liverpool::LandDeferredFenceFor(const PM4CmdWaitRegMem& wait, const Regs& s
                 return env && std::string_view{env} == "land";
             }();
             if (!land) {
-                return true;
+                return WaitTraceFence(FenceOutcome::Fast, true);
             }
         }
     }
     // Multithreaded rendering: the deferred fences belong to the draw recording thread while it
     // runs (an unmet wait drains it anyway).
-    rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands);
+    {
+        const DrainTrace trace{rasterizer};
+        rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands);
+        if (trace.on) {
+            trace.End(TraceStats().fence_drain);
+        }
+    }
     u64 tick = 0;
     u32 value = 0;
     if (!cache.DeferredFenceTick(wait.Address<VAddr>(), tick, &value)) {
-        return false;
+        return WaitTraceFence(FenceOutcome::Unmet, false);
     }
     // The deferred value counts as written: the GPU runs in stream order, so it would have written
     // the fence before reaching this wait. Safe because deferred fences complete in order (see
@@ -1198,7 +1343,8 @@ bool Liverpool::LandDeferredFenceFor(const PM4CmdWaitRegMem& wait, const Regs& s
         return !(env && std::string_view{env} == "land");
     }();
     if (pass) {
-        return wait.TestValue(value);
+        const bool met = wait.TestValue(value);
+        return WaitTraceFence(met ? FenceOutcome::Met : FenceOutcome::Unmet, met);
     }
     static std::atomic<u32> landed{0};
     static std::atomic<u64> waited_us{0};
@@ -1218,7 +1364,7 @@ bool Liverpool::LandDeferredFenceFor(const PM4CmdWaitRegMem& wait, const Regs& s
                     waited_us.exchange(0) / 1e3);
         std::fflush(stdout);
     }
-    return false;
+    return WaitTraceFence(FenceOutcome::Unmet, false);
 }
 
 bool Liverpool::PendingFenceValue(VAddr address, u32& value) {

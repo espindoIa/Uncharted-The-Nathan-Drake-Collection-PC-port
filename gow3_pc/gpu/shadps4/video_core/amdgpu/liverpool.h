@@ -149,23 +149,26 @@ public:
         rasterizer = rasterizer_;
     }
 
+    /// `tag`: a string literal naming the sender, for the GOW3_WAIT_TRACE=1 statistics only.
     template <bool wait_done = false>
-    void SendCommand(auto&& func) {
+    void SendCommand(auto&& func, const char* tag = "other") {
         if constexpr (wait_done) {
             std::binary_semaphore sem{0};
             {
                 std::scoped_lock lk{submit_mutex};
-                command_queue.emplace([&sem, &func] {
-                    func();
-                    sem.release();
-                });
+                command_queue.emplace(
+                    [&sem, &func] {
+                        func();
+                        sem.release();
+                    },
+                    tag);
                 ++num_commands;
                 submit_cv.notify_one();
             }
             sem.acquire();
         } else {
             std::scoped_lock lk{submit_mutex};
-            command_queue.emplace(std::move(func));
+            command_queue.emplace(std::move(func), tag);
             ++num_commands;
             submit_cv.notify_one();
         }
@@ -186,18 +189,20 @@ public:
     }
 
     /// A guest thread's fault request: SendCommand<true> unless GOW3_WAIT_SERVICES_FAULTS=1.
-    void SendFaultCommand(auto&& func) {
+    void SendFaultCommand(auto&& func, const char* tag = "other") {
         if (!WaitServicesFaults()) {
-            SendCommand<true>(func);
+            SendCommand<true>(func, tag);
             return;
         }
         std::binary_semaphore sem{0};
         {
             std::scoped_lock lk{submit_mutex};
-            fault_queue.emplace([&sem, &func] {
-                func();
-                sem.release();
-            });
+            fault_queue.emplace(
+                [&sem, &func] {
+                    func();
+                    sem.release();
+                },
+                tag);
             ++num_fault_commands;
             ++num_commands;
             submit_cv.notify_one();
@@ -349,10 +354,17 @@ private:
     std::atomic<bool> submit_done{};
     std::mutex submit_mutex;
     std::condition_variable_any submit_cv;
-    std::queue<Common::UniqueFunction<void>> command_queue{};
+    /// A queued command and the sender's tag (GOW3_WAIT_TRACE statistics).
+    struct QueuedCommand {
+        Common::UniqueFunction<void> func;
+        const char* tag;
+        QueuedCommand(Common::UniqueFunction<void> func_, const char* tag_)
+            : func{std::move(func_)}, tag{tag_} {}
+    };
+    std::queue<QueuedCommand> command_queue{};
     /// gow3 21 Oct 2026 (GOW3_WAIT_SERVICES_FAULTS=1): fault requests (SendFaultCommand), under
     /// submit_mutex; counted in num_commands as well.
-    std::queue<Common::UniqueFunction<void>> fault_queue{};
+    std::queue<QueuedCommand> fault_queue{};
     std::atomic<u32> num_fault_commands{};
     u32 command_depth = 0; ///< GPU command thread: commands running (ServiceQueuedCommands)
     std::thread::id gpu_id;

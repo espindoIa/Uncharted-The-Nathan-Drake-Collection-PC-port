@@ -3540,3 +3540,41 @@ Open (not done):
 - The second ClampRangeSize in CollectRingBindings.
 
 Not verified: U1 and U2; other U3 chapters (one scene measured); a long soak; 4K with DLSS model M. The verify run was 1080p only. p99 and 1% low at 4K include 0, so no tail-latency claim there.
+
+## 22 October 2026: what keeps stage A and B waiting for each other (roadmap phase 6 prep)
+
+All numbers measured 22 Oct on U3 chapter 2 meat market, 1080p, DLAA model K, build 2cd3319 plus the new diagnostic below. One 30 s profile run and one 25 s trace run; no A/B, no behaviour change.
+
+New diagnostic: GOW3_WAIT_TRACE=1 (off by default; liverpool.h / liverpool.cpp, tags at the SendCommand callers). SendCommand / SendFaultCommand take a `tag` (default "other"); the queues hold a QueuedCommand (function plus tag). Every 5 s it prints:
+- Per command source: commands run; drains (and how many found the pipe busy) with total microseconds; body microseconds.
+- Fence waits: fast path met; slow path drains with microseconds; met; not met.
+- Unmet gfx waits by duration, and gfx memory waits by window.
+
+Draw pipe in the profile run: "stage A waited 21.8%, stage B busy 81.4%", about 3,700-3,800 drains/s that waited.
+- Drains by reason per second: commands 3,131-3,466 (18.4-18.9% of stage A time); compute 446-463 (1.8-2.3%); rasterizer about 90 (0.7-1.4%); WaitRegMem about 42 (0.3-0.4%).
+- GOW3_FRAME_STATS "stage A waits over 0.5%": ProcessCommands:253 9.6%; LandDeferredFenceFor:1186 8.8%; ProcessCompute:2481 2.3%; OnSubmit:4112 1.4%.
+
+Trace run (93.3 FPS with the trace on; six 5 s windows agree within 5%):
+- Commands: only one source appears, tag `fault-flush` (the two SendFaultCommand calls in buffer_cache.cpp, guest write faults). About 915-961 runs per window (about 190/s); 1,830-1,922 drains, of which 527-567 found the pipe busy; 440,000-487,000 us waiting (about 9% of stage A); body only 29,000-38,000 us. Average wait per command about 480 us.
+- Fence waits (LandDeferredFenceFor): 3,133-3,461 met on the fast path. Slow path: 16,403-17,714 drains (every one found the pipe busy), 457,000-495,000 us (about 9.4% of stage A, about 27 us each), 99.6% met after the drain (first window: 17,648 met, 66 not met). About 3,400 slow-path drains/s, about 38 per frame.
+- Unmet gfx waits: 113-151 per window, all under 1 ms (one of 1-5 ms). Gfx memory waits by window: 0x100c100000, 0x100c300000, 0x100c400000 and 0x76f00000 are never unmet; the unmet ones sit at 0x100db00000-0x100dc00000 and 0x100e100000-0x100e700000 (about 1,700-1,950 unmet per window).
+
+Reading:
+- Both stages wait on each other in turn. Stage A spends about 18.5% of its time in two drains-to-empty (fault-flush commands 9.1%, deferred-fence waits 9.4%), and stage B sits idle while stage A feeds it again (DrawPipe::Run self 18.7% plus ntdll 15.2% in the stage B profile).
+- The fence drains almost always end with the fence met, so they wait for stage B to drain everything queued, not for a GPU result.
+- The fault-flush commands read and change cache state stage B also uses, so their drains are needed as they are.
+- Possible cut, not done: stage B lands the fence tick as an in-order pipe task and stage A waits for that task only, not for the whole queue. Not safe by a plain change: stage B owns the readbacks while it runs (the 18 Oct race, GOW3_READBACK_RACE), so stage A must not land ticks beside it.
+- Upper bound if both waits vanished entirely: stage A 21.8% shorter. The real gain is smaller, because the work before the fence still has to finish.
+
+Profile after 5b (symbolized with symprof_k.py / children_k.py; GPU-command-thread window 4 and draw-recording-thread window 4, 1,744 and 1,747 samples):
+- Stage A inclusive: ProcessCompute 61.8%; DispatchDirect 46.8%; PostDraw 38.4%; CollectRingBindings 33.4% (CopySparseMemory 15.1%); ProcessGraphics 29.6%; DrainDrawPipe 21.7%; GetComputePipeline 13.2% (RefreshComputeKey 12.8%: Info::RefreshFlatBuf 6.9%, StageSpecialization ctor 6.8%, ForEachBufferSharp 5.4%, GetSharp 3.1%); LandDeferredFenceFor 9.0%; SyncSrtTables 6.0%; NotePendingGpuWrite 5.1%. Self: ucrtbase 19.8% (memcpy of the ring copies), ntdll 19.0% (waits).
+- Stage B inclusive: RunDrawPacket 76.1%; DispatchRecord 50.3%; BindResources 48.4%; BindBuffers 27.0% (ObtainBuffer 14.7%, self 5.2%, IsCpuWriteHot 1.9%, IsBufferAccessed 1.8%); ObtainBuffer 16.7% (GpuRangesAdd 7.8%, which holds NoteGpuWriteWindows 4.1%, of which the gpu_write_page_tick unordered_map 3.5%; SynchronizeMemory 3.8%); CompleteReadbacks 12.9% (LandGuarded 9.3%: WriteBackGpuData 4.3%, TryReadBacking 2.1%). Self: DrawPipe::Run 18.7% and ntdll 15.2% (waiting for work).
+- gow3:VkRecorder (profile prof_b5, window 4): 53.5% self in Scheduler::RecorderThread (its wait loop), nvoglv64.dll 21.2%, ntdll 18.2%, DispatchRecord 10.4% inclusive. Not the limit.
+
+Next candidates by size (not done):
+- Stage B gpu_write_page_tick map (about 3.5% of B).
+- Stage A NotePendingGpuWrite scan (about 5% of A).
+- Stage A cross-dispatch compute key memo (RefreshComputeKey 12.8% of A). Needs the vma table_generation exported from runtime_memory.c.
+- The fence-tick-as-pipe-task idea above (up to about 9% of A, concurrency risk).
+
+Not verified: other scenes and chapters; U1 and U2; 4K; each number is from one run. The "entered busy" count stands in for the pipe queue depth (DrawPipe has no cheap item count). The overhead of the trace was not measured.

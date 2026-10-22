@@ -7831,7 +7831,7 @@ bool Rasterizer::PrepareCpuWrite(VAddr addr, u64 size) {
             if (assume_locks) {
                 discard();
             } else {
-                liverpool->SendCommand<true>(discard);
+                liverpool->SendCommand<true>(discard, "file-discard");
             }
         }
     }
@@ -7985,11 +7985,13 @@ void Rasterizer::LandWatchedReadback(VAddr addr, bool assume_locks) {
         for (int round = 0; round < 4; ++round) {
             u64 tick = 0;
             bool submitted = false;
-            liverpool->SendCommand<true>([this, page, &tick, &submitted] {
-                buffer_cache.PollReadbacksNow();
-                tick = buffer_cache.WatchingTick(page);
-                submitted = tick != 0 && tick < scheduler.CurrentTick();
-            });
+            liverpool->SendCommand<true>(
+                [this, page, &tick, &submitted] {
+                    buffer_cache.PollReadbacksNow();
+                    tick = buffer_cache.WatchingTick(page);
+                    submitted = tick != 0 && tick < scheduler.CurrentTick();
+                },
+                "fault-watch");
             if (tick == 0) {
                 if (page_manager.IsReadWatched(page)) {
                     break; // a watch no readback owns: the old path reports it
@@ -8011,7 +8013,8 @@ void Rasterizer::LandWatchedReadback(VAddr addr, bool assume_locks) {
         ++fallback;
         report();
     }
-    liverpool->SendCommand<true>([this, page] { buffer_cache.LandReadbacksWatching(page); });
+    liverpool->SendCommand<true>([this, page] { buffer_cache.LandReadbacksWatching(page); },
+                                 "fault-land");
 }
 
 // gow3 18 Oct 2026: a shader capture for the GPU command thread (which waits for it) handles its
