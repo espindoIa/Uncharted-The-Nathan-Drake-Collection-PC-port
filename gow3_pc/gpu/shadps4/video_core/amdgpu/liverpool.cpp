@@ -17,6 +17,7 @@
 #endif
 #include <time.h>
 #include "gow3_copy.h"
+#include "gow3_reflex.h"
 #include "gow3_toggles.h"
 #include "gow3_watch_range.h"
 #include <cstdio>
@@ -1693,6 +1694,36 @@ void ScanDcb(std::span<const u32> dcb, int depth) {
         st = DcbStats{};
     }
 }
+
+/// gow3 22 Oct 2026: a draw or dispatch was handed to the draw recording thread. While Reflex
+/// sleeps (toggle ReflexEarlySubmit clear), every GOW3_REFLEX_EARLY_DRAWS of them (default 80, 0
+/// never) since the last submission send the recorded work to the GPU instead of waiting for the
+/// sceGnmSubmitDone flush in Process. GPU profile, U3 ch.2, 4K DLAA, RTX 5070, reflex on vs off:
+/// 18.9 vs 15.65 ms of GPU time a frame, all of it idle between submissions (3.48 vs 0.21 ms a
+/// frame before that flush): the sleep leaves no backlog, so each batch's recording latency shows.
+/// A Flush here is like the ray-cast and memory-wait flushes: it submits work already recorded,
+/// in order on the one queue; fences, readbacks and barriers keep their own paths.
+void EarlySubmit(Vulkan::Rasterizer& rasterizer) {
+    if (!Gow3Reflex::SleepActive() || Gow3Toggle::Disabled2(Gow3Toggle::ReflexEarlySubmit)) {
+        return;
+    }
+    static const u32 threshold = [] {
+        const char* env = std::getenv("GOW3_REFLEX_EARLY_DRAWS");
+        return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 80u;
+    }();
+    // GPU command thread only. Every submission (this, OnSubmit, readbacks, the scheduler's own)
+    // moves the tick on, which restarts the count.
+    static u64 count_tick = 0;
+    static u32 draws = 0;
+    const u64 tick = rasterizer.GetRuntime().GetScheduler().CurrentTick();
+    if (tick != count_tick) {
+        count_tick = tick;
+        draws = 0;
+    }
+    if (threshold != 0 && ++draws >= threshold) {
+        rasterizer.Flush();
+    }
+}
 } // namespace
 
 // gow3 test (GOW3_GFX_START_DELAY_US): a graphics submission starts at least this long after the
@@ -2490,6 +2521,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             default:
                 UNREACHABLE_MSG("Unknown PM4 type 3 opcode {:#x} with count {}",
                                 static_cast<u32>(opcode), count);
+            }
+            if (rasterizer && (IsDrawOpcode(opcode) || opcode == PM4ItOpcode::DispatchDirect ||
+                               opcode == PM4ItOpcode::DispatchIndirect)) {
+                EarlySubmit(*rasterizer);
             }
             dcb = NextPacket(dcb, header->type3.NumWords() + 1);
             break;

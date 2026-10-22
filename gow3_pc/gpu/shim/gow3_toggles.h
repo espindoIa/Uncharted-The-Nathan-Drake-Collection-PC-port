@@ -185,6 +185,12 @@ enum : std::uint64_t {
     /// milliseconds; clear, the high-resolution waitable timer. A live A/B (vk_presenter.cpp,
     /// 22 Oct 2026).
     FrameGenStdSleep = 67108864,
+    /// Bit set: old behaviour. Clear, while Reflex sleeps, the GPU command thread submits a
+    /// sceGnmSubmitDone batch's recorded work every GOW3_REFLEX_EARLY_DRAWS draws and dispatches
+    /// (default 80, 0 never) instead of only at its end. 22 Oct 2026 GPU profile (U3 ch.2, 4K
+    /// DLAA, RTX 5070): with the sleep the GPU idled 3.48 ms a frame before those end-of-batch
+    /// flushes, 0.21 ms without (liverpool.cpp, EarlySubmit).
+    ReflexEarlySubmit = 134217728,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

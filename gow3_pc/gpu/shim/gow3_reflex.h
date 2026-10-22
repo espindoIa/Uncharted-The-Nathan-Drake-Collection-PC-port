@@ -46,6 +46,10 @@ void OnSwapchain(vk::SwapchainKHR swapchain);
 /// outside any lock.
 void InputSample();
 
+/// Any thread: the driver's sleep paces the frames (the mode is applied and on, the ReflexSleep and
+/// ReflexNoSleep toggles are clear), as InputSample decides. One relaxed load while the mode is off.
+bool SleepActive();
+
 /// Guest thread, a command buffer submit: the first of a frame sets its render submit start marker.
 void GuestSubmit();
 

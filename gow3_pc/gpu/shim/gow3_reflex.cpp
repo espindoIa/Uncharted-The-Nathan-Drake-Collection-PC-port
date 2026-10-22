@@ -328,6 +328,11 @@ void OnSwapchain(vk::SwapchainKHR swapchain) {
     }
 }
 
+bool SleepActive() {
+    return g.applied_mode.load(std::memory_order_relaxed) != 0 && EffectiveMode() != 0 &&
+           !Gow3Toggle::Disabled2(Gow3Toggle::ReflexNoSleep);
+}
+
 void InputSample() {
     if (!g.active.load(std::memory_order_relaxed)) {
         return;
