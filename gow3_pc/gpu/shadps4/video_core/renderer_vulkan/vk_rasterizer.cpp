@@ -2095,7 +2095,7 @@ struct DispatchStatsState {
     std::mutex b_mutex;
     std::unordered_map<u64, std::pair<u64, u64>> b; // hash -> {dispatches, ns}
     u64 b_dispatch_ns = 0, b_draw_ns = 0;
-    std::array<u64, 9> fast_paths{}; // VideoCore::g_bind_fast_paths at the last print
+    std::array<u64, 13> fast_paths{}; // VideoCore::g_bind_fast_paths at the last print
 };
 
 DispatchStatsState& DispatchStats() {
@@ -2144,22 +2144,33 @@ void DispatchStatsPrint(std::chrono::steady_clock::time_point now) {
     {
         // 22 Oct 2026: the binding fast paths (Gow3Toggle::DispatchBindFastPaths), draws included.
         const auto& f = VideoCore::g_bind_fast_paths;
-        const std::array<const std::atomic<u64>*, 9> counters = {
+        const std::array<const std::atomic<u64>*, 13> counters = {
             &f.ranges_extended,    &f.ranges_started,  &f.ranges_flushed,
             &f.page_ticks_skipped, &f.page_ticks_written, &f.resident_hits,
-            &f.resident_checks,    &f.meta_clear_skips, &f.meta_clear_checks};
-        std::array<double, 9> per_frame{};
+            &f.resident_checks,    &f.meta_clear_skips, &f.meta_clear_checks,
+            &f.page_tick_cache_hits, &f.page_tick_write_backs, &f.page_tick_read_hits,
+            &f.page_tick_flushes};
+        std::array<double, 13> per_frame{};
         for (size_t i = 0; i < counters.size(); ++i) {
             const u64 value = counters[i]->load(std::memory_order_relaxed);
             per_frame[i] = (value - s.fast_paths[i]) / frames;
             s.fast_paths[i] = value;
         }
+        // Flushes (SweepTracking, every 2 s) are counted over the whole line's period.
         std::printf("  fast paths per frame: GPU-written ranges %.0f joined the pending one, %.0f "
                     "started one, %.0f set inserts; page ticks %.0f skipped, %.0f written; "
                     "residency %.0f memo hits, %.0f walks; metadata-clear check %.0f skipped, %.0f "
-                    "in full\n",
+                    "in full; page tick cache %.0f write hits, %.0f write-backs, %.0f reader hits, "
+                    "%.0f flushes since the last line",
                     per_frame[0], per_frame[1], per_frame[2], per_frame[3], per_frame[4],
-                    per_frame[5], per_frame[6], per_frame[7], per_frame[8]);
+                    per_frame[5], per_frame[6], per_frame[7], per_frame[8], per_frame[9],
+                    per_frame[10], per_frame[11], per_frame[12] * frames);
+        if (VideoCore::page_tick_verify) {
+            std::printf("; %llu page tick reads differed from the map",
+                        static_cast<unsigned long long>(
+                            f.page_tick_mismatches.load(std::memory_order_relaxed)));
+        }
+        std::printf("\n");
     }
     {
         // 22 Oct 2026: stage A's constant ring copies and reuses (Gow3Toggle::RingDurableReuse).

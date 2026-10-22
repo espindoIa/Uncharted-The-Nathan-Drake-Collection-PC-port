@@ -164,6 +164,11 @@ enum : std::uint64_t {
     /// just passed, reuses a ring watch token no page dropped since, and skips the pending-label
     /// scan of an SRT read outside the bounds of every pending label.
     DispatchStageAMemos = 2097152,
+    /// Bit set: old behaviour. 22 Oct 2026 U3 meat market (after phase 5b): the small-write page
+    /// ticks go through a direct-mapped write-back cache of 16,384 pages in front of their hash
+    /// map (its find/assign were 3.5% of stage B; cs 8f067540 writes the same ~3 pages per
+    /// dispatch every frame). GOW3_PAGETICK_VERIFY=1 checks each cached read against the map.
+    PageTickCache = 4194304,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

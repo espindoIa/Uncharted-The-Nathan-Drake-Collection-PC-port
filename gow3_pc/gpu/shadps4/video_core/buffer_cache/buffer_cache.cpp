@@ -605,7 +605,7 @@ bool BufferCache::DiscardCpuWritePage(VAddr page) {
             return false;
         }
         gpu_modified_ranges.Subtract(page, 4096);
-        gpu_write_page_tick.erase(page >> 12);
+        ErasePageTick(page >> 12);
         page_tick_memo = {};
         // Window ticks and the ever-written window bits still cover neighboring pages.
     }
@@ -1410,9 +1410,8 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             {
                 std::shared_lock lock{gpu_ranges_mutex};
                 const auto it = gpu_write_window_tick.find(page >> 20);
-                const auto small = gpu_write_page_tick.find(page >> 12);
                 const u64 tick = std::max(it != gpu_write_window_tick.end() ? it->second : 0,
-                                          small != gpu_write_page_tick.end() ? small->second : 0);
+                                          PageTick(page >> 12));
                 bits |= tick >= scheduler.CurrentTick() ? 32 : 0;
             }
             ++g_download_reasons[bits];
@@ -2591,6 +2590,7 @@ void BufferCache::SweepTracking() {
     semaphore->Refresh();
     {
         std::unique_lock lock{gpu_ranges_mutex};
+        FlushPageTicks(); // the sweep looks at every page's newest tick
         std::erase_if(gpu_write_page_tick, [&](const auto& entry) {
             return semaphore->IsFree(entry.second) &&
                    !gpu_modified_ranges.Intersects(entry.first << 12, 4096);
@@ -2932,7 +2932,7 @@ void BufferCache::NoteGpuWriteWindows(VAddr address, u64 size) {
     const u64 last = (address + size - 1) >> 12;
     if (Gow3Toggle::Disabled2(Gow3Toggle::DispatchBindFastPaths)) {
         for (u64 page = first; page <= last; ++page) {
-            gpu_write_page_tick[page] = tick;
+            NotePageTick(page, tick);
         }
         return;
     }
@@ -2946,7 +2946,7 @@ void BufferCache::NoteGpuWriteWindows(VAddr address, u64 size) {
     u64 written = 0;
     for (u64 page = first; page <= last; ++page) {
         if (page < memo.first || page > memo.last) {
-            gpu_write_page_tick[page] = tick;
+            NotePageTick(page, tick);
             ++written;
         }
     }
@@ -2959,6 +2959,72 @@ void BufferCache::NoteGpuWriteWindows(VAddr address, u64 size) {
     }
     CountFastPath(g_bind_fast_paths.page_ticks_written, written);
     CountFastPath(g_bind_fast_paths.page_ticks_skipped, last - first + 1 - written);
+}
+
+// gpu_ranges_mutex held exclusively.
+void BufferCache::NotePageTick(u64 page, u64 tick) {
+    if (Gow3Toggle::Disabled2(Gow3Toggle::PageTickCache)) {
+        // Old path; the first write after the bit was set empties the cache into the map.
+        FlushPageTicks();
+        gpu_write_page_tick[page] = tick;
+        return;
+    }
+    if (page_tick_verify) {
+        gpu_write_page_tick[page] = tick;
+    }
+    auto& slot = page_tick_cache[PageTickIndex(page)];
+    if (slot.page == page) {
+        slot.tick = tick;
+        CountFastPath(g_bind_fast_paths.page_tick_cache_hits);
+        return;
+    }
+    if (slot.page != ~0ull) {
+        gpu_write_page_tick[slot.page] = slot.tick;
+        CountFastPath(g_bind_fast_paths.page_tick_write_backs);
+    }
+    slot = {page, tick};
+    page_tick_cache_used = true;
+}
+
+// gpu_ranges_mutex held, shared or exclusively (slots change only under the exclusive lock).
+u64 BufferCache::PageTick(u64 page) const {
+    if (page_tick_cache_used) {
+        if (const auto& slot = page_tick_cache[PageTickIndex(page)]; slot.page == page) {
+            g_bind_fast_paths.page_tick_read_hits.fetch_add(1, std::memory_order_relaxed);
+            if (page_tick_verify) {
+                const auto it = gpu_write_page_tick.find(page);
+                if ((it != gpu_write_page_tick.end() ? it->second : 0) != slot.tick) {
+                    g_bind_fast_paths.page_tick_mismatches.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+            return slot.tick;
+        }
+    }
+    const auto it = gpu_write_page_tick.find(page);
+    return it != gpu_write_page_tick.end() ? it->second : 0;
+}
+
+// gpu_ranges_mutex held exclusively.
+void BufferCache::ErasePageTick(u64 page) {
+    if (auto& slot = page_tick_cache[PageTickIndex(page)]; slot.page == page) {
+        slot = {};
+    }
+    gpu_write_page_tick.erase(page);
+}
+
+// gpu_ranges_mutex held exclusively.
+void BufferCache::FlushPageTicks() {
+    if (!page_tick_cache_used) {
+        return;
+    }
+    page_tick_cache_used = false;
+    for (auto& slot : page_tick_cache) {
+        if (slot.page != ~0ull) {
+            gpu_write_page_tick[slot.page] = slot.tick;
+            slot = {};
+        }
+    }
+    CountFastPath(g_bind_fast_paths.page_tick_flushes);
 }
 
 
@@ -2976,13 +3042,10 @@ u64 BufferCache::FetchableWindowTick(VAddr page, bool count_refusals) {
     {
         std::shared_lock lock{gpu_ranges_mutex};
         const auto window = gpu_write_window_tick.find(page >> 20);
-        const auto small = gpu_write_page_tick.find(page >> 12);
         if (window != gpu_write_window_tick.end()) {
             tick = window->second;
         }
-        if (small != gpu_write_page_tick.end()) {
-            tick = std::max(tick, small->second);
-        }
+        tick = std::max(tick, PageTick(page >> 12));
         if (!tick) {
             g_fetch_refused[2] += counted;
             return 0;
@@ -3004,9 +3067,7 @@ void BufferCache::PrewaitPageWrites(VAddr address) {
         if (const auto it = gpu_write_window_tick.find(page >> 20); it != gpu_write_window_tick.end()) {
             tick = it->second;
         }
-        if (const auto it = gpu_write_page_tick.find(page >> 12); it != gpu_write_page_tick.end()) {
-            tick = std::max(tick, it->second);
-        }
+        tick = std::max(tick, PageTick(page >> 12));
     }
     auto* semaphore = scheduler.GetWorkSemaphore();
     // Work in the open command buffer is submitted by the GPU command thread only (the download

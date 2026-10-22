@@ -103,11 +103,21 @@ struct BindFastPathStats {
     std::atomic<u64> page_ticks_skipped{0}, page_ticks_written{0};
     std::atomic<u64> resident_hits{0}, resident_checks{0};
     std::atomic<u64> meta_clear_skips{0}, meta_clear_checks{0};
+    /// Gow3Toggle::PageTickCache. Reads run under a shared lock on several threads, so
+    /// page_tick_read_hits and page_tick_mismatches use fetch_add.
+    std::atomic<u64> page_tick_cache_hits{0}, page_tick_write_backs{0}, page_tick_flushes{0};
+    std::atomic<u64> page_tick_read_hits{0}, page_tick_mismatches{0};
 };
 inline BindFastPathStats g_bind_fast_paths;
 inline void CountFastPath(std::atomic<u64>& counter, u64 n = 1) {
     counter.store(counter.load(std::memory_order_relaxed) + n, std::memory_order_relaxed);
 }
+/// gow3 22 Oct 2026 (GOW3_PAGETICK_VERIFY=1): every page tick write also goes into the map, and
+/// every read the page tick cache answers is compared with the map (page_tick_mismatches).
+inline const bool page_tick_verify = [] {
+    const char* env = std::getenv("GOW3_PAGETICK_VERIFY");
+    return env && env[0] == '1';
+}();
 
 
 class TextureCache;
@@ -594,6 +604,31 @@ private:
         u64 first = 1, last = 0, tick = 0;
     };
     PageTickMemo page_tick_memo;
+    /// gow3 22 Oct 2026 (Gow3Toggle::PageTickCache): U3 meat market profile after phase 5b,
+    /// gpu_write_page_tick's find/assign were 3.5% of the draw recording thread; cs 8f067540
+    /// (~1,530 dispatches a frame) writes ~3 pages each, mostly the same pages every frame. A
+    /// direct-mapped write-back cache in front of the map: an occupied slot holds its page's
+    /// newest tick (the map may hold an older one or none) and goes into the map when another
+    /// page takes the slot. A flush empties the cache, so no slot is ever clean: occupied means
+    /// dirty, no flag needed. Every page tick access goes through NotePageTick, PageTick and
+    /// ErasePageTick (SweepTracking flushes first). Guarded by gpu_ranges_mutex: writes and
+    /// erases hold it exclusively, PageTick shared or exclusively.
+    struct PageTickSlot {
+        u64 page = ~0ull; ///< ~0: empty (page numbers stay below 2^52)
+        u64 tick = 0;
+    };
+    static constexpr u32 PageTickCacheSize = 16384;
+    static u32 PageTickIndex(u64 page) {
+        return static_cast<u32>((page ^ (page >> 14)) & (PageTickCacheSize - 1));
+    }
+    std::array<PageTickSlot, PageTickCacheSize> page_tick_cache{};
+    bool page_tick_cache_used = false; ///< some slot may be occupied (false: the map is all)
+    void NotePageTick(u64 page, u64 tick);
+    /// The page's tick, 0 when it has none (ticks start at 1).
+    u64 PageTick(u64 page) const;
+    void ErasePageTick(u64 page);
+    /// Writes every occupied slot into the map and empties the cache.
+    void FlushPageTicks();
     /// gow3: the page's GPU bytes are final and in mapped memory: copied to guest memory, page
     /// no longer GPU-written. False: not possible (in flight, unmapped, readbacks pending).
     bool ReadFinishedGpuPage(VAddr page);

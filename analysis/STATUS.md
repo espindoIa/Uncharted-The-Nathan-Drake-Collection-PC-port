@@ -3578,3 +3578,26 @@ Next candidates by size (not done):
 - The fence-tick-as-pipe-task idea above (up to about 9% of A, concurrency risk).
 
 Not verified: other scenes and chapters; U1 and U2; 4K; each number is from one run. The "entered busy" count stands in for the pipe queue depth (DrawPipe has no cheap item count). The overhead of the trace was not measured.
+
+## 22 October 2026: page tick write-back cache (roadmap phase 6a, stage B)
+
+Profile after phase 5b (U3 meat market, 1080p DLAA K, stage B = gow3:DrawRec): ObtainBuffer 16.7%; GpuRangesAdd 7.8%, which holds NoteGpuWriteWindows 4.1%, of which the gpu_write_page_tick unordered_map find/assign 3.5%. cs 8f067540 (~1,530 dispatches a frame) writes about 3 pages per dispatch, mostly the same pages every frame.
+
+Change (Disabled2 bit 4194304 PageTickCache, set = old path, read live; `buffer_cache.cpp`: BufferCache::NotePageTick / PageTick / ErasePageTick / FlushPageTicks):
+- Small GPU writes now go to a direct-mapped write-back cache of 16,384 pages in front of gpu_write_page_tick (256 KiB, slot = page ^ (page >> 14), 16 bytes: page and tick).
+- An occupied slot holds the page's newest tick (the map may hold an older one or none) and is always dirty, so it needs no flag. A write to the same page updates the slot; a write to another page first writes the occupant into the map, then takes the slot.
+- Readers (the download-reason bits in ReadMemory, FetchableWindowTick, PrewaitPageWrites) check the slot first, then the map. ErasePageTick drops the slot and the map entry (DiscardCpuWritePage). SweepTracking runs FlushPageTicks before it looks at the map, so the sweep sees every page's newest tick.
+- Locking: everything under gpu_ranges_mutex. Writes, erases and flushes hold it exclusively; readers shared or exclusive (slots change only under the exclusive lock). The slot array is plain memory, the counters are atomics.
+- With the bit set, the first NotePageTick flushes the cache into the map and the old path runs from then on, so the toggle is safe live. The phase 5b memo (page_tick_memo) still skips pages already noted at the current tick before the cache is asked.
+
+Check mode: GOW3_PAGETICK_VERIFY=1 (off by default) also writes every tick into the map and compares each cached read with the map. One 1080p run (92.6 FPS in verify mode): 0 mismatches.
+
+Counters on the "fast paths per frame" line of GOW3_DISPATCH_STATS (cache write hits / write-backs / reader hits / flushes / mismatches), from that run:
+- Per frame: 4,500 cache write hits of 4,670 page ticks written (the memo skipped 13,350 more), about 104 write-backs, 1 reader hit.
+- Flushes: 2-3 per 2 s line.
+
+Results (ab2.sh live toggle in one session, 6 rounds x 10 s alternating windows each side, U3 chapter 2 meat market, DLAA K; bootstrap, 95% interval; 22 Oct):
+- 1080p: FPS 96.81 on vs 95.88 off, +0.94 [+0.47, +1.43]; median -0.07 ms [-0.12, -0.02]; p99 -0.16 ms [-0.37, +0.02]; 1% low +0.96 FPS [-2.83, +4.71].
+- 4K: FPS 92.28 vs 91.28, +1.00 [+0.62, +1.38]; median -0.15 ms [-0.22, -0.08]; p99 -0.08 ms [-0.30, +0.11]; 1% low +0.45 FPS [-1.23, +2.20].
+
+Not verified: U1 and U2; other U3 chapters (one scene measured); a long soak; 4K with DLSS model M. The reader paths ran only about once a frame in the verify run, so the check covers the write path far more than the three reader sites. The verify run was 1080p only. p99 and 1% low intervals at both resolutions include 0, so no tail-latency claim.
