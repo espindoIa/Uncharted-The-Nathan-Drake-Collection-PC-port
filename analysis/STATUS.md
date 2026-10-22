@@ -3639,10 +3639,88 @@ Decisions.
 - Menu and launcher: reflex (Off / On / On + Boost) in the Performance tab/page, frame_gen (Off / On) under anti-aliasing / Display. The launcher adds nvngx_dlssg.dll like nvngx_dlss.dll (signature check); the package refuses it, apply_update.py CARRY and update_port.sh carry it over for the player.
 
 Reflex measurement. U3 chapter 2 save (backup_ch2meat), 4K DLAA, RTX 5070, live A/B, 6+6 windows of 10 s, 95% hierarchical bootstrap.
-- reflex 1 FPS 44.1 vs 53.5: diff -9.5 [-12.4, -6.7]. Median frame +2.9 ms [+1.5, +4.3].
-- Driver timing latency, input sample to GPU render end: +1.7 ms [-2.2, +5.7] (no gain). The driver slept about 10 ms per frame. Flip ids stayed paired (lag 0).
+- reflex 1 FPS 44.1 vs 53.5: diff -9.5 [-12.4, -6.7]. Median frame +2.9 ms [+1.5, +4.3]. (First round, 6+6 windows; superseded for the FPS cost by the corrected round below, 57.2 -> 44.0.)
+- CORRECTED (22 Oct, second round): this first round also said "driver timing latency, input sample to GPU render end: +1.7 ms [-2.2, +5.7] (no gain)", repeated in CHANGELOG and commit 8427816. That was wrong. The number came from joining the driver's timestamps (vkGetLatencyTimingsNV) to the host clock, which does not line up (a 288 s log against the windows; frames landed in the wrong windows). With the state written in every log row (below) Reflex does lower the latency. Flip ids stayed paired (lag 0).
 - PresentMon 2.6 reports no PC latency (InstrumentedLatency NA) for VK_NV_low_latency2, so latency comes from vkGetLatencyTimingsNV (GOW3_REFLEX_LOG).
-- Cause (deduced, not proven): the port's limit is its own stages after the guest (GPU command thread, draw recording), which the driver's pacing model does not see.
+- The earlier cause ("the port's limit is its own CPU stages, which the driver's pacing model does not see") is replaced by the GPU-saturation explanation in the subsection below.
+
+### Reflex, corrected measurement (22 Oct, second round)
+
+Setup: RTX 5070, driver 616.92, U3 chapter 2 "meat market" save, DLAA K. Live A/B by toggle bit inside one session. Latency = driver timing "input sample to end of GPU work" from vkGetLatencyTimingsNV; every frame is labelled with its state in GOW3_REFLEX_LOG (15th column `state`: 0 off, 1 on with sleep, 2 on without sleep). 95% bootstrap with the state runs (windows) as units. 9 game sessions this round (one discarded: the game started late and the windows measured loading).
+
+4K DLAA (measured, live A/B, bootstrap on windows):
+
+| Setting | FPS | Latency change, mean | median | p95 |
+|---|---|---|---|---|
+| Off | 57.2 (port stdout 58.5) | - | - | - |
+| Reflex On | 44.0 (stdout 46); stdout 58.5 -> 46 is -21.4%, log 57.2 -> 44.0 is -23% | -10.6 ms [-11.0, -9.8] | -9.3 [-9.6, -8.9] | -3.2 [-3.9, -2.9] |
+| Reflex On + Boost | 48.6 (off 59.2 in that pair), -18%; FPS from the port's own frame count (play.py measure stdout, windows of 10 s), not from the driver log (log FPS for that session not computed); latency cells are log-derived | -9.9 ms [-10.3, -9.3] | -7.6 ms [-7.7, -7.6] | -2.0 ms [-3.4, -1.5] |
+
+Each latency cell is the difference (state minus off) of that statistic (mean, median, p95) of input to GPU end, with the state runs as clusters (2 runs per state, 150 frames dropped at each state change for the Boost row). The FPS percentages come from two sources and are not mixed: port stdout (58.5 off, 46 on, -21.4%) and the PresentMon-derived log (57.2 off, 44.0 on, -23%). The Boost pair (59.2 -> 48.6, -18%) is a port count (stdout), not log-derived.
+
+- Equal frame rate (measured, plain 45 FPS limit without Reflex against Reflex On): input to GPU end about 54 ms against about 34 ms, so about 20 ms better at the same FPS.
+- Input to GPU start (measured): 27 -> 15 ms.
+
+1080p DLAA (measured, CPU bound, about 95 FPS):
+
+| Setting | FPS | Latency |
+|---|---|---|
+| Off | 94.8 | input to GPU end about 14 ms |
+| Reflex On | 94.1 (cost under 1%) | about 14 ms; difference +1.2 ms [-0.4, +2.1], none |
+
+So Reflex only matters, and only costs, when the GPU limits the frame rate.
+
+Why it costs FPS. Measured: at 4K DLAA with Reflex off the GPU takes 16.9 ms per frame with no idle gaps (FPS-off period 16.8 ms); with Reflex On the GPU has idle gaps (p95 8.2 ms) and input to GPU start falls from 27 to 15 ms. The cost is entirely the sleep: Reflex mode plus markers without the sleep (toggle bit ReflexNoSleep 33554432) gave 58.6 FPS, the same as off (58.5).
+Inference, not proven: the driver's pacing leaves the GPU starved in part of the frames because of jitter in the CPU stages. No test isolated this mechanism (for example by removing the jitter); it only fits the numbers above.
+
+Tried, no recovery (measured):
+- GOW3_REFLEX_VARIANT=3 (render-submit span about 0): 41-46 FPS, mean sleep 17.5 ms, worse.
+- GOW3_REFLEX_VARIANT=2 (chained from the previous frame): 45-48 FPS.
+- GOW3_FRAMES_AHEAD=2: 43.8-49.4 FPS.
+- Boost: -18% (port count, stdout) instead of -21.4% without Boost (stdout); the log-derived -23% has no Boost counterpart.
+
+Marker attribution (driver revision 2): no queue is marked out-of-band; the shared graphics queue carries all game submits. An agent claim that marker ids must match VkPresentIdKHR is wrong per the spec (they are unrelated). Default stays off.
+
+### Frame limit and pacing with Frame Generation (22 Oct, second round)
+
+Frame limit (code change): with Frame Generation on, the limit counts shown frames and may be 144, 160, 165, 180, 200 or 240 (the menu lists them only when Frame Generation is supported); without it the limit stays at most 120. Before, a shown-frame limit of 120 held real frames to 60 FPS.
+
+Pacing of the generated frame, 1080p DLAA K, shown-frame limit 160 on a 165 Hz display, 3+3 windows (measured with PresentMon DisplayedTime and the port's FrameGen stats line):
+
+| Variant | Real FPS | DisplayedTime | Generated -> real gap |
+|---|---|---|---|
+| High-resolution timer (default now) | 80.0 | 96-97% of intervals exactly one refresh (6.06 ms), about 3.0-3.3% two refreshes | 6.5 ms (target 6.25) |
+| std::this_thread::sleep_until (toggle bit FrameGenStdSleep 67108864) | 80.0 | 96-97% one refresh, about 2.9-3.1% two refreshes | 7.2-7.5 ms (rounded to ms) |
+
+- The two-refresh intervals are the 160/165 beat (5 of every 165 refreshes repeat); the timer type made no difference there.
+- FG off, same scene: 84-90 FPS, intervals quantized to 12.12 ms (measured).
+- The new `FrameGen:` stats line prints every 5 s.
+
+Rejected experiment, removed: a deadline pacer for FG (absolute incremental deadlines, period filtered from arrival intervals). Real FPS fell from about 80 to 52-65 and 37-48% of displayed intervals were above 1.5x the median. Cause (read from its stats: period 19.3 ms, wait 17.7 ms per frame): the period is estimated from arrival intervals that the pacer itself shapes, so it can only ratchet up. A feedback on slack (frame ready earlier than its deadline) would be needed; not tried.
+
+The generated present is wrapped in out-of-band present markers (VK_NV_low_latency2) with the real frame's id so the driver does not count it as a new frame. This was implemented from the spec; the short run below ran both on at 1080p and did not validate it.
+
+### Reflex + Frame Generation, one short run (22 Oct 2026)
+
+Setup: U3 chapter 2, 1080p DLAA, GOW3_FRAME_GEN=1, GOW3_REFLEX=1, shown-frame limit 160, 3 windows of 10 s, no state toggling.
+
+Measured:
+- Real 78.1-78.9 FPS (port count). About 80.0 with FG and Reflex off in the earlier run, so about -1.5%.
+- Reflex stats lines: sleeps avg 0.09-0.14 ms, 0 timeouts, lag=1 (guest flips minus prepared flips; 0 in the 4K runs without FG; not investigated).
+- FG stats: gen == real, no skips, gap_ms mean 6.55-6.69, eval_ms mean 0.42-0.49.
+- Driver log (15 columns): marker order correct in 100% of rows (simStart<=simEnd, renderSubmitStart<=End, presentStart<=End, renderSubmitEnd<=presentEnd). 15% of rows have no input sample (868 of 5605; similar to the 12% of the FG-off 1080p log, 1957 of 16808). 6.6% of rows have no GPU times (371; 0 in the FG-off log).
+
+Problem found: the driver's GPU range per frame is much shorter with FG (median 1.8 ms) than without (10.3 ms), and input-to-GPU-end is 33.5 ms with FG vs 13.3 ms without. Under FG the driver's per-frame accounting does not describe the frame's real GPU work: the out-of-band present markers did NOT make the attribution coherent (or the generated present's work is split in a way the log does not show). Latency numbers with FG on are therefore not interpretable as end-to-end latency. Reflex pacing under FG at 4K (where it sleeps ~10 ms) remains untested and possibly mis-paced.
+
+State: stable and cheap at 1080p, attribution not validated, 4K untested.
+
+Not verified in this round:
+- Frame Generation together with Reflex at 4K, and the attribution of the driver's per-frame accounting under FG (see the short run above).
+- Generated-frame image quality.
+- Frame Generation at 4K (the pacing numbers are 1080p only).
+- VRR/G-SYNC state of the display during the tests: unconfirmed. DisplayedTime was quantized to the 165 Hz refresh, which fits a fixed refresh but does not prove VRR was off. The two-refresh share (the 160/165 beat) is only valid for a fixed refresh.
+- U1, U2 and other U3 chapters (one scene only).
+- Reflex marker attribution inside the driver (only the revision 2 behaviour above).
 
 Frame Generation smoke run (same scene, DLSS DLAA, window 2560x1440).
 - Feature created at window size with depth/motion 3840x2160. Real 48.5 FPS, displayed 98.1 FPS (PresentMon 978 presents vs 485 real). No NGX errors.
@@ -3650,4 +3728,4 @@ Frame Generation smoke run (same scene, DLSS DLAA, window 2560x1440).
 
 Not verified / open: generated-frame image quality; hudless is not passed (the HUD may ghost; the upscaled scene precedes the game's post/tonemap, so it is not a valid hudless); U2's camera view x points to screen left (NGX documents right); TAA and FSR paths; resize and HDR; live toggling; latency with FG; U1, U2 and other chapters; long soak; GPUs without FG; ring memory about 100 MB per slot at 4K.
 
-Toggle bits: ReflexSleep 8388608, FrameGeneration 16777216. Settings and env: reflex / GOW3_REFLEX, GOW3_REFLEX_EXT=0, GOW3_REFLEX_LOG; frame_gen / GOW3_FRAME_GEN, GOW3_FRAME_GEN_EXT=0, GOW3_NGX_LOG.
+Toggle bits: ReflexSleep 8388608, FrameGeneration 16777216, ReflexNoSleep 33554432, FrameGenStdSleep 67108864. Settings and env: reflex / GOW3_REFLEX, GOW3_REFLEX_EXT=0, GOW3_REFLEX_LOG (15th column `state`), GOW3_REFLEX_VARIANT (diagnostic, 2/3); frame_gen / GOW3_FRAME_GEN, GOW3_FRAME_GEN_EXT=0, GOW3_NGX_LOG.

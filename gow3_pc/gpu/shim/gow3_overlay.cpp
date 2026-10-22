@@ -586,9 +586,10 @@ void PerformanceTab() {
         if (Gow3Reflex::Available()) {
             static const char* const reflex_labels[] = {"Off (recommended)", "On", "On + Boost"};
             ChoiceRow("NVIDIA Reflex", s.reflex, reflex_labels, nullptr, int(std::size(reflex_labels)),
-                      "Lets the NVIDIA driver time the start of each frame for lower input delay. In this port "
-                      "the game is limited by its own CPU work, so it costs frame rate (Uncharted 3 at 4K: "
-                      "about 9 FPS) and did not lower input delay; off is recommended.");
+                      "Lets the NVIDIA driver time the start of each frame. When the graphics card limits the "
+                      "frame rate (Uncharted 3 at 4K) it cuts input delay by about 10 ms but costs about 20% of "
+                      "the frame rate; when the processor limits it (1080p) it changes nothing. Off is "
+                      "recommended.");
         }
         CheckRow("Compile new shaders in the background", s.async_shaders,
                  "Fewer stutters in new areas; an object or effect may appear a moment later.");

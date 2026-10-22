@@ -7,9 +7,22 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 ## Unreleased (fork, after 0.5.0)
 
 - **New (22 Oct 2026): NVIDIA Reflex option, off by default.** In the in-game menu (Performance) and
-  the launcher (Performance), on NVIDIA cards: Off, On, On + Boost. It did not pay off here: in
-  Uncharted 3 at 4K (chapter 2, DLAA, RTX 5070) it cost about 9 FPS (53.5 down to 44.1) and the
-  driver's own timing showed no lower input delay. Keep it off.
+  the launcher (Performance), on NVIDIA cards: Off, On, On + Boost. It trades frame rate for input
+  delay, and only when the graphics card limits the frame rate. Uncharted 3 at 4K (chapter 2, DLAA,
+  RTX 5070): the driver's own timing from input to the end of the GPU work was about 10 ms lower
+  (at the same frame rate as a plain 45 FPS limit, about 34 ms against 54 ms), but the frame rate
+  fell from 58.5 to 46 FPS by the game's own count (about a fifth, 21%; the PresentMon log gave
+  57.2 to 44.0, 23%; with Boost 59.2 to 48.6 by the game's own count, 18%). At 1080p, where the processor limits the
+  frame rate, it changed nothing (94.1 against 94.8 FPS, no latency difference). It stays off by
+  default. An earlier note here said it gave no lower input delay; that was wrong (the driver's
+  timestamps had been matched to the wrong time windows).
+- **New (22 Oct 2026): frame rate limit above 120 with DLSS Frame Generation.** With Frame
+  Generation on, the limit counts the frames shown and can be set to 144, 160, 165, 180, 200 or 240
+  (the menu lists them only when Frame Generation is supported); without it the limit stays at
+  120. Before, a limit of 120 with Frame Generation held the real frames to 60 FPS. In tests at
+  1080p on a 165 Hz screen, a limit of 160 gave 80 real FPS and about 97% of the shown frames were
+  exactly one refresh apart (about 3% two refreshes, the 160 against 165 beat). Not tested: a
+  variable-refresh (G-SYNC) screen, and Frame Generation together with Reflex.
 - **New (22 Oct 2026): DLSS Frame Generation (2x), off by default.** Adds one AI-generated frame
   between every two, for about twice the frames shown (Uncharted 3, same scene: 48.5 real, 98.1
   shown FPS) with a little more input delay. Needs an RTX 40 or newer, an anti-aliasing mode (TAA,

@@ -2103,9 +2103,10 @@ class Launcher:
                         "characters then float a little above the floor.",
                         [("1", "1"), ("2", "2"), ("0", "Unlimited")], recommended="1")
         self.ini_choice(page, "reflex", "NVIDIA Reflex",
-                        "NVIDIA RTX cards. Lets the driver time the start of each frame for lower input delay. "
-                        "In this port the game is limited by its own CPU work, so it costs frame rate (Uncharted "
-                        "3 at 4K: about 9 FPS) and did not lower input delay. Keep it off.",
+                        "NVIDIA RTX cards. Lets the driver time the start of each frame. When the graphics card "
+                        "limits the frame rate (Uncharted 3 at 4K) it cuts input delay by about 10 ms but costs "
+                        "about 20% of the frame rate; when the processor limits it (1080p) it changes nothing. "
+                        "Keep it off.",
                         [("0", "Off"), ("1", "On"), ("2", "On + Boost")], recommended="0")
         self.ini_toggle(page, "async_shaders", "Compile shaders in the background",
                         "Fewer stutters when you reach new areas. Recommended on.")
