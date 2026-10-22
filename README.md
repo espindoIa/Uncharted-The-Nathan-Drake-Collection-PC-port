@@ -80,6 +80,10 @@ plan and test list: [analysis/PLAN.md](analysis/PLAN.md).
   offered; with VSync a limit at or above the monitor's refresh rate follows the monitor; cutscene
   movies keep their speed at any frame rate); frames queued; background shader compilation;
   multithreaded rendering (on by default); idle game threads (sleep or spin).
+- **NVIDIA Reflex** (off by default, NVIDIA cards): lower input delay, but 11-19% less FPS at 4K
+  (about 2-3 FPS of that is recovered by early submit); no effect at 1080p.
+- **DLSS Frame Generation 2x** (off by default, RTX 40 or newer): needs `nvngx_dlssg.dll`, added in
+  the launcher (Display); the limit counts shown frames (144-240).
 - **Keyboard and mouse:** mouse look (sensitivity, invert Y), right mouse aim, left mouse fire, WASD,
   and every action remappable per game in the **Controls** tab (two bindings per action, keys or
   mouse buttons). Controllers (DualSense, DualShock 4, Xbox) work at the same time.
@@ -123,7 +127,7 @@ controller buttons).
 - **Frames queued 2** is faster in heavy scenes, but GPU results reach the game a frame later
   (Uncharted 2's NPCs float, Nate's feet sink into the floor): keep it at 1 (every preset does).
 - Drake's Fortune renders at most 2880x1620 (its memory layout) and upscales to 4K; turn on FSR 1.
-- Frame rates above 120 are not offered: the games' movement breaks (Drake's Fortune at 160 FPS
+- Frame rates above 120 are offered only with Frame Generation (real frames stay at half): the games' movement breaks (Drake's Fortune at 160 FPS
   dropped Nate through the world).
 - Uncharted 3 has had less play testing than the other two: please report crashes with the log
   (launcher **Advanced -> Open log folder**, `boot.log`) on this fork's

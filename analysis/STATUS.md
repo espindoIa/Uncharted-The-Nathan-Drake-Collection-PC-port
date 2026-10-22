@@ -1,5 +1,29 @@
 # Uncharted compatibility work — 13 October 2026
 
+## Index (grep the heading text)
+
+New entries go at the end, dated, measured numbers only.
+
+- Grey/black ground: `Grey/black ground investigation, 14 October 2026 (afternoon)`, `FIXED 14 October 2026 (18:50): grey/black ground, unlit Nate`
+- Sound effects: `Sound effects silent (gunfire, footsteps, ambience); music and dialogue fine (14 October 2026, evening)`, `FIXED 14 October 2026 (19:3x): sound effects (footsteps, ambience, gunfire)`
+- Readbacks and ray-cast fences: `16 October 2026: readbacks, ray-cast fences, floating NPCs (0.1.2)`
+- Floating NPCs: `16 October 2026 (night): U2 floating NPCs / sinking Nate / leg flicker - real cause and fix`
+- Upscalers, DLSS, motion vectors: `18 October 2026: object motion vectors in the Uncharted games; DLSS from NVIDIA`
+- DLSS model M cost: `20 October 2026: model M's own cost (same model, same input and output)`
+- Low-end PCs: `17 October 2026 (night, 02:30-04:40): low-end PCs`
+- Radeon 780M: `18 October 2026 (night, laptop): Radeon 780M optimization (RTX 5060 switched off)`
+- U3 performance at the player's settings (also lists the measuring tools and A/A noise): `19 October 2026: Uncharted 3 performance at the player's settings`
+- Repo audits: `18 October 2026: GPU-offload audit, register scan, constant ring reuse`, `20 October 2026: repo audit fixes`, `20 October 2026: audit leftovers, second audit, performance quick wins`
+- Fork (espindoIa) notes: `Fork (espindoIa) notes, merged onto 0.3.0 (19 Oct)`
+- Multi-core roadmap phases (22 Oct): `22 October 2026: multi-core roadmap phases 0-2 and 5`, `22 October 2026: stage B dispatch fast paths (roadmap phase 4)`
+- Reflex and Frame Generation (decisions, measurements): `Reflex and DLSS Frame Generation (22 Oct)`
+- Reflex latency: `Reflex, corrected measurement (22 Oct, second round)`
+- FG frame limit and pacing: `Frame limit and pacing with Frame Generation (22 Oct, second round)`
+- Reflex + FG together: `Reflex + Frame Generation, one short run (22 Oct 2026)`
+- Reflex GPU idle diagnosis and early submit: `Reflex: GPU idle diagnosis and early submit (22 Oct 2026)`
+- FG model selector (none in NGX 310.9.16): `Frame Generation model (NGX)`
+- Measuring method (ab2.sh, abstats.py, PresentMon, profilers): see the Tools list in the U3 performance section above, and AGENTS.md "Measuring".
+
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
 The game boots through the Collection menu and opening movie into gameplay.

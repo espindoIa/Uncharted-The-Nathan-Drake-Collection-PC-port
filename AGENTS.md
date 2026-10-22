@@ -2,7 +2,7 @@
 
 This file is the guide for any coding agent (Codex, Claude Code, etc.) working in this repository.
 
-PC port of the PS4 *Uncharted: The Nathan Drake Collection* (CUSA02344: U1 Drake's Fortune, U2 Among
+PC port of the PS4 *Uncharted: The Nathan Drake Collection* (US CUSA02320 or Europe CUSA02344: U1 Drake's Fortune, U2 Among
 Thieves, U3 Drake's Deception). The games' own x86-64 code runs natively; a C runtime supplies the PS4
 system libraries (HLE) and a shadPS4-derived Vulkan renderer executes the PS4 GPU work. Windows only
 in practice (MSYS2 CLANG64 toolchain). The runtime began as the gow3_pc project, so internal names
@@ -36,7 +36,7 @@ The toolchain is MSYS2 CLANG64. From Git Bash, wrap commands like this:
 - **C/C++ unit tests:** CMake targets marked `EXCLUDE_FROM_ALL` in `gow3_pc/gpu/CMakeLists.txt` (e.g. `movie-hook-test`, `scene-resolution-test`). Build and run one under the CLANG64 PATH (the exes need its DLLs): `ninja -C out/gpu movie-hook-test && ./out/gpu/movie-hook-test.exe` from `gow3_pc`.
 - **Python tests:** `unittest` files in `gow3_pc/tests/` that import `paths.py`; run one from that folder, e.g. `python -m unittest test_prepare`.
 - **Launcher syntax check:** `python -c "import ast; ast.parse(open('launcher/uncharted_launcher.pyw', encoding='utf-8').read())"`.
-- **Run from source:** `Start-Uncharted.cmd` (launcher), or `python tools/probe_uncharted.py --boot --seconds 0 --executable big3-ps4_Shipping.elf --game <CUSA02344 folder>` (`eboot.bin` = U1 / Collection menu, `big2-…` = U2, `big3-…` = U3). Logs go to `analysis/<executable>/boot.log`.
+- **Run from source:** `Start-Uncharted.cmd` (launcher), or `python tools/probe_uncharted.py --boot --seconds 0 --executable big3-ps4_Shipping.elf --game <CUSA02320 or CUSA02344 folder>` (`eboot.bin` = U1 / Collection menu, `big2-…` = U2, `big3-…` = U3). Logs go to `analysis/<executable>/boot.log`.
 - **Package:** run from Git Bash, not the CLANG64 shell. In CLANG64 it picks MSYS2's Python, and Python copying fails:
   `DLSS_BRIDGE=/c/dev/uncharted/gow3_pc/out/gow3_dlss.dll DLSS_SDK=/c/dev/DLSS tools/package_windows.sh` → `dist/Uncharted-windows.zip`. The pacman "Import PGP key?" lines in its output are noise. The zip must contain `gow3_dlss.dll` and must **not** contain `nvngx_dlss.dll` (NVIDIA's license does not fit the GPL; the launcher has the player add it). Test it extracted into an empty folder.
 - **Release / public sync:** `tools/release.sh <version>` (needs `tools/release-notes/v<version>.md`); `tools/export_github.sh` copies source only (no game files) into a separate repo for GitHub Actions (`.github/workflows/build-windows.yml`).
@@ -61,20 +61,33 @@ The toolchain is MSYS2 CLANG64. From Git Bash, wrap commands like this:
 - `shim/` holds the port's own pieces:
   - `gow3_settings.{h,cpp}`: settings as atomics read every frame. It loads the ini and `GOW3_*` overrides, and `Save()` merges with keys the launcher changed meanwhile.
   - `gow3_overlay.cpp`: the ImGui in-game menu (Insert / R3+L2) and the performance overlay.
+  - `gow3_reflex.{h,cpp}`: NVIDIA Reflex (VK_NV_low_latency2; settings `reflex`, `frame_gen`).
   - Also window and SDL, Videodec2, fibers and movie scaling.
 - Upscalers live in `shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp` (FSR 3.1, FSR 4, TAA, DLSS). DLSS goes through the optional MIT bridge `gpu/dlss_bridge` (`gow3_dlss.dll`), loaded at run time next to `nvngx_dlss.dll`.
+- DLSS Frame Generation: Vulkan side `vk_dlss.*` and `vk_presenter.cpp` (`PresentGenerated`); bridge ABI 3; `nvngx_dlssg.dll` is supplied by the player (never packaged). NGX 310.9.16 has no application-side FG model selector (model / Preset B only through the NVIDIA App), so the port has none.
 - A new setting usually touches four places: `gow3_settings.h`/`.cpp` (parse in `Set`, write in `Current`), the menu, the launcher, and possibly `probe_uncharted.py`.
 
 **GPU pipeline and flips.** The GPU command thread parses PM4 packets, a draw recording thread (DrawPipe) prepares draws, and a recorder thread writes Vulkan commands. Flips go `VideoOutDriver::SubmitFlipInternal` → `PrepareFrame` → present thread (frame limiter) → swap thread (`vk_swapchain.cpp`); the guest-visible flip waits for its fences separately (`shadps4/core/libraries/videoout/driver.cpp`).
 
 **Runtime toggles and diagnostics.**
-- `analysis/uncharted-user/disabled-optimizations.txt` (`GOW3_TOGGLE_FILE`) is read live: "<first> <second>" bit masks, bit set = optimization off. The bits are the enums in `gpu/shim/gow3_toggles.h` (`Disabled()` / `Disabled2()`); new performance work goes behind a new bit so it can be A/B'd in one run.
-- `GOW3_FRAME_LOG=<file>` logs flip events (S/P/Q/C, steady-clock ms); `GOW3_DISPLAY_LOG=<file>` logs on-screen times via VK_KHR_present_wait plus `<file>.gpu` GPU completion; `GOW3_GPU_PROFILE`, `GOW3_FRAME_TIMES`, `GOW3_FRAME_STATS=1` add more.
-- `tools/play.py` drives a game from scripted input (replays, `--burst`, `--marks`) for closed-loop tests.
+- `analysis/uncharted-user/disabled-optimizations.txt` (`GOW3_TOGGLE_FILE`) is read live: "<first> <second>" bit masks, bit set = optimization off. The bits are the enums in `gpu/shim/gow3_toggles.h` (`Disabled()` / `Disabled2()`); new performance work goes behind a new bit so it can be A/B'd in one run. Reflex/FG bits (`Disabled2`): `ReflexSleep`, `FrameGeneration`, `ReflexNoSleep`, `FrameGenStdSleep`, `ReflexEarlySubmit`.
+- `GOW3_FRAME_LOG=<file>` logs flip events (S/P/Q/C, steady-clock ms); `GOW3_DISPLAY_LOG=<file>` logs on-screen times via VK_KHR_present_wait plus `<file>.gpu` GPU completion; `GOW3_FRAME_TIMES`, `GOW3_FRAME_STATS=1` add more.
+- `tools/play.py` drives a game from scripted input (replays, `--burst`, `--marks`) for closed-loop tests. It and the bench scripts need **Python 3.13 first on PATH**: 3.12 has no PIL (symptoms "No module named PIL", "no gameplay").
+
+**Measuring.**
+- `C:/dev/bench` (outside the repo): `bench.sh <u1|u2|u3> <tag>` (player's settings, saves restored, 20 s standing still), `ab2.sh` (live on/off windows in one session, order flipped each round), `settoggle.sh "<first> <second>"` (writes the toggle file), `abstats.py <tag>` (medians, p99, 1% lows, bootstrap intervals of the difference). Use PresentMon (run by `play.py measure`) for display cadence.
+- A/B through the toggle file in one session, alternating the order. Windows of one session are not independent replicates: run an A/A (`"0 0"` as OFF) for the noise level.
+- Profilers (all print to the port's stdout): `GOW3_GPU_PROFILE=1` (ms per label, and "(between submissions: GPU idle)" per call stack, every 5 s); `GOW3_SUBMIT_STATS=1` (stack offsets: symbolize with `llvm-symbolizer --obj=gow3_pc/out/gow3-probe.exe` at `0x140000000`+offset, under the CLANG64 PATH); `GOW3_SUBMIT_WAIT_STATS=1`; `GOW3_REFLEX_LOG=<file>`.
+- The port's stdout goes to `analysis/<executable>/boot.log` (no timestamps: note the file size before and after each window to split it). `analysis/play/game.log` only holds the prepare output.
 
 **Analysis material.**
 - `analysis/<game>/boot-linked.bin` holds the linked guest images for disassembly. At run time the guest base is `0xb400000`.
-- `analysis/STATUS.md` is the detailed engineering log: measurements, causes ruled out, open issues. `analysis/PLAN.md` is the plan and test list.
+- `analysis/STATUS.md` is the detailed engineering log: measurements, causes ruled out, open issues. Read its index block at the top before digging. `analysis/PLAN.md` is the old 13-15 Oct plan; the current plan is `ROADMAP.md`.
+
+**Gotchas.**
+- The packaged `gow3-probe.exe` is stripped (14 MB); `gow3_pc/out/gow3-probe.exe` is the 165 MB build. If the game exits silently right after boot, run `build.sh` first.
+- `update_port.sh` needs the launcher and the game closed.
+- When a task prompt says "do not commit" (or to commit only on the user's explicit authorization), do not; the orchestrator or the user commits.
 
 ## Conventions
 
