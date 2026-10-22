@@ -22,6 +22,7 @@ New entries go at the end, dated, measured numbers only.
 - Reflex + FG together: `Reflex + Frame Generation, one short run (22 Oct 2026)`
 - Reflex GPU idle diagnosis and early submit: `Reflex: GPU idle diagnosis and early submit (22 Oct 2026)`
 - FG model selector (none in NGX 310.9.16): `Frame Generation model (NGX)`
+- RTSS / MSI Afterburner OSD flicker, present queue, dev NGX banner: `RivaTuner / MSI Afterburner OSD flicker: the present queue (22 Oct 2026)`
 - Measuring method (ab2.sh, abstats.py, PresentMon, profilers): see the Tools list in the U3 performance section above, and AGENTS.md "Measuring".
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
@@ -3810,3 +3811,35 @@ Not verified:
 - Cause of the silent boot exit of the packaged build is unknown.
 
 Toggle bit: ReflexEarlySubmit 134217728. Env: GOW3_REFLEX_EARLY_DRAWS.
+
+## RivaTuner / MSI Afterburner OSD flicker: the present queue (22 Oct 2026)
+
+Report (player, watching): the MSI Afterburner OSD flickered with Frame Generation on, and a "DLSS SDK -- DO NOT DISTRIBUTE" banner flickered too; with FG off the OSD still flickered.
+
+Method. Desktop captures (C:\dev\bench\capscreen.ps1, GDI CopyFromScreen of the 2560x1440 screen; the port's own play.py shots are taken before the swapchain and never show third-party overlays), 120 per state, U3 bar (bench save), player's settings (1080p output, DLSS M, borderless, vsync, limit 120, Reflex on), RTX 5070, RTSS 7.3.7 (RTSS.exe still reports 7.3.5.28314 in its version resource; the uninstall entry says 7.3.7, build 28314 is the 7.3.7 release), MSI Afterburner 4.6.7 Beta 2. Classifier C:\dev\bench\osdclass.py: OSD present = share of strong horizontal edges (text with its shadow) in rows 30-100, columns 0-480 above 0.3% (frames without it ~0, with it ~4). Its first version counted white pixels and missed thin anti-aliased text: its 31%/52% readings were wrong and are superseded by the table below.
+
+Banner: from the development NGX DLL, test setup only.
+- gow3_pc/out/nvngx_dlssg.dll was the DLSS SDK 310.9.16 `dev` build (SHA-256 B49508DE..., same as C:\dev\DLSS\lib\Windows_x86_64\dev), copied by hand during the 22 Oct FG work; no script copies it. The player's install has the `rel` build (8D59D49B...). The banner was in 24 of 60 captures with FG on, never in the port's internal (real) frame, gone with FG off: NGX draws it into generated frames. Replaced by the `rel` build in gow3_pc/out (dev copy kept as C:\dev\bench\nvngx_dlssg.dev.dll): 0 of 120 captures since.
+
+OSD (measured, 120 captures each):
+
+| Present queue | State | OSD shown |
+|---|---|---|
+| Third queue (20 Oct default) | FG off | 0% |
+| Third queue | FG on | 5% (8% with DISABLE_CAPFRAMEX_VULKAN_LAYER=1) |
+| Third queue | FG off, limit 60 | 100% |
+| Graphics queue (GOW3_PRESENT_QUEUE=0) | FG off / FG on / Reflex off / limit 60 | 100% each |
+| Automatic (new build, graphics queue here) | FG off / FG on | 100% each; player: "parou de piscar" |
+
+- RTSS is loaded in the game (RTSSHooks64.dll, RTSSVkLayer64.dll; CapFrameX's cfx_osd_vklayer.dll too). Disabling CapFrameX's layer changed nothing.
+- RTSSHooks64.dll names (strings, not disassembly): hooks vkCreateDevice, vkCreateSwapchainKHR, vkQueuePresentKHR; uses vkGetDeviceQueue, vkQueueSubmit, vkQueueWaitIdle, fences; no vkCreateSemaphore. Inference, not proven by disassembly: RTSS draws the OSD inside the present hook with a submission on a queue it fetches itself, ordered by queue order rather than a semaphore, so a present on another queue can leave before the draw. That fits all rows: on the graphics queue the draw and the present share one queue; on the third queue at 120 FPS the present wins, at 60 FPS the draw has time.
+
+Change: Instance::CreateDevice picks the third queue only when another adapter drives the screen (or that cannot be told): gpu/shim/gow3_display_adapter.cpp compares the DXGI adapter that owns the window's monitor with the Vulkan device LUID. Log line "GPU: presents on the graphics queue (the screen is on this GPU)". GOW3_PRESENT_QUEUE=1 forces the third queue, =0 the graphics queue. The 20 Oct third queue was made for hybrid laptops (cross-adapter presents under the submit lock froze the game 0.3-0.8 s); the desktop check then showed no gain from it.
+
+Performance A/B (bench.sh, 4K output, DLSS M, limit 120, FG and Reflex on, MT on, one game session per window since the queue is fixed at device creation; C:\dev\bench\pqab.sh), real FPS by the port's count:
+- Automatic (graphics queue): 54.6, 54.4, 53.9.
+- Third queue: 54.2 in the one normal session; the A/A of the same day (third queue, 12 windows in one session) 54.6 [interval of the A/A difference -0.16, +0.30].
+- No regression seen; too few sessions to claim a gain or loss in either direction.
+- Third-queue anomalies, unexplained: one session never reached gameplay ("The game is not running"), one ran at 26.6 real / 53.2 shown FPS (p50 37.8 ms) in normal gameplay (end shot: the bar). Logs not kept (boot.log is overwritten per session). Not seen in the automatic sessions (3) nor in the A/A session.
+
+Not verified: a hybrid laptop with this build (the automatic choice should keep the third queue there: the iGPU owns the monitor's DXGI output); other overlays (Steam, Discord, OBS); U1 and U2; exclusive fullscreen; HDR; the cause of the two third-queue anomalies; RTSS's draw path by disassembly.

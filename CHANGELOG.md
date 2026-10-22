@@ -6,6 +6,14 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Fixed (22 Oct 2026): the MSI Afterburner / RivaTuner overlay flickered or was missing.** Its
+  on-screen display showed only now and then, with or without Frame Generation. On PCs whose screen
+  is connected to the graphics card that runs the game, frames are now handed to the screen the
+  way RivaTuner expects, and the overlay stays on (shown in 120 of 120 screen captures, before 0 to
+  8%). Laptops whose screen is driven by the processor's graphics keep the way that fixed their
+  freezes on 20 Oct. No frame rate change was measured (Uncharted 3 at 4K: about 54 real FPS either
+  way). Not tested: such a laptop with this change, and other overlays (Steam, Discord, OBS).
+
 - **Improved (22 Oct 2026): NVIDIA Reflex loses less frame rate at 4K.** While Reflex sleeps, the
   GPU work of a frame is now handed to the graphics card in several parts instead of only at the
   end, so the card waits less. Uncharted 3 at 4K (chapter 2, DLAA, RTX 5070): about 2 to 3 FPS more
