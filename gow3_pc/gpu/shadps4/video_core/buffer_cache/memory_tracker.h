@@ -43,6 +43,28 @@ public:
             });
     }
 
+    /// gow3 22 Oct 2026: RegionManager::CpuCleanToken for a range inside one 4 MiB region (0
+    /// otherwise, or when the region is not tracked). Lock-free, from any thread.
+    [[nodiscard]] u64 CpuCleanToken(VAddr addr, u64 size) const noexcept {
+        const u64 index = addr >> TRACKER_HIGHER_PAGE_BITS;
+        if (size == 0 || index >= NUM_HIGH_PAGES ||
+            ((addr + size - 1) >> TRACKER_HIGHER_PAGE_BITS) != index) {
+            return 0;
+        }
+        const RegionManager* manager = __atomic_load_n(&top_tier[index], __ATOMIC_ACQUIRE);
+        return manager ? manager->CpuCleanToken(addr & TRACKER_HIGHER_PAGE_MASK, size) : 0;
+    }
+    /// RegionManager::CpuUnsetSince: no page of the range was marked CPU-modified since
+    /// CpuCleanToken(addr, size) returned `token`.
+    [[nodiscard]] bool CpuUnchangedSince(VAddr addr, u64 size, u64 token) const noexcept {
+        const u64 index = addr >> TRACKER_HIGHER_PAGE_BITS;
+        if (token == 0 || size == 0 || index >= NUM_HIGH_PAGES) {
+            return false;
+        }
+        const RegionManager* manager = __atomic_load_n(&top_tier[index], __ATOMIC_ACQUIRE);
+        return manager && manager->CpuUnsetSince(addr & TRACKER_HIGHER_PAGE_MASK, size, token);
+    }
+
     /// Mark region as CPU modified, notifying the device_tracker about this change
     void MarkRegionAsCpuModified(VAddr dirty_cpu_addr, u64 query_size) {
         IteratePages<false>(dirty_cpu_addr, query_size,

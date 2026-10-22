@@ -154,6 +154,10 @@ enum : std::uint64_t {
     /// writes no metadata surface skips the metadata-clear check of its reads. (131072 and 262144
     /// are taken by work in progress.)
     DispatchBindFastPaths = 524288,
+    /// Bit set: old behaviour. 22 Oct U3 meat market: a constant ring copy is reused after its
+    /// epoch ended (~34,500 guest epochs a second) while page tracking shows the CPU cannot have
+    /// written the range since and no GPU or backing write ever reached it.
+    RingDurableReuse = 1048576,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

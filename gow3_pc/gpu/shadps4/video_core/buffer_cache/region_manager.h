@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 
@@ -92,9 +93,11 @@ public:
             return;
         }
 
+        [[maybe_unused]] const CpuChange change{this, type == Type::CPU};
         RegionBits& bits = GetRegionBits<type>();
         if constexpr (type == Type::CPU && enable) {
             CountWriteFaults(start_page, end_page);
+            StampSet(start_page, std::min<size_t>(end_page, NUM_PAGES_PER_REGION));
         }
         if constexpr (enable) {
             bits.SetRange(start_page, end_page);
@@ -122,6 +125,8 @@ public:
         if (add.None()) {
             return;
         }
+        const CpuChange change{this, true};
+        StampSet(add);
         cpu |= add;
         UpdateProtection<false, false>();
     }
@@ -156,6 +161,7 @@ public:
         RegionBits mask(bits, start_page, end_page);
 
         if constexpr (clear) {
+            [[maybe_unused]] const CpuChange change{this, type == Type::CPU};
             bits.UnsetRange(start_page, end_page);
             if constexpr (type == Type::CPU) {
                 KeepHotPagesModified(start_page, end_page);
@@ -190,9 +196,75 @@ public:
         return bits.AnyInRange(start_page, end_page);
     }
 
+    /// gow3 22 Oct 2026 (Rasterizer: constant ring copies reused across epochs): nonzero when
+    /// no change of this region's CPU state is under way and every page of [offset, offset +
+    /// size) is CPU-clean, so write-protected: a CPU store there faults, and the fault marks the
+    /// page CPU-modified (StampSet) before the store lands. The token is the number the next
+    /// change will get. Lock-free: a change racing the bit reads is numbered from the token on.
+    [[nodiscard]] u64 CpuCleanToken(u64 offset, u64 size) const noexcept {
+        const u64 done = cpu_changes_done.load(std::memory_order_acquire);
+        const u64 started = cpu_changes_started.load(std::memory_order_acquire);
+        if (started != done) {
+            return 0; // between a bit change and its protection change
+        }
+        const size_t start_page = offset / TRACKER_BYTES_PER_PAGE;
+        const size_t end_page = Common::DivCeil(offset + size, TRACKER_BYTES_PER_PAGE);
+        if (end_page > NUM_PAGES_PER_REGION || end_page <= start_page ||
+            cpu.AnyInRange(start_page, end_page)) {
+            return 0;
+        }
+        return started + 1;
+    }
+    /// No page of [offset, offset + size) was marked CPU-modified since CpuCleanToken gave
+    /// `token` for it (a page clean then can lose its write protection only that way).
+    [[nodiscard]] bool CpuUnsetSince(u64 offset, u64 size, u64 token) const noexcept {
+        const size_t start_page = offset / TRACKER_BYTES_PER_PAGE;
+        const size_t end_page = Common::DivCeil(offset + size, TRACKER_BYTES_PER_PAGE);
+        if (token == 0 || end_page > NUM_PAGES_PER_REGION) {
+            return false;
+        }
+        for (size_t page = start_page; page < end_page; ++page) {
+            if (cpu_set_stamp[page].load(std::memory_order_acquire) >= token) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     LockType lock;
 
 private:
+    /// gow3 22 Oct 2026: brackets a change of the CPU bits and the write protection that
+    /// follows them (CpuCleanToken). Changes run under `lock`.
+    struct CpuChange {
+        RegionManager* region;
+        CpuChange(RegionManager* region_, bool on) noexcept : region{on ? region_ : nullptr} {
+            if (region) {
+                region->cpu_changes_started.fetch_add(1, std::memory_order_seq_cst);
+            }
+        }
+        ~CpuChange() {
+            if (region) {
+                region->cpu_changes_done.fetch_add(1, std::memory_order_release);
+            }
+        }
+    };
+    /// Inside a CpuChange, before the bits and the protection change: the pages about to be
+    /// marked CPU-modified take the change's number.
+    void StampSet(size_t start_page, size_t end_page) noexcept {
+        const u64 number = cpu_changes_started.load(std::memory_order_relaxed);
+        for (size_t page = start_page; page < end_page; ++page) {
+            cpu_set_stamp[page].store(number, std::memory_order_release);
+        }
+    }
+    void StampSet(const RegionBits& pages) noexcept {
+        for (const auto& [start, end] : pages) {
+            StampSet(start, end);
+        }
+    }
+    std::atomic<u64> cpu_changes_started{0}, cpu_changes_done{0};
+    std::array<std::atomic<u64>, NUM_PAGES_PER_REGION> cpu_set_stamp{}; ///< 0: never set
+
     /**
      * Notify tracker about changes in the CPU tracking state of a word in the buffer
      *
@@ -274,7 +346,9 @@ private:
             num_hot = 0;
             return;
         }
-        cpu |= RegionBits(hot, start_page, end_page);
+        const RegionBits kept(hot, start_page, end_page);
+        StampSet(kept);
+        cpu |= kept;
     }
 
     std::array<u8, NUM_PAGES_PER_REGION> write_faults{};

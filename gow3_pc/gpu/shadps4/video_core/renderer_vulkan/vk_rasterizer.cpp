@@ -31,6 +31,7 @@
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_depth_stencil_state.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -1672,6 +1673,118 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
 static void FixAimFocusCentre(Core::MemoryManager* memory, VideoCore::BufferCache* buffer_cache,
                               VAddr address);
 
+namespace {
+/// gow3 22 Oct 2026: stage A's guest copies into the constant ring and the copies bound again
+/// instead, within their epoch or after it (Gow3Toggle::RingDurableReuse), per frame on the
+/// GOW3_DISPATCH_STATS lines. Stage A only.
+struct RingReuseStats {
+    u64 copies = 0, copy_bytes = 0;
+    u64 untracked = 0, untracked_bytes = 0; ///< copies with no CPU-clean token (not durable)
+    u64 epoch = 0, epoch_bytes = 0;         ///< bound again within their epoch
+    u64 durable = 0, durable_bytes = 0;     ///< bound again after their epoch ended
+    u64 refused = 0;     ///< earlier copies with a token that a write may have made stale
+    u64 mismatches = 0;  ///< GOW3_RING_REUSE_CHECK=1: durable reuses that differed
+    u64 watched = 0;     ///< of the durable reuses, by a watch token
+    u64 promoted = 0;    ///< pages stage A write-protected (RingWatchToken)
+};
+RingReuseStats g_ring_reuse;
+/// Any thread (RingUnwatch): CPU writes that dropped a watch, pages never watched again.
+std::atomic<u64> g_ring_watch_faults{0}, g_ring_watch_banned{0};
+std::atomic<u32> g_ring_watched{0}; ///< pages stage A watches now
+u64 s_ring_faults_seen = 0;         ///< g_ring_watch_faults at the last stats line
+/// Ranges copied in this many epochs in a row are watched (static data); at most this many
+/// pages (32 MiB) at once; a page whose watch CPU writes dropped this often is not watched again.
+constexpr u32 RingWatchEpochs = 3;
+constexpr u32 RingWatchMaxPages = 8192;
+constexpr u8 RingWatchMaxFaults = 2;
+constexpr u64 RingWatchMinBytes = 1024;
+} // namespace
+
+// gow3 22 Oct 2026: RingDurableReuse found the crowd mesh pages never CPU-clean (U3 meat market:
+// 6,953 of 7,016 copies a frame, 24.3 of 24.4 MB): the ring path never hands them to the buffer
+// cache, so nothing write-protects them. Stage A watches them itself.
+u64 Rasterizer::RingWatchToken(VAddr address, u64 size) {
+    const VAddr lo = Common::AlignDown(address, VAddr{4096});
+    const VAddr hi = Common::AlignUp(address + size, VAddr{4096});
+    std::scoped_lock lock{ring_watch_mutex};
+    u32 needed = 0;
+    for (VAddr page = lo; page < hi; page += 4096) {
+        const auto it = ring_watch_pages.find(page);
+        if (it == ring_watch_pages.end() || !it->second.watched) {
+            if (it != ring_watch_pages.end() && it->second.faults >= RingWatchMaxFaults) {
+                return 0; // written by the CPU again and again: not static
+            }
+            ++needed;
+        }
+    }
+    if (needed) {
+        // Never pages written past page tracking (backing view), GPU-written ones, fiber stacks
+        // (kept writable: a protected stack in use kills the process) or unmapped ones.
+        if (g_ring_watched.load(std::memory_order_relaxed) + needed > RingWatchMaxPages ||
+            !IsMapped(lo, hi - lo) || Core::MemoryManager::BackingWritten(lo, hi - lo) ||
+            buffer_cache.MayBeGpuWritten(lo, hi - lo) ||
+            Core::MemoryManager::KeptWritable(lo, hi - lo)) {
+            return 0;
+        }
+        for (VAddr page = lo; page < hi; page += 4096) {
+            auto& state = ring_watch_pages[page];
+            if (!state.watched) {
+                page_manager.UpdatePageWatchers<true>(page, 4096);
+                state.watched = true;
+                g_ring_watched.fetch_add(1, std::memory_order_relaxed);
+                ++g_ring_reuse.promoted;
+            }
+        }
+    }
+    // Read once every page is protected: a store from here on faults and moves it on.
+    return ring_watch_gen.load(std::memory_order_acquire) + 1;
+}
+
+void Rasterizer::RingUnwatch(VAddr address, u64 size, bool written) {
+    if (g_ring_watched.load(std::memory_order_acquire) == 0 || size == 0) {
+        return;
+    }
+    const VAddr lo = Common::AlignDown(address, VAddr{4096});
+    const VAddr hi = Common::AlignUp(address + size, VAddr{4096});
+    std::scoped_lock lock{ring_watch_mutex};
+    const auto drop = [&](VAddr page, RingWatchPage& state) {
+        if (state.watched) {
+            // Before the protection goes: a token read after the store sees the change.
+            ring_watch_gen.fetch_add(1, std::memory_order_seq_cst);
+            state.watched = false;
+            g_ring_watched.fetch_sub(1, std::memory_order_relaxed);
+            page_manager.UpdatePageWatchers<false>(page, 4096);
+            if (written) {
+                g_ring_watch_faults.fetch_add(1, std::memory_order_relaxed);
+                if (++state.faults == RingWatchMaxFaults) {
+                    g_ring_watch_banned.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        }
+    };
+    if ((hi - lo) / 4096 <= ring_watch_pages.size()) {
+        for (VAddr page = lo; page < hi; page += 4096) {
+            if (const auto it = ring_watch_pages.find(page); it != ring_watch_pages.end()) {
+                drop(page, it->second);
+                if (!written) {
+                    ring_watch_pages.erase(it); // unmapped: new memory may come here
+                }
+            }
+        }
+        return;
+    }
+    for (auto it = ring_watch_pages.begin(); it != ring_watch_pages.end();) {
+        if (it->first >= lo && it->first < hi) {
+            drop(it->first, it->second);
+            if (!written) {
+                it = ring_watch_pages.erase(it);
+                continue;
+            }
+        }
+        ++it;
+    }
+}
+
 void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
                            boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out) {
     const PreparedStage* prepared_stage = nullptr;
@@ -1688,6 +1801,27 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
     const u64 alignment = std::max<u64>(instance.StorageMinAlignment(),
                                         instance.UniformMinAlignment());
     const bool reuse = !Gow3Toggle::Disabled(Gow3Toggle::RingReuse);
+    // gow3 22 Oct 2026 (Gow3Toggle::RingDurableReuse): U3 meat market (1080p DLAA K, 82 FPS):
+    // stage A copied 1.97 GB/s of guest ranges into the ring (CopySparseMemory 19-20% of the GPU
+    // command thread) and bound 1.0 GB/s again without a copy, but ~34,500 guest epochs a second
+    // (graphics submissions, compute rings, memory waits) ended that reuse every ~30 us. The
+    // crowd skinning (cs 8f067540, ~1,530 dispatches a frame) binds each mesh's five arrays
+    // (1-12 KB, ~15.9 KB with the bones) per instance; the dispatch trace showed one ring copy
+    // per mesh per epoch. A copy made while page tracking had its pages CPU-clean (so a CPU
+    // store there faults and marks them first) is bound again after its epoch while no page of
+    // it was marked CPU-modified since and no GPU or backing-view write ever reached it; the
+    // caller has checked GPU-modified and pending writes as for any copy.
+    const bool durable = reuse && !Gow3Toggle::Disabled2(Gow3Toggle::RingDurableReuse) &&
+                         !LateConstantsEnabled();
+    const VideoCore::MemoryTracker* tracker = durable ? buffer_cache.GetMemoryTracker() : nullptr;
+    // Sticky 64 KiB window bits: no backing-view write (labels, readback landings, image
+    // downloads, write-throughs: page tracking does not see them) and no GPU write ever.
+    const auto never_written = [&](VAddr address, u64 size) {
+        const VAddr page_lo = Common::AlignDown(address, VAddr{4096});
+        const VAddr page_hi = Common::AlignUp(address + size, VAddr{4096});
+        return !Core::MemoryManager::BackingWritten(address, size) &&
+               !buffer_cache.MayBeGpuWritten(page_lo, page_hi - page_lo);
+    };
     // gow3 diagnostics (GOW3_RING_STATS=1): guest copies per 5 s, their sizes, and how many
     // repeat a range already copied since the last flush.
     static const bool ring_stats = [] {
@@ -1730,16 +1864,61 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
             // in-order memory write or a GPU write over a copied range starts a new epoch.
             const u64 key = address ^ (size << 48);
             cached = &ring_copies[(key * 0x9E3779B97F4A7C15ull) >> (64 - RingCopyBits)];
-            if (cached->key == key && cached->epoch == ring_epoch &&
-                constant_ring->Reusable(cached->position)) {
-                constant_ring->Hold(cached->position);
-                if (RingReuseCheck()) {
-                    CheckRingReuse(address, constant_ring->Data(cached->offset), size);
+            if (cached->key == key && constant_ring->Reusable(cached->position)) {
+                const bool later = cached->epoch != ring_epoch;
+                if (later && (cached->cpu_token || cached->watch_token) && tracker) {
+                    const bool by_watch =
+                        cached->watch_token &&
+                        ring_watch_gen.load(std::memory_order_acquire) + 1 == cached->watch_token;
+                    if ((by_watch ||
+                         tracker->CpuUnchangedSince(address, size, cached->cpu_token)) &&
+                        never_written(address, size)) {
+                        g_ring_reuse.watched += by_watch;
+                        // Bound in this epoch now: a write over it ends this epoch's reuse,
+                        // as for a copy made in it.
+                        cached->epoch = ring_epoch;
+                        ring_epoch_min = std::min(ring_epoch_min, address);
+                        ring_epoch_max = std::max(ring_epoch_max, address + size);
+                        MarkRingLines(address, size);
+                    } else {
+                        ++g_ring_reuse.refused;
+                    }
                 }
-                ring_reused_bytes += size;
-                out.push_back({index, static_cast<u32>(size), cached->offset, address});
-                return;
+                if (cached->epoch == ring_epoch) {
+                    constant_ring->Hold(cached->position);
+                    if (RingReuseCheck()) {
+                        const u64 mismatches = ring_reuse_mismatches;
+                        CheckRingReuse(address, constant_ring->Data(cached->offset), size);
+                        if (later) {
+                            g_ring_reuse.mismatches += ring_reuse_mismatches - mismatches;
+                        }
+                    }
+                    ring_reused_bytes += size;
+                    ++(later ? g_ring_reuse.durable : g_ring_reuse.epoch);
+                    (later ? g_ring_reuse.durable_bytes : g_ring_reuse.epoch_bytes) += size;
+                    out.push_back({index, static_cast<u32>(size), cached->offset, address});
+                    return;
+                }
             }
+        }
+        // Taken before the copy: a CPU store into the range from here on marks its page first.
+        u64 cpu_token = cached && tracker ? tracker->CpuCleanToken(address, size) : 0;
+        if (cpu_token &&
+            (!never_written(address, size) || Core::MemoryManager::KeptWritable(address, size))) {
+            cpu_token = 0; // written past page tracking, or a fiber stack (never protected)
+        }
+        // The same range copied again in a later epoch: after RingWatchEpochs of them, stage A
+        // write-protects its pages (static data the buffer cache never protects).
+        const bool same_range = cached && cached->key == (address ^ (size << 48));
+        const u32 epochs = same_range && cached->epoch != ring_epoch ? cached->epochs + 1
+                           : same_range                              ? cached->epochs
+                                                                     : 1;
+        bool watch_failed = same_range && cached->watch_failed;
+        u64 watch_token = 0;
+        if (tracker && !cpu_token && !watch_failed && size >= RingWatchMinBytes &&
+            epochs >= RingWatchEpochs) {
+            watch_token = RingWatchToken(address, size);
+            watch_failed = watch_token == 0;
         }
         const auto offset = constant_ring->Allocate(size, alignment);
         if (!offset) {
@@ -1753,9 +1932,15 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
             memory->CopySparseMemory(address, dst, size);
             ring_guest_bytes += size;
             ++ring_guest_copies;
+            ++g_ring_reuse.copies;
+            g_ring_reuse.copy_bytes += size;
+            if (tracker && !cpu_token && !watch_token) {
+                ++g_ring_reuse.untracked;
+                g_ring_reuse.untracked_bytes += size;
+            }
             if (cached) {
                 *cached = {address ^ (size << 48), ring_epoch, constant_ring->LastAllocation(),
-                           *offset};
+                           *offset, cpu_token, watch_token, epochs, watch_failed};
                 ring_epoch_min = std::min(ring_epoch_min, address);
                 ring_epoch_max = std::max(ring_epoch_max, address + size);
                 MarkRingLines(address, size);
@@ -1909,6 +2094,31 @@ void DispatchStatsPrint(std::chrono::steady_clock::time_point now) {
                     "in full\n",
                     per_frame[0], per_frame[1], per_frame[2], per_frame[3], per_frame[4],
                     per_frame[5], per_frame[6], per_frame[7], per_frame[8]);
+    }
+    {
+        // 22 Oct 2026: stage A's constant ring copies and reuses (Gow3Toggle::RingDurableReuse).
+        auto& r = g_ring_reuse;
+        std::printf("  constant ring per frame: %.0f guest copies (%.0f KB; %.0f of them, %.0f KB, "
+                    "with pages not CPU-clean); reused %.0f in their epoch (%.0f KB saved), %.0f "
+                    "after it (%.0f KB saved); %.0f earlier copies refused after their epoch",
+                    r.copies / frames, r.copy_bytes / 1e3 / frames, r.untracked / frames,
+                    r.untracked_bytes / 1e3 / frames, r.epoch / frames,
+                    r.epoch_bytes / 1e3 / frames, r.durable / frames,
+                    r.durable_bytes / 1e3 / frames, r.refused / frames);
+        if (RingReuseCheck()) {
+            std::printf("; %llu reuses after their epoch differed from guest memory",
+                        static_cast<unsigned long long>(r.mismatches));
+        }
+        std::printf("\n  constant ring watches: %.0f of the reuses after their epoch by a watch, "
+                    "%.0f pages protected per frame, %llu pages watched now; CPU writes into "
+                    "watched pages %llu (%.1f per frame), pages never watched again %llu\n",
+                    r.watched / frames, r.promoted / frames,
+                    static_cast<unsigned long long>(g_ring_watched.load()),
+                    static_cast<unsigned long long>(g_ring_watch_faults.load()),
+                    (g_ring_watch_faults.load() - s_ring_faults_seen) / frames,
+                    static_cast<unsigned long long>(g_ring_watch_banned.load()));
+        s_ring_faults_seen = g_ring_watch_faults.load();
+        r = {};
     }
     std::vector<std::pair<u64, u64>> order; // {A + B ns, hash}
     for (const auto& [hash, entry] : s.a) {
@@ -7315,6 +7525,8 @@ u32 Rasterizer::ReadDataFromGds(u32 gds_offset) {
 
 bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
     DrainDrawPipe();
+    // gow3 22 Oct 2026: write faults (HandleWriteAt), file reads, decoded video, guest mprotect.
+    RingUnwatch(addr, size, true);
     if (!IsMapped(addr, size)) {
         // Not GPU mapped memory, can skip invalidation logic entirely.
         return false;
@@ -7383,6 +7595,7 @@ bool Rasterizer::OnWriteFault(VAddr addr, bool assume_locks) {
     const auto t0 = std::chrono::steady_clock::now();
     DrainDrawPipe();
     WaitDrawPipeForCapture();
+    RingUnwatch(addr, 8, true); // as InvalidateMemory does
     if (!IsMapped(addr, 8)) {
         return false;
     }
@@ -7807,6 +8020,7 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
     };
     const auto t0 = Clock::now();
     DrainDrawPipe();
+    RingUnwatch(addr, size, false); // gow3 22 Oct 2026: stage A's own watches go too
     const auto t1 = Clock::now();
     buffer_cache.InvalidateMemory(addr, size);
     const auto t2 = Clock::now();

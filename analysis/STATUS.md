@@ -3477,3 +3477,38 @@ Results (ab2.sh live toggle in one session; abstats bootstrap, 95% interval):
 - No hang, image normal.
 
 Not verified: U1 and U2; other U3 chapters; 4K DLAA M (GPU-bound, likely no change); a long soak. p99 and 1% low intervals include 0, so no tail-latency claim. Toggle bits: 131072 and 262144 are taken by work in progress.
+
+## 22 October 2026: multi-core roadmap phases 0-2 and 5
+
+New: `tools/play.py measure` records per game thread CPU time (GetThreadTimes, names from GetThreadDescription) and per logical CPU busy% (NtQuerySystemInformation) in `<tag>.cpu.json`.
+
+Phase 0 baseline (U3, DLAA K, after the stage B fast paths): meat 1080p 88.1 FPS, p99 13.3 ms, 5.47 of 12 logical CPUs; stage A (shadPS4:GpuCommandProcessor) 98%, stage B (gow3:DrawRec) 96%, gow3:VkRecorder 85%, six NdJobWorkerThread 26-28% each. Meat 4K 84.0 FPS, 5.40 cores, 97/94/88%. Chase 1080p 73.0 FPS, 5.37 cores, B 97%, A 95%, recorder 89%. Busy% includes spin waits (GOW3_PIPE_SPIN_US=20 lowered stage B 96 -> 93%).
+
+Phase 1 (env only, meat 1080p, one run each; baselines 88.1 and 87.5):
+- GOW3_GUEST_PRIORITY=1: 88.1.
+- GOW3_GUEST_AFFINITY=1: 82.8 FPS, p99 21.5 ms (worse; stride 2 maps guest core 6 to logical CPU 12, which does not exist on 12 threads).
+- GOW3_PIPE_SPIN_US=20: 87.5.
+- GOW3_PREP_WORKERS=2: 88.8.
+- GOW3_GPU_THREAD_PRIORITY=above: 88.0.
+None beyond noise except affinity (worse). The limit is serial work on stages A/B, not contention.
+
+Phase 2 (placement, timer, priority): not done on this Ryzen 5 5600 (one CCD, 46% of the machine used, phase 1 showed no contention). Only relevant for Intel hybrid or two-CCD Ryzen, not available here.
+
+Phase 5 (stage A, constant ring). Copies within an epoch were already reused; the misses were new epochs (~34,700 submission epochs/s; drains 746/s, in-order tasks 117/s, GPU writes 1,250/s), and 6,953 of 7,016 copies/frame came from pages never CPU-clean.
+
+Change (Disabled2 bit 1048576 RingDurableReuse, set = old path):
+- Region manager keeps per-page CPU-modified stamps and change counters (CpuCleanToken / CpuUnchangedSince).
+- A range >= 1 KiB copied in 3 epochs in a row gets its pages write-watched by stage A (page_manager watchers, cap 8192 pages). It refuses banned, backing-written, GPU-written and KeepWritable pages.
+- InvalidateMemory, the fault path and UnmapMemory drop watches and bump a global ring_watch_gen. A page written twice is never watched again.
+- Reuse after the epoch needs an unchanged token.
+- Check mode GOW3_RING_REUSE_CHECK=1 compares reused data with guest memory.
+
+Results:
+- Per frame 24.4 MB copied before vs 12.9 MB after (reused after their epoch 10.7 MB, in-epoch 12.6 MB).
+- 0 of 2,998,257 checked reuses differed.
+- CPU writes into watched pages: 5,934 total at start, 0.0 per frame later. 1,313 pages banned; 2,152 watched.
+- ab2.sh live A/B, meat market DLAA K, 1080p 6+6 windows: 93.77 vs 86.77 FPS, +7.00 [+5.45, +8.44]; median -0.91 ms [-1.03, -0.77]; p99 -0.78 [-2.07, +0.07].
+- 4K 4+4 windows: 90.03 vs 84.67 FPS, +5.36 [+3.81, +6.72]; median -0.77 ms; p99 +0.12 [-0.84, +1.01].
+- Thread busy unchanged (A 97%, B 96%, recorder 87%; process 5.66 vs 5.54 cores): same serial threads, more frames.
+
+Open: global ring_watch_gen invalidates every token on any watched-page write (per-page generations if writes appear). Guest mprotect / KeepWritable can open pages without the tracker knowing (same gap as the static arena path). Not tested: U1/U2, other chapters, long soak.

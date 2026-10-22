@@ -6,6 +6,7 @@
 #include <chrono>
 #include <deque>
 #include <functional>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <array>
@@ -674,7 +675,26 @@ private:
         u64 epoch;
         u64 position; ///< absolute ring position
         u64 offset;   ///< in the ring
+        u64 cpu_token; ///< 22 Oct 2026: MemoryTracker::CpuCleanToken before the copy (0: none)
+        u64 watch_token; ///< 22 Oct 2026: RingWatchToken before the copy (0: none)
+        u32 epochs;      ///< epochs in a row this range was copied in (this slot)
+        bool watch_failed; ///< RingWatchToken refused this range (not asked again)
     };
+    /// gow3 22 Oct 2026 (Gow3Toggle::RingDurableReuse): pages stage A write-protects itself so
+    /// that copies of ranges it copies in epoch after epoch (static mesh data the ring path
+    /// never hands to the buffer cache, so never CPU-clean there) can be bound again later. A
+    /// CPU store into one faults; InvalidateMemory then drops the watch (RingUnwatch) and moves
+    /// ring_watch_gen on, which every watch token compares with. Guarded by ring_watch_mutex
+    /// (stage A adds watches, any faulting thread drops them); taken before the page locks.
+    struct RingWatchPage {
+        bool watched;
+        u8 faults; ///< CPU writes that dropped its watch; RingWatchMaxFaults: never again
+    };
+    std::mutex ring_watch_mutex;
+    std::unordered_map<VAddr, RingWatchPage> ring_watch_pages;
+    std::atomic<u64> ring_watch_gen{0};
+    u64 RingWatchToken(VAddr address, u64 size);
+    void RingUnwatch(VAddr address, u64 size, bool written);
     static constexpr u32 RingCopyBits = 12;
     std::array<RingCopy, 1u << RingCopyBits> ring_copies{};
     u64 ring_epoch = 1;

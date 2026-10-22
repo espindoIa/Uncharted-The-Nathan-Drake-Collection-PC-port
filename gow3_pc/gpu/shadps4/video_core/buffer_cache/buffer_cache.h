@@ -244,6 +244,12 @@ public:
         return false;
     }
 
+    /// gow3 22 Oct 2026: the page tracker, for its lock-free CPU-clean queries from the GPU command
+    /// thread (MemoryTracker::CpuCleanToken).
+    [[nodiscard]] const MemoryTracker* GetMemoryTracker() const noexcept {
+        return memory_tracker.get();
+    }
+
     /// gow3: the GPU thread is about to write [address, address + size) in guest memory itself
     /// (shader HLE). Unprotects it like a guest write fault would, without a download. False
     /// when GPU-written bytes are in the range: the GPU must do that write.
