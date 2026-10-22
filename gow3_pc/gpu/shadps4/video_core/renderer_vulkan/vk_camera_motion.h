@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "common/types.h"
+#include "video_core/renderer_vulkan/frame_gen_camera.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/texture_cache/image.h"
@@ -86,6 +87,11 @@ public:
     [[nodiscard]] float Near() const noexcept;
     // Current projection, previous projection, and row Z of previous-view * inverse-view.
     [[nodiscard]] std::array<std::array<float, 4>, 3> TaaDepthParameters() const noexcept;
+    /// The frame's camera in NVIDIA DLSS Frame Generation's conventions (frame_gen_camera.h), from
+    /// whichever of the three camera sources is in use (scene constants, flat camera, velocity
+    /// pass); valid = false without a usable one (Ready() is false). Call it once the frame's
+    /// camera is known, before OnDisplayPass starts the next frame.
+    [[nodiscard]] FrameGenCamera GetFrameGenCamera() const;
 
     /// Records the motion vector pass: `depth_view` (depth aspect, General layout) into
     /// `motion_view` (RG16F storage, General), pixels, previous minus current.
@@ -151,6 +157,7 @@ private:
         std::array<float, 12> to_previous_clip{};
         std::array<float, 4> uv_to_view{}; ///< view x = z (a u + c), view y = z (b v + d)
         std::array<float, 2> depth_to_z{}; ///< z = y / (depth - x)
+        std::array<float, 12> to_world{};  ///< the pose, rows [M | t] (c12..c23): world = M view + t
         bool valid = false;
     } velocity_camera;
 
