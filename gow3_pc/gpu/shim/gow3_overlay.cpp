@@ -551,10 +551,30 @@ void PerformanceTab() {
     if (BeginRows("##live")) {
         static const char* const fps_labels[] = {"30", "40", "45", "50", "55", "60", "75", "90", "100", "120"};
         static_assert(std::size(fps_labels) == G::FpsLimits.size());
-        ChoiceRow("Frame rate limit", s.fps_limit, fps_labels, G::FpsLimits.data(), int(G::FpsLimits.size()),
-                  "Caps the frame rate, live. 60 is the PS4's; above 120 the game's movement breaks. With VSync, "
-                  "a limit at or above the display's refresh rate makes the game follow the display (75 on a 75 Hz "
-                  "monitor): the steadiest frame times. 40-55 are for tests.");
+        // With Frame Generation the limit counts shown frames, so it may go up to 240 (80 real
+        // frames at 160 shown); the extended values follow 120 in the same list.
+        static const char* const fps_labels_fg[] = {"30", "40", "45", "50", "55", "60", "75", "90", "100", "120",
+                                                    "144", "160", "165", "180", "200", "240"};
+        static const std::array<int, G::FpsLimits.size() + G::ExtendedFpsLimits.size()> fps_values_fg = [] {
+            std::array<int, G::FpsLimits.size() + G::ExtendedFpsLimits.size()> all{};
+            std::copy(G::FpsLimits.begin(), G::FpsLimits.end(), all.begin());
+            std::copy(G::ExtendedFpsLimits.begin(), G::ExtendedFpsLimits.end(), all.begin() + G::FpsLimits.size());
+            return all;
+        }();
+        static_assert(std::size(fps_labels_fg) == std::tuple_size_v<decltype(fps_values_fg)>);
+#define GOW3_FPS_HELP                                                                                  \
+    "Caps the frame rate, live. 60 is the PS4's; above 120 the game's movement breaks. With VSync, "   \
+    "a limit at or above the display's refresh rate makes the game follow the display (75 on a 75 Hz " \
+    "monitor): the steadiest frame times. 40-55 are for tests."
+        if (s.frame_gen_supported) {
+            ChoiceRow("Frame rate limit", s.fps_limit, fps_labels_fg, fps_values_fg.data(), int(fps_values_fg.size()),
+                      GOW3_FPS_HELP " Above 120 counts shown frames and only works with DLSS Frame Generation on "
+                                    "(otherwise it stays at 120).");
+        } else {
+            ChoiceRow("Frame rate limit", s.fps_limit, fps_labels, G::FpsLimits.data(), int(G::FpsLimits.size()),
+                      GOW3_FPS_HELP);
+        }
+#undef GOW3_FPS_HELP
         // At a 60 Hz vblank the game waits for the next vblank: above 60 FPS needs the faster
         // vblank, which the launcher sets at start when its limit is above 60.
         if (EmulatorSettings.GetVblankFrequency() <= 60 && (s.fps_limit == 0 || s.fps_limit > 60)) {

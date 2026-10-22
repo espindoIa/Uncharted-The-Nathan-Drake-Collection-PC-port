@@ -21,7 +21,10 @@ int main() {
     assert(G::ParseDisplayMode("borderless") == G::Borderless && G::ParseDisplayMode("bogus") == G::Windowed);
     assert(G::ParseFpsLimit(120) == 120 && G::ParseFpsLimit(75) == 75);
     // b9e64a4: 0 and faster limits become 120; 4b0f2f1 added 75/90/100; other values fall back to 60.
-    assert(G::ParseFpsLimit(0) == 120 && G::ParseFpsLimit(240) == 120 && G::ParseFpsLimit(7) == 60);
+    assert(G::ParseFpsLimit(0) == 120 && G::ParseFpsLimit(300) == 120 && G::ParseFpsLimit(7) == 60);
+    // Shown-frame limits (Frame Generation) are kept as listed; PresentLimit caps them without it.
+    for (int v : G::ExtendedFpsLimits) assert(G::ParseFpsLimit(v) == v);
+    assert(G::ParseFpsLimit(150) == 120 && G::ParseFpsLimit(241) == 120);
     assert(G::ParseResolution("1440p") == 3 && G::ParseResolution("8K") == 0);
     assert(G::ParseEngineFps(240) == 240 && G::ParseEngineFps(90) == 120);
     assert(G::ParseFramesQueued(2) == 2 && G::ParseFramesQueued(0) == 0 && G::ParseFramesQueued(5) == 1);
@@ -35,6 +38,11 @@ int main() {
     // b9e64a4: one argument, capped at MaxFpsLimit (120); 0 and faster settings give 120.
     assert(G::PresentLimit(120) == 120 && G::PresentLimit(240) == 120 && G::PresentLimit(30) == 30);
     assert(G::PresentLimit(0) == 120 && G::PresentLimit(75) == 75);
+    // Frame Generation: the limit counts shown frames, up to 240; 0 is 240. Without it, as above.
+    assert(G::PresentLimit(160, true) == 160 && G::PresentLimit(165, true) == 165 && G::PresentLimit(240, true) == 240);
+    assert(G::PresentLimit(0, true) == 240 && G::PresentLimit(300, true) == 240 && G::PresentLimit(75, true) == 75);
+    assert(G::PresentLimit(160, false) == 120 && G::PresentLimit(240, false) == 120);
+    assert(G::PresentLimit(0, false) == 120 && G::PresentLimit(75, false) == 75);
 
     const char* path = "graphics-settings-test.ini";
     {

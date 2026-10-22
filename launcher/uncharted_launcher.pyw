@@ -188,6 +188,10 @@ HERO_GRID = "#1d3440"
 MAX_FPS = 120
 FPS_LIMITS = [(30, "30"), (40, "40"), (45, "45"), (50, "50"), (55, "55"), (60, "60"), (75, "75"),
               (90, "90"), (100, "100"), (MAX_FPS, str(MAX_FPS))]
+# 22 Oct 2026: with DLSS Frame Generation on, the runtime's limit counts the frames shown and may
+# go above 120 (the game still runs at half that); without it the runtime caps at 120. Listed only
+# when Frame Generation is available (see frame_gen_available).
+FG_FPS_LIMITS = [(v, str(v)) for v in (144, 160, 165, 180, 200, 240)]
 
 # Runtime options in probe.ini (key -> default) and launcher-only ones.
 INI_DEFAULTS = {
@@ -223,6 +227,14 @@ def dlss_bridge_present():
 
 def dlss_available():
     return dlss_bridge_present() and (ROOT / "gow3_pc" / "out" / NGX_DLL).is_file()
+
+
+def frame_gen_available():
+    return dlss_available() and (ROOT / "gow3_pc" / "out" / NGX_FG_DLL).is_file()
+
+
+def fps_limits():
+    return FPS_LIMITS + FG_FPS_LIMITS if frame_gen_available() else FPS_LIMITS
 
 
 def ngx_signature_ok(path):
@@ -811,8 +823,8 @@ def monitor_refresh_hz():
 
 
 def fps_limit_value(value):
-    """A listed limit; unlimited (0) and faster ones (earlier versions offered 144-240) are 120."""
-    listed = {str(v) for v, _ in FPS_LIMITS}
+    """A listed limit; unlimited (0) and faster ones are 120 (144-240 are listed only with Frame Generation)."""
+    listed = {str(v) for v, _ in fps_limits()}
     if value in listed:
         return value
     try:
@@ -2082,8 +2094,10 @@ class Launcher:
         self.ini_choice(page, "fps_limit", "Frame rate limit",
                         "60 is how the games were made. Higher is smoother but experimental: if the game runs too "
                         "fast or Nate falls through the floor, go back to 60. With VSync, your monitor's refresh "
-                        f"rate ({monitor_refresh_hz()} Hz) is the smoothest.",
-                        [(str(v), label) for v, label in FPS_LIMITS], recommended="60")
+                        f"rate ({monitor_refresh_hz()} Hz) is the smoothest."
+                        + (" 144 and above count the frames shown and need DLSS Frame Generation switched on "
+                           "(Display); with it off the game stays at 120." if frame_gen_available() else ""),
+                        [(str(v), label) for v, label in fps_limits()], recommended="60")
         self.ini_choice(page, "frames_queued", "Frames queued",
                         "Keep 1. 2 can add a few FPS in heavy scenes, but in Uncharted 2 Nate and other "
                         "characters then float a little above the floor.",

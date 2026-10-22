@@ -1109,7 +1109,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             return file_limit;
         }
         return fixed_limit ? EmulatorSettings.GetFrameLimit()
-                           : u32(Gow3Graphics::PresentLimit(s.fps_limit));
+                           : u32(Gow3Graphics::PresentLimit(s.fps_limit, presenter->FrameGenActive()));
     };
     u32 frame_limit = current_limit();
     auto frame_period = frame_limit ? std::chrono::nanoseconds(1000000000 / frame_limit)
