@@ -172,6 +172,19 @@ bool SpecGarbageFilter(const AmdGpu::Buffer& vsharp, u64 pgm_hash) {
     }
     return ClassifyGarbageSharp(Core::Memory::Instance(), vsharp, pgm_hash).garbage;
 }
+
+/// gow3 22 Oct 2026: Gow3Toggle::DispatchStageAMemos hits and misses, per frame on the
+/// GOW3_DISPATCH_STATS lines. Stage A only, but for the filter skips (any specializing thread).
+struct StageAMemoStats {
+    std::atomic<u64> filter_skips{0}; ///< specializations whose effect filter checks were skipped
+    u64 sharps_reused = 0, sharps_read = 0; ///< pipelined dispatches: V#s reused / read again
+    u64 tokens_reused = 0, tokens_asked = 0; ///< ring watch tokens reused / asked for
+    u64 label_skips = 0, label_scans = 0;    ///< SRT pipe check label scans skipped / done
+    /// GOW3_STAGEA_VERIFY=1 (Shader::StageAVerify): totals where the old answer differed. The
+    /// effect filter's count is Shader::g_filter_skip_mismatches (specializing threads).
+    u64 sharp_mismatches = 0, token_mismatches = 0, label_mismatches = 0;
+};
+StageAMemoStats g_stage_a_memos;
 } // namespace
 
 Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime& runtime_,
@@ -193,6 +206,24 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     // Merge of upstream 0.5.0: its GetSharp filter follows the fork's live A/B bit too.
     Shader::garbage_sharp_filter_on = [] {
         return !Gow3Toggle::Disabled2(Gow3Toggle::SpecGarbageSharps);
+    };
+    // gow3 22 Oct 2026: for the effect family, Shader::IsGarbageEffectBuffer (in GetSharp) and
+    // SpecGarbageFilter apply the same rule to the same V# through the same ClampRangeSize call
+    // (unbound: not garbage; odd: garbage; else the mapped-size test), so a V# GetSharp returned
+    // passes SpecGarbageFilter as well. Only while GetSharp runs the full rule (its env switch on).
+    Shader::g_buffer_filter_repeats_get_sharp = [](u64 pgm_hash) {
+        static const bool effect_rule = [] {
+            const char* env = std::getenv("GOW3_EFFECT_SHARP_FILTER"); // as IsGarbageEffectBuffer
+            return !(env && env[0] == '0');
+        }();
+        const bool skip = effect_rule && Shader::IsEffectShader(pgm_hash) &&
+                          Shader::gpu_mapped_extent != nullptr &&
+                          !Gow3Toggle::Disabled2(Gow3Toggle::DispatchStageAMemos);
+        if (skip) { // a statistic: no locked add per dispatch (other threads rarely count)
+            auto& n = g_stage_a_memos.filter_skips;
+            n.store(n.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        }
+        return skip;
     };
     scene_targets = std::make_unique<SceneTargets>(instance, scheduler, runtime, texture_cache);
     // Object motion first: it fixes the buffer addresses the motion shader variants embed.
@@ -1572,6 +1603,10 @@ void Rasterizer::PrunePendingLabels() {
     while (!pending_labels.empty() && draw_pipe->Reached(pending_labels.front().position)) {
         pending_labels.pop_front();
     }
+    if (pending_labels.empty()) {
+        label_min = ~VAddr{0};
+        label_max = 0;
+    }
 }
 
 void Rasterizer::NotePendingLabel(VAddr address, u64 size) {
@@ -1580,6 +1615,8 @@ void Rasterizer::NotePendingLabel(VAddr address, u64 size) {
     }
     PrunePendingLabels();
     pending_labels.push_back({address, address + size, draw_pipe->Head()});
+    label_min = std::min(label_min, address);
+    label_max = std::max(label_max, address + size);
 }
 
 void Rasterizer::NoteRingWrite(VAddr address, u64 size) {
@@ -1703,7 +1740,7 @@ constexpr u64 RingWatchMinBytes = 1024;
 // gow3 22 Oct 2026: RingDurableReuse found the crowd mesh pages never CPU-clean (U3 meat market:
 // 6,953 of 7,016 copies a frame, 24.3 of 24.4 MB): the ring path never hands them to the buffer
 // cache, so nothing write-protects them. Stage A watches them itself.
-u64 Rasterizer::RingWatchToken(VAddr address, u64 size) {
+u64 Rasterizer::RingWatchToken(VAddr address, u64 size, bool probe) {
     const VAddr lo = Common::AlignDown(address, VAddr{4096});
     const VAddr hi = Common::AlignUp(address + size, VAddr{4096});
     std::scoped_lock lock{ring_watch_mutex};
@@ -1716,6 +1753,9 @@ u64 Rasterizer::RingWatchToken(VAddr address, u64 size) {
             }
             ++needed;
         }
+    }
+    if (needed && probe) {
+        return 0; // GOW3_STAGEA_VERIFY: a page would need a watch; add none
     }
     if (needed) {
         // Never pages written past page tracking (backing view), GPU-written ones, fiber stacks
@@ -1786,7 +1826,9 @@ void Rasterizer::RingUnwatch(VAddr address, u64 size, bool written) {
 }
 
 void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
-                           boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out) {
+                           boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out,
+                           const AmdGpu::Buffer* sharps) {
+    const bool memos = !Gow3Toggle::Disabled2(Gow3Toggle::DispatchStageAMemos);
     const PreparedStage* prepared_stage = nullptr;
     if (prepared && !Gow3Toggle::Disabled(Gow3Toggle::PreparedResources)) {
         for (u32 i = 0; i < prepared->num_stages; ++i) {
@@ -1917,8 +1959,28 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         u64 watch_token = 0;
         if (tracker && !cpu_token && !watch_failed && size >= RingWatchMinBytes &&
             epochs >= RingWatchEpochs) {
-            watch_token = RingWatchToken(address, size);
-            watch_failed = watch_token == 0;
+            // gow3 22 Oct 2026 (Gow3Toggle::DispatchStageAMemos; U3 meat market: RingWatchToken
+            // 2.5% of the GPU command thread, a mutex and a page map lookup per page for ranges
+            // copied again once the ring had recycled their copy). The same range's token while
+            // ring_watch_gen has not moved: no page watch was dropped since (a drop moves it
+            // first), so every page is still watched and RingWatchToken would return it again.
+            if (memos && same_range && cached->watch_token &&
+                ring_watch_gen.load(std::memory_order_acquire) + 1 == cached->watch_token) {
+                watch_token = cached->watch_token;
+                ++g_stage_a_memos.tokens_reused;
+                // Verify: the full call would add watches only if a page lacked one (then it
+                // is a mismatch); the probe answers without adding any. A drop on another
+                // thread after the check above moves the generation: not counted.
+                if (Shader::StageAVerify() &&
+                    RingWatchToken(address, size, true) != watch_token &&
+                    ring_watch_gen.load(std::memory_order_acquire) + 1 == watch_token) {
+                    ++g_stage_a_memos.token_mismatches;
+                }
+            } else {
+                watch_token = RingWatchToken(address, size);
+                watch_failed = watch_token == 0;
+                ++g_stage_a_memos.tokens_asked;
+            }
         }
         const auto offset = constant_ring->Allocate(size, alignment);
         if (!offset) {
@@ -1970,7 +2032,11 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
             continue;
         }
         const auto vsharp = prepared_stage ? prepared_stage->buffer_sharps[index]
+                            : sharps       ? sharps[index]
                                            : desc.GetSharp(stage);
+        if (!prepared_stage && sharps && Shader::StageAVerify() && !(vsharp == desc.GetSharp(stage))) {
+            ++g_stage_a_memos.sharp_mismatches; // all 16 bytes (Buffer::operator== is a memcmp)
+        }
         const VAddr address = vsharp.base_address;
         if (address == 0 || vsharp.GetSize() == 0) {
             continue;
@@ -2119,6 +2185,28 @@ void DispatchStatsPrint(std::chrono::steady_clock::time_point now) {
                     static_cast<unsigned long long>(g_ring_watch_banned.load()));
         s_ring_faults_seen = g_ring_watch_faults.load();
         r = {};
+    }
+    {
+        // 22 Oct 2026: Gow3Toggle::DispatchStageAMemos.
+        auto& m = g_stage_a_memos;
+        std::printf("  stage A memos per frame: dispatch V#s %.0f reused, %.0f read again; effect "
+                    "filter %.0f specializations skipped; ring watch tokens %.0f reused, %.0f "
+                    "asked; SRT label scans %.0f skipped, %.0f done",
+                    m.sharps_reused / frames, m.sharps_read / frames,
+                    m.filter_skips.exchange(0) / frames, m.tokens_reused / frames,
+                    m.tokens_asked / frames, m.label_skips / frames, m.label_scans / frames);
+        if (Shader::StageAVerify()) {
+            std::printf("; verify mismatches (totals): V#s %llu, effect filter %llu, watch tokens "
+                        "%llu, label scans %llu",
+                        static_cast<unsigned long long>(m.sharp_mismatches),
+                        static_cast<unsigned long long>(
+                            Shader::g_filter_skip_mismatches.load(std::memory_order_relaxed)),
+                        static_cast<unsigned long long>(m.token_mismatches),
+                        static_cast<unsigned long long>(m.label_mismatches));
+        }
+        std::printf("\n");
+        m.sharps_reused = m.sharps_read = m.tokens_reused = m.tokens_asked = m.label_skips =
+            m.label_scans = 0;
     }
     std::vector<std::pair<u64, u64>> order; // {A + B ns, hash}
     for (const auto& [hash, entry] : s.a) {
@@ -2402,7 +2490,7 @@ void DispatchTraceDispatch(const Shader::Info& cs, const AmdGpu::ComputeProgram&
 
 void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_prepared,
                           bool is_indexed, u32 index_offset, const AmdGpu::ComputeProgram* cs,
-                          const IndirectDraw* indirect) {
+                          const IndirectDraw* indirect, const AmdGpu::Buffer* cs_sharps) {
     auto& dirty = liverpool->pipe_dirty;
     if (!pipe_synced) {
         // Stage B has not run yet: its register copy starts as this one.
@@ -2429,7 +2517,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
             if (constant_ring && !Gow3Toggle::Disabled(Gow3Toggle::ConstantRing)) {
                 noting_packet = true;
                 noting_copy = SrtPendingDrain() != 0 && IsTableCopyShader(stage->pgm_hash);
-                CollectRingBindings(*stage, used_prepared, ring);
+                CollectRingBindings(*stage, used_prepared, ring, cs ? cs_sharps : nullptr);
                 noting_packet = noting_copy = false;
             } else {
                 pending_complete = false;
@@ -3726,11 +3814,24 @@ void Rasterizer::DispatchDirect() {
         // Its buffer writes are bound and marked GPU-written on the recording thread: SRT walks
         // here that read them wait for it (SyncSrtTables).
         const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
-        for (const auto& desc : cs.buffers) {
+        // gow3 22 Oct 2026 (Gow3Toggle::DispatchStageAMemos; U3 meat market, cs 8f067540 ~1,530
+        // dispatches a frame): the V#s the specialization has just read from this Info's user
+        // data, unchanged since (same thread, no walk in between), instead of a GetSharp per
+        // buffer here and in CollectRingBindings (each a mapping lookup for the effect shaders:
+        // GetSharp 6% of the GPU command thread, ~3.6% of it these two re-reads).
+        const AmdGpu::Buffer* sharps = Gow3Toggle::Disabled2(Gow3Toggle::DispatchStageAMemos)
+                                           ? nullptr
+                                           : pipeline_cache.ComputeSharps(cs);
+        ++(sharps ? g_stage_a_memos.sharps_reused : g_stage_a_memos.sharps_read);
+        for (u32 index = 0; index < cs.buffers.size(); ++index) {
+            const auto& desc = cs.buffers[index];
             if (!desc.is_written || desc.IsSpecial()) {
                 continue;
             }
-            const auto sharp = desc.GetSharp(cs);
+            const auto sharp = sharps ? sharps[index] : desc.GetSharp(cs);
+            if (sharps && Shader::StageAVerify() && !(sharp == desc.GetSharp(cs))) {
+                ++g_stage_a_memos.sharp_mismatches; // all 16 bytes (Buffer::operator== is a memcmp)
+            }
             if (!sharp.base_address || !sharp.GetSize()) {
                 continue;
             }
@@ -3740,7 +3841,7 @@ void Rasterizer::DispatchDirect() {
                 pipe_writes_overflow = true;
             }
         }
-        PostDraw(pipeline, nullptr, false, 0, &CsRegs());
+        PostDraw(pipeline, nullptr, false, 0, &CsRegs(), nullptr, sharps);
         return;
     }
     DispatchRecord(pipeline);
@@ -4521,6 +4622,7 @@ void Rasterizer::SyncSrtTables(const Shader::Info& info) {
     static u64 pipe_reads = 0, pipe_drains = 0;
     static std::array<u64, 5> pipe_reasons{};
     const bool check_pipe = !Gow3Toggle::Disabled2(Gow3Toggle::SrtPipeCheck);
+    const bool memos = !Gow3Toggle::Disabled2(Gow3Toggle::DispatchStageAMemos);
     const auto pipe_wait = [&](VAddr address, u64 size) {
         if (!check_pipe) {
             return;
@@ -4535,10 +4637,24 @@ void Rasterizer::SyncSrtTables(const Shader::Info& info) {
             bool overlap = PendingWriteOverlaps(address, size);
             if (!overlap) {
                 reason = 1;
-                for (const auto& label : pending_labels) {
-                    if (address < label.end && label.begin < address + size) {
-                        overlap = true;
-                        break;
+                // gow3 22 Oct 2026 (Gow3Toggle::DispatchStageAMemos; U3 meat market: this scan
+                // 2.9% of the GPU command thread): a read outside the bounds of every label
+                // pushed since the list was last empty overlaps none of the pending ones.
+                if (!memos || (address < label_max && label_min < address + size)) {
+                    ++g_stage_a_memos.label_scans;
+                    for (const auto& label : pending_labels) {
+                        if (address < label.end && label.begin < address + size) {
+                            overlap = true;
+                            break;
+                        }
+                    }
+                } else {
+                    ++g_stage_a_memos.label_skips;
+                    if (Shader::StageAVerify() &&
+                        std::ranges::any_of(pending_labels, [&](const PendingWrite& label) {
+                            return address < label.end && label.begin < address + size;
+                        })) {
+                        ++g_stage_a_memos.label_mismatches; // overlap is left as the cut said
                     }
                 }
             }

@@ -6,6 +6,20 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Uncharted 3: about 2 more FPS in crowded scenes where the processor limits the frame rate.**
+  The GPU command thread now repeats less work for each of the crowd's small compute dispatches. It
+  reads each buffer descriptor once instead of two or three times, reuses the memory-watch check for
+  mesh data that did not change, and skips two checks that cannot find anything (a duplicate filter
+  on effect shaders, a scan of pending GPU sync labels that the read cannot overlap). In the chapter
+  2 meat market the benchmark went from 93.0 to 95.3 FPS at 1080p and from 89.9 to 90.8 at 4K (DLAA,
+  DLSS model K; 6+6 windows switched on and off live in one session, gain +2.34 FPS [+1.51, +3.01]
+  and +0.86 [+0.30, +1.41], 95% interval). The median frame is 0.28 / 0.11 ms shorter. At 1080p the
+  worst frames (p99, 0.27 ms shorter) and the 1% low (+3.5 FPS) improved too; at 4K, which is partly
+  limited by the graphics card, they are within noise. No visual change is expected: a check mode
+  compared every shortcut with the old answer in a 1080p run and found no difference. Not tested:
+  Uncharted 1 and 2, other chapters, a long session, 4K with DLSS model M. Toggle bit 2097152 in
+  `disabled-optimizations.txt` (second number) restores the old path without a restart.
+
 - **Uncharted 3: about 5-7 more FPS where the processor limits the frame rate.** The GPU command
   thread no longer re-copies the crowd's unchanged mesh data for every submission. In the chapter 2
   meat market the benchmark went from 86.8 to 93.8 FPS at 1080p and from 84.7 to 90.0 at 4K (DLAA,

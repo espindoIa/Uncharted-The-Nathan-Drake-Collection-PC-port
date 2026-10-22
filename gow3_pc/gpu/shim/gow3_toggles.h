@@ -158,6 +158,12 @@ enum : std::uint64_t {
     /// epoch ended (~34,500 guest epochs a second) while page tracking shows the CPU cannot have
     /// written the range since and no GPU or backing write ever reached it.
     RingDurableReuse = 1048576,
+    /// Bit set: old behaviour. 22 Oct 2026 U3 meat market: per compute dispatch, stage A reads
+    /// each buffer V# once (the specialization's GetSharp, reused by the dispatch's write ranges
+    /// and ring bindings), skips the effect shaders' second garbage check of a V# GetSharp has
+    /// just passed, reuses a ring watch token no page dropped since, and skips the pending-label
+    /// scan of an SRT read outside the bounds of every pending label.
+    DispatchStageAMemos = 2097152,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

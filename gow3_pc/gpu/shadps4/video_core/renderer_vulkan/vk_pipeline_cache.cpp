@@ -1561,8 +1561,11 @@ bool PipelineCache::RefreshComputeKey() {
     const auto& cs_pgm = liverpool->GetCsRegs();
     const auto cs_params = AmdGpu::GetParams(cs_pgm);
     bool has_fetch = false;
+    compute_sharps_info = nullptr;
+    sharp_capture = true;
     std::tie(sel.infos[0], sel.modules[0], has_fetch, compute_key.value) =
         GetProgram(sel, HwStage::Compute, SwStage::Compute, cs_params, binding, sel.fetch_shader);
+    sharp_capture = false;
     if (!has_fetch) {
         sel.fetch_shader.reset();
     }
@@ -1751,7 +1754,12 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
     info.RefreshFlatBuf();
-    auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
+    // gow3 22 Oct 2026: a compute dispatch's V#s, read again by Rasterizer::DispatchDirect.
+    auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding,
+                                            sharp_capture ? compute_sharps.data() : nullptr);
+    if (sharp_capture) {
+        compute_sharps_info = &info;
+    }
 
     size_t perm_idx = program->modules.size();
     u64 perm_hash = HashCombine(params.hash, perm_idx);

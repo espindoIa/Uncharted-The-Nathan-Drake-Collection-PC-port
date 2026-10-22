@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <bitset>
+#include <cstdlib>
 
 #include "common/types.h"
 #include "shader_recompiler/backend/bindings.h"
@@ -13,6 +15,23 @@
 #include "shader_recompiler/profile.h"
 
 namespace Shader {
+
+/// gow3 22 Oct 2026: set by the rasterizer. True when, for this shader, g_garbage_buffer_filter
+/// can only repeat the check BufferResource::GetSharp has just passed for a V# it returned (the
+/// effect family's rule, Gow3Toggle::DispatchStageAMemos on). Read once per specialization.
+inline bool (*g_buffer_filter_repeats_get_sharp)(u64 pgm_hash) = nullptr;
+
+/// gow3 22 Oct 2026: GOW3_STAGEA_VERIFY=1: each DispatchStageAMemos cut also computes the old
+/// answer and counts where it differs (nothing else changes). Read once.
+inline bool StageAVerify() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_STAGEA_VERIFY");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+/// Verify mode: V#s GetSharp returned that the skipped filter calls garbage (any thread).
+inline std::atomic<u64> g_filter_skip_mismatches{0};
 
 struct VsAttribSpecialization {
     u32 divisor{};
@@ -93,8 +112,10 @@ struct StageSpecialization {
     Backend::Bindings start{};
 
     StageSpecialization() = default;
+    /// gow3 22 Oct 2026: `sharps_out` (NUM_BUFFERS entries), when set, gets each buffer's
+    /// GetSharp result (before the garbage filter), for the same dispatch's later reads.
     StageSpecialization(const Info& info_, RuntimeInfo runtime_info_, const Profile& profile_,
-                        Backend::Bindings start_)
+                        Backend::Bindings start_, AmdGpu::Buffer* sharps_out = nullptr)
         : info{&info_}, runtime_info{runtime_info_}, start{start_} {
         fetch_shader_data = Gcn::ParseFetchShader(info_);
         if (info_.sw_stage == SwStage::Vertex && fetch_shader_data) {
@@ -117,7 +138,7 @@ struct StageSpecialization {
         u32 binding{};
         // gow3 21 Oct: a garbage V# is bound as null (vk_rasterizer.cpp), so it must not
         // specialize either: its random stride/format made a new permutation per dispatch.
-        ForEachBufferSharp(binding, buffers, info->buffers,
+        ForEachBufferSharp(binding, buffers, info->buffers, sharps_out,
                      [](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
                          spec.stride = sharp.GetStride();
                          spec.is_formatted = desc.is_formatted;
@@ -192,11 +213,28 @@ struct StageSpecialization {
     }
 
     // Like the binding ForEachSharp, but a guest buffer the filter calls garbage counts as null.
-    void ForEachBufferSharp(u32& binding, auto& spec_list, auto& desc_list, auto&& func) {
-        const BufferSharpFilter filter = g_garbage_buffer_filter.load(std::memory_order_relaxed);
+    void ForEachBufferSharp(u32& binding, auto& spec_list, auto& desc_list,
+                            AmdGpu::Buffer* sharps_out, auto&& func) {
+        BufferSharpFilter filter = g_garbage_buffer_filter.load(std::memory_order_relaxed);
+        BufferSharpFilter skipped = nullptr; // verify mode: the filter the cut left out
+        // gow3 22 Oct 2026 (U3 meat market, cs 8f067540 ~1,530 dispatches a frame): for the
+        // effect family the filter's rule is the one GetSharp applies, on the same V# and the
+        // same mapping lookup: a V# GetSharp returned passes it (~1.1% of the GPU command thread).
+        if (filter && g_buffer_filter_repeats_get_sharp &&
+            g_buffer_filter_repeats_get_sharp(info->pgm_hash)) {
+            skipped = StageAVerify() ? filter : nullptr;
+            filter = nullptr;
+        }
+        u32 index = 0;
         for (const auto& desc : desc_list) {
             auto& spec = spec_list.emplace_back();
             const auto sharp = desc.GetSharp(*info);
+            if (sharps_out) {
+                sharps_out[index++] = sharp;
+            }
+            if (skipped && sharp && !desc.IsSpecial() && skipped(sharp, info->pgm_hash)) {
+                g_filter_skip_mismatches.fetch_add(1, std::memory_order_relaxed);
+            }
             if (!sharp || (filter && !desc.IsSpecial() && filter(sharp, info->pgm_hash))) {
                 binding++;
                 continue;

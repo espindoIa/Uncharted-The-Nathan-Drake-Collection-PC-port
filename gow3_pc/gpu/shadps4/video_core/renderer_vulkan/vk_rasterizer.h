@@ -289,10 +289,12 @@ private:
                             const IndirectDraw& indirect);
     /// Everything of an indirect dispatch after the pipeline selection.
     void DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr args, u32 size);
-    /// Hands a draw (or, with `cs`, a dispatch) to the recording thread.
+    /// Hands a draw (or, with `cs`, a dispatch) to the recording thread. `cs_sharps`: the
+    /// dispatch's buffer V#s by resource index (PipelineCache::ComputeSharps), or null.
     void PostDraw(const Pipeline* pipeline, const PreparedDraw* used_prepared, bool is_indexed,
                   u32 index_offset, const AmdGpu::ComputeProgram* cs = nullptr,
-                  const IndirectDraw* indirect = nullptr);
+                  const IndirectDraw* indirect = nullptr,
+                  const AmdGpu::Buffer* cs_sharps = nullptr);
     /// Everything of a direct dispatch after the pipeline selection (GPU thread or stage B).
     void DispatchRecord(const ComputePipeline* pipeline);
     /// The compute registers of the dispatch being recorded.
@@ -300,7 +302,8 @@ private:
     static void RunDrawPacket(void* rasterizer, const u8* packet, u32 size);
     struct RingBinding;
     void CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
-                             boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out);
+                             boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out,
+                             const AmdGpu::Buffer* sharps = nullptr);
     void PrintPipeStats();
     /// The registers of the draw being recorded: stage B's copy there, else Liverpool's.
     const AmdGpu::Regs& Regs() const;
@@ -664,6 +667,8 @@ private:
     };
     std::vector<PendingWrite> pending_writes;
     std::deque<PendingWrite> pending_labels; ///< stage A: labels after their task's Commit
+    /// 22 Oct 2026: bounds of every label pushed since pending_labels was last empty (a superset).
+    VAddr label_min = ~VAddr{0}, label_max = 0;
     u64 pending_task_position = 0; ///< latest un-noted task; earlier tasks run before it
     bool pending_complete = true; ///< all queued packets had their buffer writes noted
     VAddr pending_min = ~VAddr{0}, pending_max = 0; ///< bounds of pending_writes
@@ -693,7 +698,8 @@ private:
     std::mutex ring_watch_mutex;
     std::unordered_map<VAddr, RingWatchPage> ring_watch_pages;
     std::atomic<u64> ring_watch_gen{0};
-    u64 RingWatchToken(VAddr address, u64 size);
+    /// `probe` (GOW3_STAGEA_VERIFY): changes nothing; 0 when a page would need a new watch.
+    u64 RingWatchToken(VAddr address, u64 size, bool probe = false);
     void RingUnwatch(VAddr address, u64 size, bool written);
     static constexpr u32 RingCopyBits = 12;
     std::array<RingCopy, 1u << RingCopyBits> ring_copies{};

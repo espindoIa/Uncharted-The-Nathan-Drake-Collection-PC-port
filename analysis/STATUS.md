@@ -3512,3 +3512,31 @@ Results:
 - Thread busy unchanged (A 97%, B 96%, recorder 87%; process 5.66 vs 5.54 cores): same serial threads, more frames.
 
 Open: global ring_watch_gen invalidates every token on any watched-page write (per-page generations if writes appear). Guest mprotect / KeepWritable can open pages without the tracker knowing (same gap as the static arena path). Not tested: U1/U2, other chapters, long soak.
+
+## 22 October 2026: stage A per-dispatch memos (roadmap phase 5b)
+
+Profile (prof_b5, U3 meat market, 1080p DLAA K, stage A = shadPS4:GpuCommandProcessor): GetSharp about 6% (the V# re-reads about 1.1% + 2.6%); RingWatchToken 2.5%; the pending-label scan in SyncSrtTables 2.9%; the second garbage-buffer filter on a V# GetSharp already passed 1.1%. Still there: NotePendingGpuWrite pending_writes scan 3.8%, IsRangeGpuWrittenShared in SyncSrtTables 2.3%.
+
+Change (Disabled2 bit 2097152 DispatchStageAMemos, set = old path, read live):
+- Buffer V#s: the specialization (StageSpecialization via PipelineCache::GetProgram) reads each V# of a compute dispatch once and keeps them (PipelineCache::ComputeSharps). The write-range loop in DispatchDirect and CollectRingBindings (through PostDraw) reuse them instead of a GetSharp per buffer and per caller.
+- Effect filter: for effect shaders IsGarbageEffectBuffer (in GetSharp) and SpecGarbageFilter apply the same rule to the same V# through the same ClampRangeSize call, so a V# GetSharp returned passes SpecGarbageFilter too and its second call is skipped (Shader::g_buffer_filter_repeats_get_sharp; only while GetSharp runs the full rule, GOW3_EFFECT_SHARP_FILTER not 0).
+- Ring watch token: a ring copy asking again for the same range reuses its token while ring_watch_gen has not moved (a watch drop moves it first, so every page is still watched).
+- SRT labels: SyncSrtTables skips the pending_labels scan when the read lies outside label_min / label_max, the bounds of every label pushed since the list was last empty (a superset, so a skip is never a missed overlap).
+- Counters on the GOW3_DISPATCH_STATS line "stage A memos per frame" (V#s reused / read again, effect filter specializations skipped, ring watch tokens reused / asked, label scans skipped / done).
+
+Equivalence check: GOW3_STAGEA_VERIFY=1 (off by default) also computes the old answer for each cut and counts mismatches on the same stats line (V#s: all 16 bytes compared; watch token: a probe call that adds no watch; labels: the scan runs anyway). One 1080p run (91.4 FPS in verify mode):
+- Mismatches: 0 in all four counters.
+- Per frame: 1,856 V#s reused and 0 read again; about 1,740 effect filter skips; about 385 ring watch tokens reused and about 385 asked; about 13,300 label scans skipped and about 230 done.
+
+Results (ab2.sh live toggle in one session, 6 rounds x 10 s alternating windows, U3 meat market, DLAA K; bootstrap, 95% interval; 22 Oct):
+- 1080p: FPS 95.34 on vs 93.00 off, +2.34 [+1.51, +3.01]; median -0.28 ms [-0.36, -0.19]; p99 -0.27 ms [-0.44, -0.11]; 1% low +3.48 FPS [+0.24, +6.35].
+- 4K: FPS 90.75 vs 89.90, +0.86 [+0.30, +1.41]; median -0.11 ms [-0.16, -0.06]; p99 +0.12 ms [-0.62, +0.64] and 1% low -2.09 FPS [-4.04, +0.16] are inside the noise (4K is partly GPU-bound).
+- Threads in the verify run: process 5.42 of 12 logical CPUs busy; shadPS4:GpuCommandProcessor 97%, gow3:DrawRec 96%, gow3:VkRecorder 85%. Both serial stages are still the limit, so the roadmap's multi-core gain stays capped by them.
+
+Open (not done):
+- Compute key / specialization memo across dispatches. Not exact today: whether each V# is null depends on the per-dispatch bases of resources 5-8 and on the guest mapping. The vma table_generation is static in runtime_memory.c; exporting it would make a memo exact.
+- The pending_writes scan in NotePendingGpuWrite (about 3.8%).
+- IsRangeGpuWrittenShared in SyncSrtTables (about 2.3%).
+- The second ClampRangeSize in CollectRingBindings.
+
+Not verified: U1 and U2; other U3 chapters (one scene measured); a long soak; 4K with DLSS model M. The verify run was 1080p only. p99 and 1% low at 4K include 0, so no tail-latency claim there.

@@ -169,6 +169,13 @@ public:
 
     const ComputePipeline* GetComputePipeline();
 
+    /// gow3 22 Oct 2026 (Gow3Toggle::DispatchStageAMemos): the buffer V#s (GetSharp) the last
+    /// GetComputePipeline's specialization read from `info`'s current user data, by resource
+    /// index; null when it did not specialize that Info. Valid until the next GetComputePipeline.
+    [[nodiscard]] const AmdGpu::Buffer* ComputeSharps(const Shader::Info& info) const noexcept {
+        return compute_sharps_info == &info ? compute_sharps.data() : nullptr;
+    }
+
     /// gow3 18 Oct 2026: compiles the compute program of a dispatch seen ahead of the GPU thread
     /// (Liverpool's precompile scanner, at submit time) on a compiler worker: translation,
     /// specialization, module and pipeline. Any thread; never waits for the GPU thread.
@@ -280,6 +287,10 @@ private:
     tsl::robin_map<GraphicsPipelineKey, std::unique_ptr<GraphicsPipeline>> graphics_pipelines;
     PipelineSelection sel{}; ///< GPU thread selection state
     ComputePipelineKey compute_key{};
+    /// gow3 22 Oct 2026: see ComputeSharps. RefreshComputeKey sets sharp_capture for GetProgram.
+    std::array<AmdGpu::Buffer, Shader::NUM_BUFFERS> compute_sharps{};
+    const Shader::Info* compute_sharps_info = nullptr;
+    bool sharp_capture = false;
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
 
     // Only if Config::collectShadersForDebug()
