@@ -22,7 +22,8 @@
 // - Built in but off (no GOW3_PIPE_STATS): every hook is one predictable branch on a flag read
 //   once.
 // - Toggle second word bit 16777216 (Gow3Toggle::PipeStats) pauses collection live (A/B of the
-//   instrumentation's own cost); rows keep coming with stats_paused=1 and zero counters.
+//   instrumentation's own cost); rows keep coming with stats_paused=1 and near-zero counters
+//   (stats_paused is the bit at the flip; the row at a change carries a partial count).
 #pragma once
 
 #ifndef GOW3_PIPE_STATS_BUILD
