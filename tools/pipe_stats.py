@@ -13,9 +13,11 @@ not carry it); a_seq_issued is how far stage A had numbered at that flip, so the
 how many frames deep the pipeline was. Records tagged with a_seq (<file>.gpu.csv: a_seq,label,
 gpu_ms, written by the GPU timestamp side when it exists) are joined to rows on a_seq, never on
 frame_id: the flip that shows a frame comes a variable number of frames after stage A built it.
+
+A row the process did not finish writing (the game ends with std::_Exit; a crash) is left out,
+counted and reported on stderr instead of stopping the report.
 """
 import argparse
-import csv
 import os
 import sys
 
@@ -23,10 +25,36 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from frametimes import stats  # noqa: E402
 
 
-def load(path):
+# Never empty in a row the writer finished (a_seq and the reserved columns may be).
+REQUIRED = ("frame_id", "t_flip_ns", "toggles2", "stats_paused", "dropped")
+
+
+def _data_lines(text):
+    """Lines of `text` and whether the last one is cut (no newline: the process ended while
+    the writer was in the middle of it)."""
+    lines = text.split("\n")
+    cut_last = lines[-1] != ""
+    if not cut_last:
+        lines.pop()
+    return [line.rstrip("\r") for line in lines], cut_last
+
+
+def _warn_skipped(path, skipped):
+    if skipped:
+        where = ", ".join(str(n) for n in skipped[:5]) + (" ..." if len(skipped) > 5 else "")
+        print(f"warning: {path}: {len(skipped)} truncated or malformed row(s) ignored "
+              f"(line {where})", file=sys.stderr)
+
+
+def load(path, problems=None):
+    """Header fields and rows (ints, None for an empty cell). A row with the wrong number of
+    cells, a cell that is not a number, or a last line with no newline is a row the process
+    did not finish writing (std::_Exit, a crash): it is left out, counted and reported on
+    stderr; `problems`, if given, gets {"skipped": [line numbers]}."""
     header = {}
     with open(path, newline="") as f:
-        lines = f.read().splitlines()
+        text = f.read()
+    lines, cut_last = _data_lines(text)
     if not lines or not lines[0].startswith("# gow3_pipe_stats"):
         sys.exit(f"{path}: not a GOW3_PIPE_STATS file")
     for item in lines[0][1:].split():
@@ -35,22 +63,62 @@ def load(path):
             header[key] = value
     if header.get("schema") != "1":
         sys.exit(f"{path}: schema {header.get('schema')} (this script reads 1)")
-    rows = []
-    for row in csv.DictReader(lines[1:]):
-        rows.append({k: (int(v) if v not in ("", None) else None) for k, v in row.items()})
+    skipped, rows = [], []
+    if len(lines) < 2 or (len(lines) == 2 and cut_last):
+        print(f"warning: {path}: no column line (the process ended right after starting)",
+              file=sys.stderr)
+        if problems is not None:
+            problems["skipped"] = skipped
+        return header, rows
+    columns = lines[1].split(",")
+    for number, line in enumerate(lines[2:], start=3):
+        cells = line.split(",")
+        if len(cells) != len(columns) or (cut_last and number == len(lines)):
+            skipped.append(number)
+            continue
+        try:
+            row = {k: (int(v) if v != "" else None) for k, v in zip(columns, cells)}
+        except ValueError:
+            skipped.append(number)
+            continue
+        if any(row.get(k) is None for k in REQUIRED):
+            skipped.append(number)
+            continue
+        rows.append(row)
+    _warn_skipped(path, skipped)
+    if problems is not None:
+        problems["skipped"] = skipped
     return header, rows
 
 
-def load_gpu(path):
-    """<file>.gpu.csv: one line per GPU timestamp range, a_seq,label,gpu_ms (None if absent)."""
+def load_gpu(path, problems=None):
+    """<file>.gpu.csv: one line per GPU timestamp range, a_seq,label,gpu_ms (None if absent).
+    Cut or malformed lines are left out and reported as in load()."""
     if not os.path.exists(path):
         return None
     with open(path, newline="") as f:
-        reader = csv.DictReader(line for line in f if not line.startswith("#"))
-        if reader.fieldnames is None or "a_seq" not in reader.fieldnames:
-            sys.exit(f"{path}: no a_seq column (schema 1 keys GPU records by a_seq)")
-        return [{"a_seq": int(r["a_seq"]), "label": r["label"], "gpu_ms": float(r["gpu_ms"])}
-                for r in reader]
+        text = f.read()
+    lines, cut_last = _data_lines(text)
+    numbered = [(n, line) for n, line in enumerate(lines, start=1) if not line.startswith("#")]
+    if not numbered or "a_seq" not in numbered[0][1].split(","):
+        sys.exit(f"{path}: no a_seq column (schema 1 keys GPU records by a_seq)")
+    columns = numbered[0][1].split(",")
+    skipped, records = [], []
+    for number, line in numbered[1:]:
+        cells = line.split(",")
+        if len(cells) != len(columns) or (cut_last and number == len(lines)):
+            skipped.append(number)
+            continue
+        row = dict(zip(columns, cells))
+        try:
+            records.append({"a_seq": int(row["a_seq"]), "label": row["label"],
+                            "gpu_ms": float(row["gpu_ms"])})
+        except (KeyError, ValueError):
+            skipped.append(number)
+    _warn_skipped(path, skipped)
+    if problems is not None:
+        problems["skipped"] = skipped
+    return records
 
 
 def join_by_a_seq(rows, records):

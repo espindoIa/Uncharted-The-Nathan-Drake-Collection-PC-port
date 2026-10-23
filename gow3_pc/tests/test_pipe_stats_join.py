@@ -1,4 +1,5 @@
-"""tools/pipe_stats.py: rows join GPU records on a_seq while flips lag stage A by 1-2 frames."""
+"""tools/pipe_stats.py: rows join GPU records on a_seq while flips lag stage A by 1-2 frames;
+rows the process did not finish writing (std::_Exit, a crash) are left out and counted."""
 import csv
 import io
 import random
@@ -102,6 +103,70 @@ class PipeStatsJoinTests(unittest.TestCase):
         self.assertIn("pipeline depth at flip", r.stdout)
         self.assertIn("GPU (joined on a_seq)", r.stdout)
         self.assertIn("gpu scene", r.stdout)
+
+
+class PipeStatsCutRowTests(unittest.TestCase):
+    """B1/B2 (docs/team/SENTINEL_review_vector-pipe-stats.md): the game ends with std::_Exit, so
+    the last line can stop in the middle of a row."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.main, self.gpu, self.shows, _ = simulate(frames=50)
+        self.complete = len(self.main.splitlines()) - 2
+
+    def write(self, text, gpu=None):
+        path = Path(self.dir.name) / "run.csv"
+        path.write_text(text)
+        if gpu is not None:
+            Path(str(path) + ".gpu.csv").write_text(gpu)
+        return str(path)
+
+    def test_cut_last_row_is_left_out_and_counted(self):
+        # Cut in the middle of the t_flip_ns cell of the last row (no newline), as in the review.
+        last = self.main.rstrip("\n").rsplit("\n", 1)[1]
+        cut = self.main[: len(self.main) - len(last) - 1 + len(last.split(",")[0]) + 4]
+        problems = {}
+        _, rows = pipe_stats.load(self.write(cut), problems)
+        self.assertEqual(len(rows), self.complete - 1)
+        self.assertEqual(len(problems["skipped"]), 1)
+
+    def test_cut_row_with_all_cells_but_no_newline_is_left_out(self):
+        problems = {}
+        _, rows = pipe_stats.load(self.write(self.main.rstrip("\n")), problems)
+        self.assertEqual(len(rows), self.complete - 1)
+        self.assertEqual(problems["skipped"], [self.complete + 2])
+
+    def test_short_or_bad_rows_are_left_out(self):
+        lines = self.main.splitlines()
+        lines[5] = ",".join(lines[5].split(",")[:3])         # too few cells
+        lines[6] = lines[6].replace(",", ",x", 1)            # not a number
+        lines[7] = ",".join([""] + lines[7].split(",")[1:])  # empty frame_id
+        problems = {}
+        _, rows = pipe_stats.load(self.write("\n".join(lines) + "\n"), problems)
+        self.assertEqual(problems["skipped"], [6, 7, 8])
+        self.assertEqual(len(rows), self.complete - 3)
+
+    def test_header_only_files_load_empty(self):
+        header = self.main.split("\n", 1)[0] + "\n"
+        for text in (header, header + "frame_id,t_fl"):
+            _, rows = pipe_stats.load(self.write(text))
+            self.assertEqual(rows, [])
+
+    def test_cut_gpu_line_is_left_out(self):
+        problems = {}
+        path = self.write(self.main, self.gpu[:-3])
+        records = pipe_stats.load_gpu(path + ".gpu.csv", problems)
+        self.assertEqual(len(records), len(self.gpu.splitlines()) - 2)
+        self.assertEqual(len(problems["skipped"]), 1)
+
+    def test_report_warns_and_runs(self):
+        path = self.write(self.main[:-7], self.gpu)
+        r = subprocess.run([sys.executable, str(REPO / "tools" / "pipe_stats.py"), path,
+                            "--skip-s", "0"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("1 truncated or malformed row(s) ignored", r.stderr)
+        self.assertIn("GPU (joined on a_seq)", r.stdout)
 
 
 if __name__ == "__main__":
