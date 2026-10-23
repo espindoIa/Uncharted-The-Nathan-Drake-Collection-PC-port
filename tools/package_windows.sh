@@ -66,6 +66,9 @@ if [[ -n ${STREAMLINE_SDK:-} ]]; then
     mkdir -p "$stage/licenses/nvidia-streamline"
     cp "$STREAMLINE_SDK/license.txt" "$stage/licenses/nvidia-streamline/LICENSE.txt"
     echo "Streamline: ${STREAMLINE_DLLS[*]} included"
+else
+    # 23 Oct 2026: Streamline is the runtime's only player-facing way to DLSS (no setting).
+    echo "warning: STREAMLINE_SDK not set: the package falls back to the NGX bridge" >&2
 fi
 [[ ! -e $stage/gow3_pc/out/NvLowLatencyVk.dll ]] || { echo "NvLowLatencyVk.dll must not be packaged" >&2; exit 1; }
 
