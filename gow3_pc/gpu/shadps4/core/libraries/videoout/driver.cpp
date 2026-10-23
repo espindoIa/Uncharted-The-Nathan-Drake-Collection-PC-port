@@ -21,6 +21,7 @@
 #include <sys/resource.h>
 #endif
 #include "common/assert.h"
+#include "gow3_pipe_stats.h"
 #include "gow3_toggles.h"
 #include "gow3_settings.h"
 #include "gow3_graphics.h"
@@ -402,6 +403,11 @@ void VideoOutDriver::Flip(const Request& req) {
     });
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                 : 0);
+    // gow3 23 Oct 2026: GOW3_PIPE_STATS=<file> writes one row of CPU pipeline statistics per
+    // flip, numbered here (gow3_pipe_stats.h; the flip thread only queues a snapshot).
+    if (Gow3PipeStats::enabled) {
+        Gow3PipeStats::OnFlip(Gow3Stats::gpu_frames.load(std::memory_order_relaxed));
+    }
 
     // gow3: GOW3_FRAME_STATS=1 prints flip rate and frame time spread every 5 seconds.
     static const bool frame_stats = EmulatorSettingsImpl::Flag("GOW3_FRAME_STATS", false);

@@ -13,6 +13,7 @@
 
 #include <cstdlib>
 #include "gow3_threads.h"
+#include "gow3_pipe_stats.h"
 #include "gow3_profiler.h"
 
 #include <array>
@@ -84,9 +85,21 @@ public:
         head += pending_size;
         published.store(head, std::memory_order_seq_cst);
         ++packets;
+        const bool stats = Gow3PipeStats::Active();
+        if (stats) [[unlikely]] {
+            // GOW3_PIPE_STATS: bytes still in flight, including this packet (1 in 16 sampled).
+            Gow3PipeStats::stage_a.packets.Add(1);
+            Gow3PipeStats::stage_a.bytes.Add(pending_size);
+            if (!(packets & Gow3PipeStats::OccSampleMask)) {
+                Gow3PipeStats::NoteOccupancy(head - consumed.load(std::memory_order_relaxed));
+            }
+        }
         if (sleeping.load(std::memory_order_seq_cst)) {
             wake.fetch_add(1, std::memory_order_seq_cst);
             wake.notify_one();
+            if (stats) [[unlikely]] {
+                Gow3PipeStats::stage_a.wake_notifies.Add(1);
+            }
         }
     }
 
@@ -111,17 +124,31 @@ public:
         ++drains;
         const u32 slot = reason < NumReasons ? reason : ReasonRasterizer;
         ++drains_by_reason[slot];
+        const bool stats = Gow3PipeStats::Active();
+        u64 yield_start = 0; // GOW3_PIPE_STATS: when the pause phase ended
         const u64 start = __rdtsc();
         for (u32 spins = 0; consumed.load(std::memory_order_acquire) != head; ++spins) {
             if (spins < 4096) {
                 __builtin_ia32_pause();
             } else {
+                if (stats && spins == 4096) [[unlikely]] {
+                    yield_start = __rdtsc();
+                }
                 std::this_thread::yield();
             }
         }
-        const u64 waited = __rdtsc() - start;
+        const u64 end = __rdtsc();
+        const u64 waited = end - start;
         drain_cycles += waited;
         cycles_by_reason[slot] += waited;
+        if (stats) [[unlikely]] {
+            const u64 yielded = yield_start ? end - yield_start : 0;
+            Gow3PipeStats::NoteDrain(reason < 256                    ? Gow3PipeStats::DrainPm4
+                                     : reason == ReasonCommands      ? Gow3PipeStats::DrainCommands
+                                     : reason == ReasonSubmissionEnd ? Gow3PipeStats::DrainSubmissionEnd
+                                                                     : Gow3PipeStats::DrainOther,
+                                     waited - yielded, yielded);
+        }
     }
 
     /// Stage A: position after the last committed packet; Reached(position) once B ran it.
@@ -153,9 +180,26 @@ private:
     }
 
     void WaitForSpace(u64 at, u64 size) {
+        if (Gow3PipeStats::Active()) [[unlikely]] {
+            WaitForSpaceCounted(at, size);
+            return;
+        }
         while (at + size - consumed.load(std::memory_order_acquire) > Capacity) {
             __builtin_ia32_pause();
         }
+    }
+
+    /// WaitForSpace with GOW3_PIPE_STATS on: the same wait, timed when the ring is full.
+    void WaitForSpaceCounted(u64 at, u64 size) {
+        if (at + size - consumed.load(std::memory_order_acquire) <= Capacity) {
+            return;
+        }
+        const u64 start = __rdtsc();
+        while (at + size - consumed.load(std::memory_order_acquire) > Capacity) {
+            __builtin_ia32_pause();
+        }
+        Gow3PipeStats::stage_a.space_waits.Add(1);
+        Gow3PipeStats::stage_a.space_spin_cyc.Add(__rdtsc() - start);
     }
 
     void Run(std::stop_token stop) {
@@ -180,6 +224,10 @@ private:
                     return Gow3Threads::Available() >= 12 ? 200 : 50;
                 }());
                 const auto spin_until = std::chrono::steady_clock::now() + spin_time;
+                // GOW3_PIPE_STATS: the wait split into spinning and sleeping in wake.wait.
+                const bool stats = Gow3PipeStats::Active();
+                const u64 wait_start = stats ? __rdtsc() : 0;
+                u64 blocked = 0;
                 for (u32 spins = 1; available == at; ++spins) {
                     if (stop.stop_requested()) {
                         return;
@@ -190,11 +238,20 @@ private:
                         sleeping.store(true, std::memory_order_seq_cst);
                         if (published.load(std::memory_order_seq_cst) == at &&
                             !stop.stop_requested()) {
+                            const u64 sleep_start = stats ? __rdtsc() : 0;
                             wake.wait(seen, std::memory_order_seq_cst);
+                            if (stats) [[unlikely]] {
+                                blocked += __rdtsc() - sleep_start;
+                                Gow3PipeStats::stage_b.sleeps.Add(1);
+                            }
                         }
                         sleeping.store(false, std::memory_order_relaxed);
                     }
                     available = published.load(std::memory_order_acquire);
+                }
+                if (stats) [[unlikely]] {
+                    Gow3PipeStats::stage_b.wait_spin_cyc.Add(__rdtsc() - wait_start - blocked);
+                    Gow3PipeStats::stage_b.wait_block_cyc.Add(blocked);
                 }
             }
             const auto* header = reinterpret_cast<const Header*>(ring.get() + at % Capacity);
@@ -222,7 +279,11 @@ private:
             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
             // Interrupts held by a fault handled during the packet (IrqController::HoldScope).
             Platform::IrqC::Instance()->FlushHeld();
-            busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
+            const u64 elapsed = __rdtsc() - start;
+            busy_cycles.fetch_add(elapsed, std::memory_order_relaxed);
+            if (Gow3PipeStats::Active()) [[unlikely]] {
+                Gow3PipeStats::NotePacketB(elapsed);
+            }
             at += header->size;
             consumed.store(at, std::memory_order_release);
         }
