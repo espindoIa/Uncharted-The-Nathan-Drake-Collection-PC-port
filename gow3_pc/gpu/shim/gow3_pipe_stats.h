@@ -180,6 +180,11 @@ void Shutdown() noexcept;
 /// holds while writing; any thread, any number of times. Flips after the call may be lost.
 void FlushForExit() noexcept;
 
+/// The file this process writes, GOW3_PIPE_STATS with .<UTC start>-<pid> before .csv (a
+/// relaunch writes a new file); nullptr until the first flip opened it. Side files derive
+/// their names from it (<OutputPath()>.gpu.csv). Valid for the rest of the process.
+const char* OutputPath() noexcept;
+
 /// Statistics for tests: rows written, rows dropped (ring full or concurrent flip).
 u64 RowsWritten() noexcept;
 u64 RowsDropped() noexcept;
@@ -191,6 +196,9 @@ inline u64 FrameId() noexcept {
 }
 inline void Shutdown() noexcept {}
 inline void FlushForExit() noexcept {}
+inline const char* OutputPath() noexcept {
+    return nullptr;
+}
 inline u64 RowsWritten() noexcept {
     return 0;
 }

@@ -8,8 +8,15 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <mutex>
+#include <string>
 #include <thread>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 #include "common/thread.h"
 
 #ifndef GOW3_GIT_REV
@@ -85,6 +92,9 @@ constexpr auto FlushTimeout = std::chrono::milliseconds(500);
 
 struct State {
     std::FILE* file = nullptr;
+    std::string path;  ///< this process's file (set before the writer starts, then read-only)
+    char start_utc[24] = {};
+    long pid = 0;
     Row ring[RingSize];
     alignas(64) std::atomic<u64> write{0}; ///< flip thread
     alignas(64) std::atomic<u64> read{0};  ///< writer thread
@@ -122,13 +132,14 @@ u64 NowNs() {
 void WriteHeader(State& s, double tsc_hz) {
     std::fprintf(s.file,
                  "# gow3_pipe_stats schema=1 build=%s toggles=%llu,%llu tsc_hz=%.0f "
-                 "threads=%u occ_sample=1/%d\n",
+                 "threads=%u occ_sample=1/%d pid=%ld start_utc=%s\n",
                  GOW3_GIT_REV,
                  static_cast<unsigned long long>(
                      __atomic_load_n(&runtime_disabled_optimizations, __ATOMIC_RELAXED)),
                  static_cast<unsigned long long>(
                      __atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED)),
-                 tsc_hz, std::thread::hardware_concurrency(), OccSampleMask + 1);
+                 tsc_hz, std::thread::hardware_concurrency(), OccSampleMask + 1, s.pid,
+                 s.start_utc);
     std::fputs("frame_id,t_flip_ns,a_frame_id,a_seq,a_seq_issued,toggles1,toggles2,stats_paused,"
                "dropped,"
                "a_wait_spin_ns,a_wait_yield_ns",
@@ -250,12 +261,48 @@ void WriterMain(State* s) {
     }
 }
 
+/// GOW3_PIPE_STATS=dir/run.csv writes dir/run.<UTC start>-<pid>.csv: a relaunch (game switch,
+/// runtime_restart, LoadExec) is a new process and gets a new file instead of truncating the
+/// last one. A name not ending in .csv gets the suffix and .csv appended.
+void SetSessionPath(State& s, const char* path) {
+#ifdef _WIN32
+    s.pid = static_cast<long>(_getpid());
+#else
+    s.pid = static_cast<long>(getpid());
+#endif
+    const std::time_t now = std::time(nullptr);
+    std::tm utc{};
+#ifdef _WIN32
+    gmtime_s(&utc, &now);
+#else
+    gmtime_r(&now, &utc);
+#endif
+    if (!std::strftime(s.start_utc, sizeof(s.start_utc), "%Y%m%dT%H%M%SZ", &utc)) {
+        std::strcpy(s.start_utc, "00000000T000000Z");
+    }
+    s.path = path;
+    const std::size_t slash = s.path.find_last_of("/\\");
+    const std::size_t dot = s.path.rfind('.');
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash) &&
+        s.path.compare(dot, std::string::npos, ".csv") == 0) {
+        s.path.resize(dot);
+    }
+    s.path += '.';
+    s.path += s.start_utc;
+    s.path += '-';
+    s.path += std::to_string(s.pid);
+    s.path += ".csv";
+}
+
 bool Start() {
     const char* path = std::getenv("GOW3_PIPE_STATS");
     State* s = new State; // once, on the first flip; never freed (see `phase`)
-    s->file = path ? std::fopen(path, "w") : nullptr;
+    if (path) {
+        SetSessionPath(*s, path);
+        s->file = std::fopen(s->path.c_str(), "w");
+    }
     if (!s->file) {
-        std::fprintf(stderr, "gow3: GOW3_PIPE_STATS: cannot open '%s'\n", path ? path : "");
+        std::fprintf(stderr, "gow3: GOW3_PIPE_STATS: cannot open '%s'\n", s->path.c_str());
         delete s;
         return false;
     }
@@ -374,6 +421,11 @@ void Shutdown() noexcept {
         std::fclose(s.file);
         s.file = nullptr;
     });
+}
+
+const char* OutputPath() noexcept {
+    const State* s = state.load(std::memory_order_acquire);
+    return s ? s->path.c_str() : nullptr;
 }
 
 u64 RowsWritten() noexcept {

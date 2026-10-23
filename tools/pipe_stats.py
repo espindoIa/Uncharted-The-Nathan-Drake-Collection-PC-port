@@ -1,6 +1,11 @@
 """Per-frame CPU pipeline statistics from GOW3_PIPE_STATS (schema 1, gpu/shim/gow3_pipe_stats.h).
 
-    python tools/pipe_stats.py <file> [--skip-s 10] [--split-toggles]
+    python tools/pipe_stats.py <file> [--skip-s 10] [--split-toggles] [--latest]
+
+<file> is either one file the game wrote or the GOW3_PIPE_STATS value itself: each process
+writes <stem>.<UTC start>-<pid>.csv (a game switch or restart is a new process and a new file),
+and the value names all of them; each is reported on its own (frame_id and a_seq restart with
+the process). --latest reports only the newest.
 
 Prints frame time percentiles (picked as tools/frametimes.py does, so p50/p95/p99 match it for
 the same frames), each stage's time per frame and share of the frame, how full the draw pipe
@@ -18,7 +23,9 @@ A row the process did not finish writing (the game ends with std::_Exit; a crash
 counted and reported on stderr instead of stopping the report.
 """
 import argparse
+import glob
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -121,6 +128,22 @@ def load_gpu(path, problems=None):
     return records
 
 
+SESSION = re.compile(r"\.\d{8}T\d{6}Z-\d+\.csv$")
+
+
+def sessions(path):
+    """The files to report for `path`: itself if it exists, else the session files the game
+    wrote for GOW3_PIPE_STATS=<path>, oldest first (the name starts with the UTC start)."""
+    if os.path.exists(path):
+        return [path]
+    stem = path[:-4] if path.endswith(".csv") else path
+    found = sorted(p for p in glob.glob(glob.escape(stem) + ".*.csv")
+                   if SESSION.match(p[len(stem):]))
+    if not found:
+        sys.exit(f"{path}: no such file, and no {stem}.<UTC start>-<pid>.csv files")
+    return found
+
+
 def join_by_a_seq(rows, records):
     """{frame_id: {label: gpu_ms}} for rows whose a_seq is known, plus the records no row showed
     (frames still in flight at the end, or shown by a dropped row)."""
@@ -220,14 +243,8 @@ def report_gpu(frames, records):
               f"({len(values)} frames)")
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("file")
-    parser.add_argument("--skip-s", type=float, default=10.0,
-                        help="seconds left out at the start (loading, shader compiles)")
-    parser.add_argument("--split-toggles", action="store_true")
-    args = parser.parse_args()
-    header, rows = load(args.file)
+def report_file(path, args):
+    header, rows = load(path)
     print("header:", " ".join(f"{k}={v}" for k, v in header.items()))
     if rows:
         start = rows[0]["t_flip_ns"] + int(args.skip_s * 1e9)
@@ -235,8 +252,8 @@ def main():
     if rows and rows[-1]["dropped"]:
         print(f"note: {rows[-1]['dropped']} rows dropped (ring full or a second flip thread)")
     if not args.split_toggles:
-        frames = report(rows, args.file)
-        records = load_gpu(args.file + ".gpu.csv")
+        frames = report(rows, path)
+        records = load_gpu(path + ".gpu.csv")
         if frames and records is not None:
             report_gpu(frames, records)
         return
@@ -244,6 +261,24 @@ def main():
     # needs consecutive frame_ids), so the frame in which the toggle changed is left out.
     for key in sorted({r["toggles2"] for r in rows}):
         report([r for r in rows if r["toggles2"] == key], f"toggles2={key}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("file")
+    parser.add_argument("--skip-s", type=float, default=10.0,
+                        help="seconds left out at the start (loading, shader compiles)")
+    parser.add_argument("--split-toggles", action="store_true")
+    parser.add_argument("--latest", action="store_true", help="only the newest session file")
+    args = parser.parse_args()
+    paths = sessions(args.file)
+    if args.latest:
+        paths = paths[-1:]
+    elif len(paths) > 1:
+        print(f"{len(paths)} session files for {args.file} (one per process)")
+    for path in paths:
+        report_file(path, args)
+
 
 if __name__ == "__main__":
     main()

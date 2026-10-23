@@ -169,5 +169,50 @@ class PipeStatsCutRowTests(unittest.TestCase):
         self.assertIn("GPU (joined on a_seq)", r.stdout)
 
 
+class PipeStatsSessionTests(unittest.TestCase):
+    """B3: each process writes <stem>.<UTC start>-<pid>.csv; the GOW3_PIPE_STATS value names
+    them all, each with its own <session>.gpu.csv."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.base = Path(self.dir.name) / "run.csv"
+        self.names = ["run.20261023T140000Z-4100.csv", "run.20261023T140230Z-977.csv"]
+        for seed, name in enumerate(self.names, start=1):
+            main, gpu, _, _ = simulate(frames=60 + seed, seed=seed)
+            (Path(self.dir.name) / name).write_text(main)
+            (Path(self.dir.name) / (name + ".gpu.csv")).write_text(gpu)
+        # Not sessions of run.csv.
+        (Path(self.dir.name) / "run.csv.info").write_text("1 2\n")
+        (Path(self.dir.name) / "rerun.20261023T140000Z-1.csv").write_text(main)
+        (Path(self.dir.name) / "run.old.csv").write_text(main)
+
+    def test_sessions_oldest_first(self):
+        found = [Path(p).name for p in pipe_stats.sessions(str(self.base))]
+        self.assertEqual(found, self.names)
+        one = str(Path(self.dir.name) / self.names[1])
+        self.assertEqual(pipe_stats.sessions(one), [one])
+
+    def test_report_each_session_with_its_gpu_file(self):
+        cmd = [sys.executable, str(REPO / "tools" / "pipe_stats.py"), str(self.base), "--skip-s", "0"]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("2 session files", r.stdout)
+        self.assertEqual(r.stdout.count("GPU (joined on a_seq)"), 2)
+        for name in self.names:
+            self.assertIn(name, r.stdout)
+        r = subprocess.run(cmd + ["--latest"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn(self.names[0], r.stdout)
+        self.assertIn(self.names[1], r.stdout)
+
+    def test_no_sessions_is_an_error(self):
+        r = subprocess.run([sys.executable, str(REPO / "tools" / "pipe_stats.py"),
+                            str(Path(self.dir.name) / "none.csv")], capture_output=True, text=True,
+                           timeout=30)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("UTC start", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

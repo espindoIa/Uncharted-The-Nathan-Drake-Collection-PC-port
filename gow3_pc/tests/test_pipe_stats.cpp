@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <algorithm>
 #include <deque>
 #include <filesystem>
 #include <map>
@@ -28,6 +29,7 @@
 #include <vector>
 #ifdef _WIN32
 #include <process.h>
+#define getpid _getpid
 #else
 #include <sys/wait.h>
 #include <unistd.h>
@@ -277,8 +279,15 @@ static int RunMain() {
     PS::OnFlip(0);
     assert(PS::RowsWritten() == written);
 
+    // B3: the file is GOW3_PIPE_STATS with .<UTC start>-<pid> before .csv.
+    const std::string base{csv_path}, out{PS::OutputPath()};
+    const std::string pid_suffix = "-" + std::to_string(static_cast<long>(getpid())) + ".csv";
+    assert(out.size() == base.size() - 4 + 1 + 16 + pid_suffix.size());
+    assert(out.compare(0, base.size() - 4, base, 0, base.size() - 4) == 0);
+    assert(out.compare(out.size() - pid_suffix.size(), pid_suffix.size(), pid_suffix) == 0);
+
     // The CSV: one header, one column line, every row the same width, sums exact.
-    std::FILE* file = std::fopen(csv_path, "r");
+    std::FILE* file = std::fopen(out.c_str(), "r");
     assert(file);
     std::vector<std::string> lines;
     char buffer[8192];
@@ -292,6 +301,8 @@ static int RunMain() {
     std::fclose(file);
     assert(lines.size() >= 3);
     assert(lines[0].rfind("# gow3_pipe_stats schema=1 ", 0) == 0);
+    assert(lines[0].find(" pid=" + std::to_string(static_cast<long>(getpid())) + " start_utc=") !=
+           std::string::npos);
     const auto columns = Split(lines[1]);
     auto column = [&](const char* name) {
         for (std::size_t i = 0; i < columns.size(); ++i) {
@@ -454,7 +465,7 @@ static void WriteInfo(std::uint64_t flips, std::uint64_t extra) {
     std::fclose(file);
 }
 
-static void ReadInfo(const std::string& csv, std::uint64_t& flips, std::uint64_t& extra) {
+static void ReadInfoFile(const std::string& csv, std::uint64_t& flips, std::uint64_t& extra) {
     std::FILE* file = std::fopen((csv + ".info").c_str(), "r");
     assert(file);
     unsigned long long a = 0, b = 0;
@@ -548,14 +559,46 @@ static int Spawn(const char* self, const char* mode, const std::string& csv) {
 #endif
 }
 
+/// The session files (B3: <stem>.<UTC start>-<pid>.csv) next to `base` (<stem>.csv).
+static std::vector<std::string> Sessions(const std::string& base) {
+    namespace fs = std::filesystem;
+    const fs::path path{base};
+    const std::string stem = path.stem().string() + ".";
+    std::vector<std::string> out;
+    for (const auto& entry : fs::directory_iterator(path.parent_path())) {
+        const std::string name = entry.path().filename().string();
+        if (name.size() > stem.size() + 4 && name.rfind(stem, 0) == 0 &&
+            name.compare(name.size() - 4, 4, ".csv") == 0 &&
+            name.find(".gpu.") == std::string::npos) {
+            out.push_back(entry.path().string());
+        }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+/// Runs `mode` with GOW3_PIPE_STATS=<test_dir>/<name>; returns the file it wrote.
 static std::string Child(const char* self, const char* mode, const char* name) {
-    const std::string csv = std::string(test_dir) + "/" + name;
-    const int code = Spawn(self, mode, csv);
+    const std::string base = std::string(test_dir) + "/" + name;
+    const auto before = Sessions(base);
+    const int code = Spawn(self, mode, base);
     if (code != 0) {
         std::fprintf(stderr, "child %s exited with %d\n", mode, code);
         std::exit(1);
     }
-    return csv;
+    const auto after = Sessions(base);
+    assert(after.size() == before.size() + 1); // one new file, the old ones untouched
+    for (const auto& session : after) {
+        if (std::find(before.begin(), before.end(), session) == before.end()) {
+            return session;
+        }
+    }
+    std::abort();
+}
+
+/// The numbers a child wrote next to `base` before its _Exit.
+static void ReadInfo(const char* name, std::uint64_t& flips, std::uint64_t& extra) {
+    ReadInfoFile(std::string(test_dir) + "/" + name, flips, extra);
 }
 
 static void TestExits(const char* self) {
@@ -571,7 +614,7 @@ static void TestExits(const char* self) {
     { // _Exit in the middle of a pass: complete rows in order, at most the last line cut.
         const std::string csv = Child(self, "exit-burst", "burst.csv");
         std::uint64_t flips = 0, dropped = 0;
-        ReadInfo(csv, flips, dropped);
+        ReadInfo("burst.csv", flips, dropped);
         const Parsed p = Parse(csv);
         const std::uint64_t lost = lost_queued(p, flips, dropped);
         std::printf("exit mid-pass: %llu flips, %zu complete rows, %llu queued rows lost, "
@@ -584,7 +627,7 @@ static void TestExits(const char* self) {
     { // _Exit during steady flips: only rows since the last pass (100 ms here: ~50) are lost.
         const std::string csv = Child(self, "exit-steady", "steady.csv");
         std::uint64_t flips = 0, dropped = 0;
-        ReadInfo(csv, flips, dropped);
+        ReadInfo("steady.csv", flips, dropped);
         const Parsed p = Parse(csv);
         const std::uint64_t lost = lost_queued(p, flips, dropped);
         std::printf("exit during steady flips (2 ms): %llu flips, %zu complete rows, %llu queued "
@@ -597,7 +640,7 @@ static void TestExits(const char* self) {
     { // FlushForExit then _Exit: every flip before the call is on file.
         const std::string csv = Child(self, "exit-flush", "flush.csv");
         std::uint64_t flips = 0, waited_us = 0;
-        ReadInfo(csv, flips, waited_us);
+        ReadInfo("flush.csv", flips, waited_us);
         const Parsed p = Parse(csv);
         const std::uint64_t last = CheckRows(p);
         std::printf("FlushForExit + _Exit: %llu flips, last frame on file %llu, waited %llu us\n",
@@ -610,7 +653,7 @@ static void TestExits(const char* self) {
     { // Same with a thread still flipping through the call and the exit.
         const std::string csv = Child(self, "exit-flush-live", "flush-live.csv");
         std::uint64_t flips = 0, waited_us = 0;
-        ReadInfo(csv, flips, waited_us);
+        ReadInfo("flush-live.csv", flips, waited_us);
         const Parsed p = Parse(csv);
         const std::uint64_t last = CheckRows(p);
         std::printf("FlushForExit + _Exit, still flipping: frame %llu at the call, last frame on "
@@ -641,6 +684,16 @@ int main(int argc, char** argv) {
     std::filesystem::create_directory(test_dir);
     Child(argv[0], "main", "main.csv");
     TestExits(argv[0]);
+    { // B3: two launches with the same GOW3_PIPE_STATS write two files, both whole.
+        const std::string first = Child(argv[0], "exit-flush", "twice.csv");
+        const std::string second = Child(argv[0], "exit-flush", "twice.csv");
+        assert(first != second && Sessions(std::string(test_dir) + "/twice.csv").size() == 2);
+        for (const auto& csv : {first, second}) {
+            const Parsed p = Parse(csv);
+            assert(CheckRows(p) > 100 && p.cut == 0);
+        }
+        std::printf("two launches: %s, %s\n", first.c_str(), second.c_str());
+    }
     if (!std::getenv("GOW3_PIPE_STATS_KEEP")) {
         std::filesystem::remove_all(test_dir);
     }
