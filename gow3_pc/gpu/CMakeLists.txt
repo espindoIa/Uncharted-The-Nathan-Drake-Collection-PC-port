@@ -396,6 +396,13 @@ target_compile_options(pipe-stats-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 # The test is the collector itself: always built in, whatever the game build uses.
 target_compile_definitions(pipe-stats-test PRIVATE GOW3_PIPE_STATS_BUILD=1)
 target_link_libraries(pipe-stats-test PRIVATE -pthread)
+# The real DrawPipe (vk_draw_pipe.h) with a synthetic handler: run with and without
+# GOW3_PIPE_STATS set, and with `slow` under sanitizers (tests/test_draw_pipe.cpp).
+add_executable(draw-pipe-test EXCLUDE_FROM_ALL ../tests/test_draw_pipe.cpp shim/gow3_pipe_stats.cpp)
+target_include_directories(draw-pipe-test PRIVATE ../tests/stubs/draw_pipe ../tests/stubs shim shadps4)
+target_compile_options(draw-pipe-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_compile_definitions(draw-pipe-test PRIVATE GOW3_PIPE_STATS_BUILD=1)
+target_link_libraries(draw-pipe-test PRIVATE -pthread)
 add_executable(flat-camera-test EXCLUDE_FROM_ALL ../tests/test_flat_camera.cpp)
 target_compile_options(flat-camera-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(flat-camera-test PRIVATE shadps4)
