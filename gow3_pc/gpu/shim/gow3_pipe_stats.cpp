@@ -71,7 +71,8 @@ const char* const reserved[] = {"rec_busy_ns",      "rec_wait_ns",     "rec_draw
                                 "sub_host_copy_ns", "sub_driver_ns",   "fence_wait_ns"};
 
 struct Row {
-    u64 frame_id, t_ns, tsc, a_frame_id, toggles1, toggles2, dropped, b_max_cyc;
+    u64 frame_id, t_ns, tsc, a_frame_id, a_seq, a_seq_issued, toggles1, toggles2, dropped,
+        b_max_cyc;
     u64 values[NumSources];
 };
 
@@ -122,7 +123,8 @@ void WriteHeader(State& s, double tsc_hz) {
                  static_cast<unsigned long long>(
                      __atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED)),
                  tsc_hz, std::thread::hardware_concurrency(), OccSampleMask + 1);
-    std::fputs("frame_id,t_flip_ns,a_frame_id,toggles1,toggles2,stats_paused,dropped,"
+    std::fputs("frame_id,t_flip_ns,a_frame_id,a_seq,a_seq_issued,toggles1,toggles2,stats_paused,"
+               "dropped,"
                "a_wait_spin_ns,a_wait_yield_ns",
                s.file);
     for (const Source& source : sources) {
@@ -159,10 +161,15 @@ void WriteRow(State& s, const Row& row) {
         delta[i] = row.values[i] - s.previous.values[i];
     }
     const bool paused = (row.toggles2 & Gow3Toggle::PipeStats) != 0;
-    std::fprintf(s.file, "%llu,%llu,%llu,%llu,%llu,%d,%llu,%llu,%llu",
-                 static_cast<unsigned long long>(row.frame_id),
+    std::fprintf(s.file, "%llu,%llu,%llu,", static_cast<unsigned long long>(row.frame_id),
                  static_cast<unsigned long long>(row.t_ns),
-                 static_cast<unsigned long long>(row.a_frame_id),
+                 static_cast<unsigned long long>(row.a_frame_id));
+    // a_seq and a_seq_issued are sequence numbers, not deltas; an unknown a_seq stays empty.
+    if (row.a_seq != NoSeq) {
+        std::fprintf(s.file, "%llu", static_cast<unsigned long long>(row.a_seq));
+    }
+    std::fprintf(s.file, ",%llu,%llu,%llu,%d,%llu,%llu,%llu",
+                 static_cast<unsigned long long>(row.a_seq_issued),
                  static_cast<unsigned long long>(row.toggles1),
                  static_cast<unsigned long long>(row.toggles2), paused ? 1 : 0,
                  static_cast<unsigned long long>(row.dropped),
@@ -253,7 +260,7 @@ u64 FrameId() noexcept {
     return frame_published.load(std::memory_order_relaxed);
 }
 
-void OnFlip(u64 a_frame_id) noexcept {
+void OnFlip(u64 a_frame_id, u64 a_seq) noexcept {
     if (!enabled) {
         return;
     }
@@ -293,6 +300,8 @@ void OnFlip(u64 a_frame_id) noexcept {
         row.t_ns = NowNs();
         row.tsc = Cycles();
         row.a_frame_id = a_frame_id;
+        row.a_seq = a_seq;
+        row.a_seq_issued = stage_a.seq.Load();
         row.toggles1 = __atomic_load_n(&runtime_disabled_optimizations, __ATOMIC_RELAXED);
         row.toggles2 = __atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED);
         row.dropped = s.dropped.load(std::memory_order_relaxed) +

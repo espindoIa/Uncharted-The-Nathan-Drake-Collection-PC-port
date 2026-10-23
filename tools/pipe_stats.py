@@ -7,6 +7,12 @@ the same frames), each stage's time per frame and share of the frame, how full t
 was when stage A committed, and which stage the medians point at. --split-toggles reports the
 frames of each toggles2 value separately (a live A/B inside one run; the first frame after each
 switch is left out). The rec_*/sub_* columns are reserved and stay empty for now.
+
+a_seq is the stage A number of the frame a row's flip showed (empty while the flip request does
+not carry it); a_seq_issued is how far stage A had numbered at that flip, so the difference is
+how many frames deep the pipeline was. Records tagged with a_seq (<file>.gpu.csv: a_seq,label,
+gpu_ms, written by the GPU timestamp side when it exists) are joined to rows on a_seq, never on
+frame_id: the flip that shows a frame comes a variable number of frames after stage A built it.
 """
 import argparse
 import csv
@@ -33,6 +39,36 @@ def load(path):
     for row in csv.DictReader(lines[1:]):
         rows.append({k: (int(v) if v not in ("", None) else None) for k, v in row.items()})
     return header, rows
+
+
+def load_gpu(path):
+    """<file>.gpu.csv: one line per GPU timestamp range, a_seq,label,gpu_ms (None if absent)."""
+    if not os.path.exists(path):
+        return None
+    with open(path, newline="") as f:
+        reader = csv.DictReader(line for line in f if not line.startswith("#"))
+        if reader.fieldnames is None or "a_seq" not in reader.fieldnames:
+            sys.exit(f"{path}: no a_seq column (schema 1 keys GPU records by a_seq)")
+        return [{"a_seq": int(r["a_seq"]), "label": r["label"], "gpu_ms": float(r["gpu_ms"])}
+                for r in reader]
+
+
+def join_by_a_seq(rows, records):
+    """{frame_id: {label: gpu_ms}} for rows whose a_seq is known, plus the records no row showed
+    (frames still in flight at the end, or shown by a dropped row)."""
+    by_seq = {}
+    for rec in records:
+        labels = by_seq.setdefault(rec["a_seq"], {})
+        labels[rec["label"]] = labels.get(rec["label"], 0.0) + rec["gpu_ms"]
+    joined, shown = {}, set()
+    for row in rows:
+        seq = row.get("a_seq")
+        if seq is None:
+            continue
+        joined[row["frame_id"]] = by_seq.get(seq, {})
+        shown.add(seq)
+    unmatched = sorted(seq for seq in by_seq if seq not in shown)
+    return joined, unmatched
 
 
 def pick(values, q):
@@ -97,6 +133,23 @@ def report(rows, title):
     else:
         verdict = "no CPU stage in this file is saturated: look at the recorder, GPU or present"
     print("points at:", verdict)
+    seq_rows = [r for r in frames if r.get("a_seq") is not None]
+    if seq_rows:
+        depth = [r["a_seq_issued"] - r["a_seq"] for r in seq_rows]
+        print(f"pipeline depth at flip (a_seq_issued - a_seq) p50 {pick(depth, .5)} "
+              f"p95 {pick(depth, .95)} max {max(depth)} ({len(seq_rows)} frames with a_seq)")
+    return frames
+
+
+def report_gpu(frames, records):
+    joined, unmatched = join_by_a_seq(frames, records)
+    print(f"== GPU (joined on a_seq): {len(joined)} frames, {len(unmatched)} frames not joined "
+          "(still in flight at the end, or a dropped or left-out row)")
+    labels = sorted({label for per in joined.values() for label in per})
+    for label in labels:
+        values = [per[label] for per in joined.values() if label in per]
+        print(f"gpu {label:20s} ms p50 {pick(values, .5):7.3f} p95 {pick(values, .95):7.3f} "
+              f"({len(values)} frames)")
 
 
 def main():
@@ -114,7 +167,10 @@ def main():
     if rows and rows[-1]["dropped"]:
         print(f"note: {rows[-1]['dropped']} rows dropped (ring full or a second flip thread)")
     if not args.split_toggles:
-        report(rows, args.file)
+        frames = report(rows, args.file)
+        records = load_gpu(args.file + ".gpu.csv")
+        if frames and records is not None:
+            report_gpu(frames, records)
         return
     # A frame counts for a group only if the flip before it had the same toggles (report()
     # needs consecutive frame_ids), so the frame in which the toggle changed is left out.

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // gow3 23 Oct 2026: GOW3_PIPE_STATS (gpu/shim/gow3_pipe_stats.h) without the game: stage A and
 // stage B threads add to their counters while flips come at varying rates, from two threads at
-// times, then idle, then flips with no pause (full ring), then a shutdown racing a flip thread.
-// The CSV must add up to exactly what the stage threads counted.
+// times, then idle, then flips that show frames 1-2 frames after stage A numbered them (a_seq),
+// then flips with no pause (full ring), then a shutdown racing a flip thread.
+// The CSV must add up to exactly what the stage threads counted, and a_seq must name the frame
+// each row shows.
 // Build: ninja -C out/gpu pipe-stats-test (or the g++ line in docs; run under TSan/ASan/UBSan).
 #include <atomic>
 #include <cassert>
@@ -11,6 +13,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <deque>
+#include <map>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <string>
@@ -174,6 +179,79 @@ int main(int argc, char** argv) {
     std::printf("idle: process CPU %.3f ms over 500 ms\n", idle_cpu_ms);
     assert(idle_cpu_ms < 50.0);
 
+    // Flips lag stage A: A numbers each frame at its flip packet (NoteFlipPacket) and tags its
+    // side records (what the recorder, submit and GPU files will hold) with that number; the
+    // flip that shows the frame comes 1-2 frames later and passes the number on. Joining on
+    // a_seq finds every frame's record; tagging with FrameId() read when A started the frame
+    // (the frame_id the flip thread had reached) does not.
+    struct LagFrame {
+        std::uint64_t seq, value, naive_tag;
+    };
+    std::map<std::uint64_t, std::uint64_t> expected_seq;    // frame_id -> a_seq it shows
+    std::map<std::uint64_t, std::uint64_t> side_by_seq;      // a_seq -> side record value
+    std::map<std::uint64_t, std::vector<std::uint64_t>> side_by_naive; // FrameId() at start
+    constexpr std::uint64_t lag_frames = 300;
+    {
+        std::mutex lag_mutex;
+        std::deque<LagFrame> in_flight; // frames A finished and no flip has shown yet
+        std::thread lag_a([&] {
+            std::mt19937 lag_rng{4};
+            const std::uint64_t first = PS::stage_a.seq.Load();
+            for (std::uint64_t i = 0; i < lag_frames; ++i) {
+                const std::uint64_t naive_tag = PS::FrameId();
+                PS::stage_a.packets.Add(1);
+                ++a_total;
+                const std::uint64_t seq = PS::NoteFlipPacket();
+                assert(seq == first + i + 1);
+                for (;;) { // at most 3 frames in flight, like a bounded pipeline
+                    {
+                        std::scoped_lock lock{lag_mutex};
+                        if (in_flight.size() < 3) {
+                            in_flight.push_back({seq, seq * 10 + 7, naive_tag});
+                            break;
+                        }
+                    }
+                    std::this_thread::sleep_for(50us);
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(100 + lag_rng() % 300));
+            }
+        });
+        std::mt19937 lag_rng{5};
+        std::uint64_t shown = 0;
+        while (shown < lag_frames) {
+            const std::size_t lag = 1 + lag_rng() % 2; // this flip shows the frame 1 or 2 back
+            LagFrame frame{};
+            {
+                std::scoped_lock lock{lag_mutex};
+                const bool last = shown + in_flight.size() == lag_frames;
+                if (in_flight.size() < (last ? 1 : lag + 1)) {
+                    frame.seq = 0;
+                } else {
+                    frame = in_flight.front();
+                    in_flight.pop_front();
+                }
+            }
+            if (!frame.seq) {
+                std::this_thread::sleep_for(50us);
+                continue;
+            }
+            if (shown == 100) {
+                SetToggles2(Gow3Toggle::PipeStats); // a_seq keeps counting while paused
+            }
+            if (shown == 150) {
+                SetToggles2(0);
+            }
+            PS::OnFlip(0, frame.seq);
+            expected_seq[PS::FrameId()] = frame.seq;
+            side_by_seq[frame.seq] = frame.value;
+            side_by_naive[frame.naive_tag].push_back(frame.value);
+            ++shown;
+            std::this_thread::sleep_for(std::chrono::microseconds(100 + lag_rng() % 300));
+        }
+        lag_a.join();
+    }
+    PS::OnFlip(0); // closes the last lag frame
+
     // Saturation: flips with no pause fill the ring; the extra rows are dropped, never waited on.
     const std::uint64_t dropped_before = PS::RowsDropped();
     const auto sat_start = std::chrono::steady_clock::now();
@@ -230,6 +308,8 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "missing column %s\n", name);
         std::abort();
     };
+    const std::size_t c_seq = column("a_seq"), c_issued = column("a_seq_issued");
+    std::uint64_t seq_rows = 0, last_issued = 0;
     const std::size_t c_frame = column("frame_id"), c_paused = column("stats_paused"),
                       c_a = column("a_packets"), c_b = column("b_packets"),
                       c_dropped = column("dropped"), c_sleeps = column("b_sleeps");
@@ -244,6 +324,21 @@ int main(int argc, char** argv) {
         const std::uint64_t frame = std::strtoull(cells[c_frame].c_str(), nullptr, 10);
         assert(frame > last_frame);
         last_frame = frame;
+        // a_seq: the frame the flip passed on, empty when it passed none; a_seq_issued: how
+        // far stage A had numbered by then (never behind the frame shown, never decreasing).
+        const std::uint64_t issued = std::strtoull(cells[c_issued].c_str(), nullptr, 10);
+        assert(issued >= last_issued);
+        last_issued = issued;
+        const auto want = expected_seq.find(frame);
+        if (want == expected_seq.end()) {
+            assert(cells[c_seq].empty());
+        } else {
+            const std::uint64_t seq = std::strtoull(cells[c_seq].c_str(), nullptr, 10);
+            assert(seq == want->second);
+            assert(issued >= seq && issued - seq <= 3);
+            assert(side_by_seq.at(seq) == seq * 10 + 7); // the a_seq join finds its record
+            ++seq_rows;
+        }
         const std::uint64_t dropped = std::strtoull(cells[c_dropped].c_str(), nullptr, 10);
         assert(dropped >= last_dropped);
         last_dropped = dropped;
@@ -262,6 +357,17 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(paused_rows),
                 static_cast<unsigned long long>(a_sum), static_cast<unsigned long long>(a_total),
                 static_cast<unsigned long long>(b_sum), static_cast<unsigned long long>(b_total));
+    // The naive tag: several frames share one FrameId() value and others get none.
+    std::uint64_t naive_shared = 0;
+    for (const auto& [tag, values] : side_by_naive) {
+        naive_shared += values.size() > 1;
+    }
+    std::printf("lag: %llu rows joined on a_seq, %zu naive tags for %llu frames (%llu shared)\n",
+                static_cast<unsigned long long>(seq_rows), side_by_naive.size(),
+                static_cast<unsigned long long>(lag_frames),
+                static_cast<unsigned long long>(naive_shared));
+    assert(seq_rows == lag_frames);
+    assert(naive_shared > 0);
     (void)counted_while_paused;
     (void)b_busy_cyc;
     assert(lines.size() - 2 == written);

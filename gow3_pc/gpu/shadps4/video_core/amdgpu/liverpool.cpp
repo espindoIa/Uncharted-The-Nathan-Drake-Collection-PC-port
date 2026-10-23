@@ -1847,6 +1847,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     // special NOP packets. For convenience lets assume that it does.
                     // gow3: after the writes before it (the buffer label: WriteData, which
                     // may still be queued on the draw recording thread).
+                    // Stage A numbers the guest flip (a_seq, gow3_pipe_stats.h).
+                    Gow3PipeStats::NoteFlipPacket();
                     if (rasterizer) {
                         Vulkan::SubmitLog::Event("N");
                         rasterizer->RunInOrder(&SignalFlip, header, sizeof(u32),

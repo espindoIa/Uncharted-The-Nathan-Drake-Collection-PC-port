@@ -844,8 +844,13 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
 
     if (!is_eop) {
         // Non EOP flips can arrive from any thread so ask GPU thread to perform them
-        liverpool->SendCommand([=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop); },
-                               "flip");
+        liverpool->SendCommand(
+            [=, this]() {
+                // gow3: stage A numbers the guest flip (a_seq, gow3_pipe_stats.h).
+                Gow3PipeStats::NoteFlipPacket();
+                SubmitFlipInternal(port, index, flip_arg, is_eop);
+            },
+            "flip");
     } else {
         SubmitFlipInternal(port, index, flip_arg, is_eop);
     }

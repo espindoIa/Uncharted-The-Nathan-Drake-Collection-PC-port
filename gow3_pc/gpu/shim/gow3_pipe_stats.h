@@ -63,6 +63,9 @@ struct alignas(64) StageA {
     Single packets, bytes, wake_notifies;
     Single occ_samples;
     Single occ[OccBuckets];
+    /// a_seq: guest flips stage A has processed (NoteFlipPacket). Counted whenever stats are
+    /// requested, paused or not, so the numbering never skips.
+    Single seq;
 };
 
 /// Written by stage B (gow3:DrawRec) only.
@@ -140,12 +143,29 @@ inline void NoteDrain(DrainClass cls, u64 spin_cycles, u64 yield_cycles) noexcep
     }
 }
 
+/// `a_seq` of a flip whose frame's sequence number is not known (written as an empty cell).
+inline constexpr u64 NoSeq = ~0ull;
+
+/// Stage A only, at each guest flip it processes (the PM4 PatchedFlip packet, or a flip sent
+/// with sceVideoOutSubmitFlip, which runs as a command on the same thread). Returns the new
+/// a_seq: the frame that flip ends. Work stage A queues after it belongs to frame a_seq + 1.
+/// Docs: docs/team/PIPE_STATS_SCHEMA_v1.md (join key for the recorder, submit and GPU files).
+inline u64 NoteFlipPacket() noexcept {
+    if (!enabled) {
+        return 0;
+    }
+    const u64 seq = stage_a.seq.Load() + 1;
+    stage_a.seq.value.store(seq, std::memory_order_relaxed);
+    return seq;
+}
+
 #if GOW3_PIPE_STATS_BUILD
 /// Flip thread, once per VideoOutDriver::Flip: numbers the frame and queues a snapshot for the
-/// writer thread (started on the first call). `a_frame_id` is Gow3Stats::gpu_frames.
-/// Lock-free and allocation-free after the first call; a second thread flipping at the same
-/// time drops its row instead of waiting.
-void OnFlip(u64 a_frame_id) noexcept;
+/// writer thread (started on the first call). `a_frame_id` is Gow3Stats::gpu_frames; `a_seq`
+/// is the NoteFlipPacket number of the frame shown, NoSeq while the flip request does not carry
+/// it (v1: not carried yet). Lock-free and allocation-free after the first call; a second
+/// thread flipping at the same time drops its row instead of waiting.
+void OnFlip(u64 a_frame_id, u64 a_seq = NoSeq) noexcept;
 
 /// Last frame number OnFlip handed out (0 before the first flip).
 u64 FrameId() noexcept;
@@ -159,7 +179,7 @@ u64 RowsWritten() noexcept;
 u64 RowsDropped() noexcept;
 
 #else
-inline void OnFlip(u64) noexcept {}
+inline void OnFlip(u64, u64 = NoSeq) noexcept {}
 inline u64 FrameId() noexcept {
     return 0;
 }
