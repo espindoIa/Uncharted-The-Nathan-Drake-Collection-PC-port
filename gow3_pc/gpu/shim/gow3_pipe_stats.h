@@ -16,14 +16,17 @@
 //   stage B, which already reads __rdtsc there.
 // - The flip pushes one raw snapshot into a preallocated ring; a background thread
 //   (gow3:PipeStats) turns snapshots into CSV rows. A full ring drops the row (counted).
-// - Off (no GOW3_PIPE_STATS): every hook is one predictable branch on a flag read once.
-//   GOW3_PIPE_STATS_BUILD=0 at compile time removes the hooks entirely.
+// - Compiled in only with GOW3_PIPE_STATS_BUILD=1 (CMake option GOW3_PIPE_STATS_BUILD, OFF by
+//   default: team ADR-0004 keeps release builds at 0 until DrawPipe::Commit is shown to stay
+//   inlined and an in-game A/A shows no cost). At 0 every hook is removed at compile time.
+// - Built in but off (no GOW3_PIPE_STATS): every hook is one predictable branch on a flag read
+//   once.
 // - Toggle second word bit 16777216 (Gow3Toggle::PipeStats) pauses collection live (A/B of the
 //   instrumentation's own cost); rows keep coming with stats_paused=1 and zero counters.
 #pragma once
 
 #ifndef GOW3_PIPE_STATS_BUILD
-#define GOW3_PIPE_STATS_BUILD 1
+#define GOW3_PIPE_STATS_BUILD 0
 #endif
 
 #include <atomic>

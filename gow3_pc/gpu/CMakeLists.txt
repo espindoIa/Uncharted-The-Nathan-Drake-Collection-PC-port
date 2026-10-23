@@ -40,6 +40,15 @@ elseif (GOW3_PGO STREQUAL "use")
                         -fprofile-correction -Wno-missing-profile -Wno-coverage-mismatch)
 endif()
 
+# gow3: GOW3_PIPE_STATS per-frame collector (shim/gow3_pipe_stats.h). OFF: the hooks are not
+# compiled (release builds, team ADR-0004). ON for measurement builds:
+# GOW3_PIPE_STATS_BUILD=ON ./build.sh. One value for every target: the header's inline variables
+# differ between 0 and 1.
+option(GOW3_PIPE_STATS_BUILD "Compile the GOW3_PIPE_STATS collector" OFF)
+if (GOW3_PIPE_STATS_BUILD)
+    add_compile_definitions(GOW3_PIPE_STATS_BUILD=1)
+endif()
+
 find_package(Vulkan REQUIRED)
 find_package(fmt REQUIRED)
 find_package(Boost REQUIRED)
@@ -384,6 +393,8 @@ set_property(SOURCE shim/gow3_pipe_stats.cpp APPEND PROPERTY
 add_executable(pipe-stats-test EXCLUDE_FROM_ALL ../tests/test_pipe_stats.cpp shim/gow3_pipe_stats.cpp)
 target_include_directories(pipe-stats-test PRIVATE shim shadps4)
 target_compile_options(pipe-stats-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+# The test is the collector itself: always built in, whatever the game build uses.
+target_compile_definitions(pipe-stats-test PRIVATE GOW3_PIPE_STATS_BUILD=1)
 target_link_libraries(pipe-stats-test PRIVATE -pthread)
 add_executable(flat-camera-test EXCLUDE_FROM_ALL ../tests/test_flat_camera.cpp)
 target_compile_options(flat-camera-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)

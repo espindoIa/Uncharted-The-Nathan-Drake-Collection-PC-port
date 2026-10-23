@@ -21,8 +21,9 @@ MINGW*|MSYS*)
         fi
     done
     cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DGOW3_PGO=off \
-        -DGOW3_LTO="${GOW3_LTO:-OFF}" -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ >/dev/null
-    echo "GPU library and loader: LTO ${GOW3_LTO:-OFF}"
+        -DGOW3_LTO="${GOW3_LTO:-OFF}" -DGOW3_PIPE_STATS_BUILD="${GOW3_PIPE_STATS_BUILD:-OFF}" \
+        -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ >/dev/null
+    echo "GPU library and loader: LTO ${GOW3_LTO:-OFF}, pipe stats ${GOW3_PIPE_STATS_BUILD:-OFF}"
     if ! ninja -C out/gpu gow3-probe gow3-gpu-capabilities > out/gpu-build.log 2>&1; then
         grep -v '^\[' out/gpu-build.log | tail -40 >&2
         echo 'Build failed (full log: out/gpu-build.log)' >&2; exit 1
@@ -54,6 +55,7 @@ read -r -a libraries <<< "$(pkg-config --libs vulkan sdl3 libavcodec libavutil l
 # GPU library (shadPS4 video core + drivers), built by CMake into out/gpu/libgow3gpu.so.
 # GOW3_PGO: generate (instrumented build that writes pgo/ while the game runs), use, off.
 # Default: use the profile in pgo/ when there is one. GOW3_LTO=OFF disables link-time optimization.
+# GOW3_PIPE_STATS_BUILD=ON compiles the GOW3_PIPE_STATS collector in (measurement builds only).
 pgo=${GOW3_PGO:-}
 if [[ -z $pgo ]]; then
     if [[ -n $(find pgo -name '*.gcda' -print -quit 2>/dev/null) ]]; then pgo=use; else pgo=off; fi
@@ -70,8 +72,9 @@ for patch in gpu/patches/fsr-vulkan/*.patch; do
     fi
 done
 cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DGOW3_PGO="$pgo" \
-    -DGOW3_LTO="${GOW3_LTO:-ON}" -DGOW3_PGO_DIR="$PWD/pgo" >/dev/null
-echo "GPU library: PGO $pgo, LTO ${GOW3_LTO:-ON}"
+    -DGOW3_LTO="${GOW3_LTO:-ON}" -DGOW3_PGO_DIR="$PWD/pgo" \
+    -DGOW3_PIPE_STATS_BUILD="${GOW3_PIPE_STATS_BUILD:-OFF}" >/dev/null
+echo "GPU library: PGO $pgo, LTO ${GOW3_LTO:-ON}, pipe stats ${GOW3_PIPE_STATS_BUILD:-OFF}"
 # A failed GPU build must stop here: an older libgow3gpu.so would otherwise be used silently.
 if ! ninja -C out/gpu gow3gpu > out/gpu-build.log 2>&1; then
     grep -v '^\[' out/gpu-build.log | tail -40 >&2
