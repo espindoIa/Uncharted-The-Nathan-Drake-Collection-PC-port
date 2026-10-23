@@ -77,6 +77,11 @@ struct Row {
 };
 
 constexpr u64 RingSize = 1024; ///< ~10 s at 100 fps; the writer empties it every 100 ms
+/// The writer wakes this often, writes what the ring holds and flushes it to the file, so a
+/// process that ends without Shutdown (std::_Exit, _exit) loses only the rows queued since.
+constexpr auto WritePeriod = std::chrono::milliseconds(100);
+/// Longest FlushForExit waits for the writer.
+constexpr auto FlushTimeout = std::chrono::milliseconds(500);
 
 struct State {
     std::FILE* file = nullptr;
@@ -87,13 +92,14 @@ struct State {
     std::atomic<u64> dropped{0};
     std::atomic<u64> written{0};
     std::atomic<bool> stop{false};
-    std::mutex mutex; ///< writer sleep only, never taken on the flip path
+    std::mutex mutex; ///< writer sleep and FlushForExit only, never taken on the flip path
     std::condition_variable cv;
+    u64 flush_requested = 0; ///< FlushForExit calls (guarded by mutex)
+    u64 flush_done = 0;      ///< the last request the writer had flushed for (guarded by mutex)
     std::thread thread;
     // Writer-thread state.
     Row previous{};
     bool have_previous = false;
-    Clock::time_point last_flush{};
     u64 first_t_ns = 0, first_tsc = 0;
     double tsc_per_ns = 0.0;
 };
@@ -218,19 +224,30 @@ void WriterMain(State* s) {
     s->tsc_per_ns = t1 > t0 ? static_cast<double>(c1 - c0) / static_cast<double>(t1 - t0) : 0.0;
     WriteHeader(*s, s->tsc_per_ns * 1e9);
     std::fflush(s->file);
-    s->last_flush = Clock::now();
-    while (!s->stop.load(std::memory_order_acquire)) {
-        DrainRing(*s);
-        if (Clock::now() - s->last_flush >= std::chrono::seconds(1)) {
+    // Each pass writes the queued rows and flushes them: the file holds every row queued
+    // before the pass began (the stdio buffer is empty between passes). The mutex is only held
+    // to read and answer requests, never while writing, so FlushForExit cannot wait on a write
+    // that waits on it.
+    std::unique_lock lock{s->mutex};
+    for (;;) {
+        const bool stopping = s->stop.load(std::memory_order_acquire);
+        const u64 request = s->flush_requested;
+        lock.unlock();
+        if (DrainRing(*s)) {
             std::fflush(s->file);
-            s->last_flush = Clock::now();
         }
-        std::unique_lock lock{s->mutex};
-        s->cv.wait_for(lock, std::chrono::milliseconds(100),
-                       [s] { return s->stop.load(std::memory_order_relaxed); });
+        lock.lock();
+        if (s->flush_done != request) {
+            s->flush_done = request;
+            s->cv.notify_all();
+        }
+        if (stopping) {
+            break;
+        }
+        s->cv.wait_for(lock, WritePeriod, [s] {
+            return s->stop.load(std::memory_order_relaxed) || s->flush_requested != s->flush_done;
+        });
     }
-    DrainRing(*s);
-    std::fflush(s->file);
 }
 
 bool Start() {
@@ -318,6 +335,25 @@ void OnFlip(u64 a_frame_id, u64 a_seq) noexcept {
     frame_epoch.store(frame_epoch.load(std::memory_order_relaxed) + 1,
                       std::memory_order_relaxed);
     s.flipping.store(false, std::memory_order_release);
+}
+
+void FlushForExit() noexcept {
+    if (phase.load(std::memory_order_acquire) != 1) {
+        return; // not running: nothing queued, or Shutdown already wrote it
+    }
+    State& s = *state.load(std::memory_order_acquire);
+    try {
+        std::unique_lock lock{s.mutex};
+        const u64 request = ++s.flush_requested;
+        s.cv.notify_all();
+        // Bounded: a writer that cannot run (starved, or a stuck disk) does not keep the
+        // process from exiting; the rows it had not written are lost.
+        s.cv.wait_for(lock, FlushTimeout, [&s, request] {
+            return s.flush_done >= request || s.stop.load(std::memory_order_relaxed);
+        });
+    } catch (...) {
+        // std::system_error from the mutex or the wait: exit without the last rows.
+    }
 }
 
 void Shutdown() noexcept {

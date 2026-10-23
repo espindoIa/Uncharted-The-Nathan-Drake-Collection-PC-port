@@ -10,6 +10,7 @@
 #ifndef _WIN32
 #include <sys/resource.h>
 #endif
+#include "gow3_pipe_stats.h"
 #include "gow3_toggles.h"
 #include <algorithm>
 #include <atomic>
@@ -518,6 +519,8 @@ extern "C" int gow3gpu_init(const Gow3GpuConfig* config) {
         }
         LOG_INFO(Frontend, "Window closed by user");
         std::fflush(stdout);
+        // _Exit skips atexit: write the GOW3_PIPE_STATS rows queued so far (bounded wait).
+        Gow3PipeStats::FlushForExit();
         std::_Exit(0);
     });
     g_window_thread.detach();

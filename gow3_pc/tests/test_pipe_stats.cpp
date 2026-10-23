@@ -5,6 +5,10 @@
 // then flips with no pause (full ring), then a shutdown racing a flip thread.
 // The CSV must add up to exactly what the stage threads counted, and a_seq must name the frame
 // each row shows.
+// Then the ways the game ends (child processes): std::_Exit with no flush in the middle of a
+// burst of rows and during steady flips (only the rows queued since the writer's last pass may
+// be lost, at most the last line is cut), and FlushForExit then std::_Exit (nothing queued
+// before the call is lost).
 // Build: ninja -C out/gpu pipe-stats-test (or the g++ line in docs; run under TSan/ASan/UBSan).
 #include <atomic>
 #include <cassert>
@@ -14,6 +18,7 @@
 #include <cstring>
 #include <ctime>
 #include <deque>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <random>
@@ -24,6 +29,7 @@
 #ifdef _WIN32
 #include <process.h>
 #else
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 #include "gow3_pipe_stats.h"
@@ -41,7 +47,7 @@ void SetCurrentThreadPriority(ThreadPriority) {}
 namespace PS = Gow3PipeStats;
 using namespace std::chrono_literals;
 
-static const char* const csv_path = "pipe-stats-test.csv";
+static const char* const test_dir = "pipe-stats-test.d";
 
 static void SetToggles2(std::uint64_t value) {
     __atomic_store_n(&runtime_disabled_optimizations2, value, __ATOMIC_RELEASE);
@@ -64,20 +70,8 @@ static std::vector<std::string> Split(const std::string& line) {
     return out;
 }
 
-int main(int argc, char** argv) {
-    (void)argc;
-    if (!std::getenv("GOW3_PIPE_STATS")) {
-        // `enabled` is read once at startup: run again with the variable set.
-#ifdef _WIN32
-        _putenv_s("GOW3_PIPE_STATS", csv_path);
-        return static_cast<int>(_spawnv(_P_WAIT, argv[0], argv));
-#else
-        setenv("GOW3_PIPE_STATS", csv_path, 1);
-        execv(argv[0], argv);
-        std::perror("execv");
-        return 1;
-#endif
-    }
+static int RunMain() {
+    const char* const csv_path = std::getenv("GOW3_PIPE_STATS");
     assert(PS::enabled);
 
     // Occupancy buckets: 0, <1K, <4K, <16K, <64K, <256K, <1M, <4M, >=4M.
@@ -375,9 +369,281 @@ int main(int argc, char** argv) {
     assert(a_sum == a_total + 0 * a_base && a_base == 0);
     assert(b_sum == b_total && b_base == 0);
     assert(sleeps_sum == PS::stage_b.sleeps.Load());
-    if (!std::getenv("GOW3_PIPE_STATS_KEEP")) {
-        std::remove(csv_path);
-    }
     std::puts("pipe stats: ok");
+    return 0;
+}
+
+// ---- How the game ends: child processes that end with std::_Exit, as the game does. ----
+
+/// A CSV as a reader that tolerates a cut last line sees it.
+struct Parsed {
+    std::vector<std::string> columns;
+    std::vector<std::vector<std::string>> rows; ///< complete rows
+    int cut = 0;              ///< lines with the wrong width or no newline (B1: at most the last)
+    bool cut_before_end = false;
+};
+
+static Parsed Parse(const std::string& path) {
+    Parsed out;
+    std::FILE* file = std::fopen(path.c_str(), "rb");
+    assert(file);
+    std::string text;
+    char buffer[65536];
+    for (std::size_t n; (n = std::fread(buffer, 1, sizeof(buffer), file)) > 0;) {
+        text.append(buffer, n);
+    }
+    std::fclose(file);
+    assert(text.rfind("# gow3_pipe_stats schema=1 ", 0) == 0);
+    std::size_t pos = text.find('\n') + 1;
+    const std::size_t columns_end = text.find('\n', pos);
+    assert(columns_end != std::string::npos);
+    out.columns = Split(text.substr(pos, columns_end - pos));
+    pos = columns_end + 1;
+    while (pos < text.size()) {
+        const std::size_t end = text.find('\n', pos);
+        const bool complete_line = end != std::string::npos;
+        const std::string line = text.substr(pos, (complete_line ? end : text.size()) - pos);
+        pos = complete_line ? end + 1 : text.size();
+        const auto cells = Split(line);
+        if (!complete_line || cells.size() != out.columns.size()) {
+            ++out.cut;
+            out.cut_before_end |= pos < text.size();
+            continue;
+        }
+        out.rows.push_back(cells);
+    }
+    return out;
+}
+
+static std::size_t Column(const Parsed& p, const char* name) {
+    for (std::size_t i = 0; i < p.columns.size(); ++i) {
+        if (p.columns[i] == name) {
+            return i;
+        }
+    }
+    std::fprintf(stderr, "missing column %s\n", name);
+    std::abort();
+}
+
+static std::uint64_t Cell(const std::vector<std::string>& row, std::size_t column) {
+    return std::strtoull(row[column].c_str(), nullptr, 10);
+}
+
+/// Complete rows are frames 2, 3, ... in order; a gap is a row the ring dropped (counted).
+/// Returns the last frame_id on file (1: only the baseline flip, which writes no row).
+static std::uint64_t CheckRows(const Parsed& p) {
+    assert(!p.cut_before_end && p.cut <= 1);
+    const std::size_t c_frame = Column(p, "frame_id"), c_dropped = Column(p, "dropped");
+    std::uint64_t last_frame = 1, last_dropped = 0;
+    for (const auto& row : p.rows) {
+        const std::uint64_t frame = Cell(row, c_frame), dropped = Cell(row, c_dropped);
+        assert(dropped >= last_dropped);
+        assert(frame - last_frame == 1 + (dropped - last_dropped));
+        last_frame = frame;
+        last_dropped = dropped;
+    }
+    return last_frame;
+}
+
+static void WriteInfo(std::uint64_t flips, std::uint64_t extra) {
+    const std::string path = std::string(std::getenv("GOW3_PIPE_STATS")) + ".info";
+    std::FILE* file = std::fopen(path.c_str(), "w");
+    assert(file);
+    std::fprintf(file, "%llu %llu\n", static_cast<unsigned long long>(flips),
+                 static_cast<unsigned long long>(extra));
+    std::fclose(file);
+}
+
+static void ReadInfo(const std::string& csv, std::uint64_t& flips, std::uint64_t& extra) {
+    std::FILE* file = std::fopen((csv + ".info").c_str(), "r");
+    assert(file);
+    unsigned long long a = 0, b = 0;
+    const int n = std::fscanf(file, "%llu %llu", &a, &b);
+    assert(n == 2);
+    (void)n;
+    std::fclose(file);
+    flips = a;
+    extra = b;
+}
+
+/// Child: flips, then std::_Exit(0) with no Shutdown, as the window thread does.
+static int RunExit(const std::string& mode) {
+    assert(PS::enabled);
+    PS::OnFlip(0); // baseline, starts the writer
+    std::this_thread::sleep_for(100ms); // past the writer's 50 ms calibration
+    if (mode == "exit-burst") {
+        // Bursts of 1000 rows with no pause (the ring holds 1024), then the exit as soon as the
+        // writer has started on the last burst: it lands in the middle of a pass.
+        for (int burst = 0; burst < 5; ++burst) {
+            for (int i = 0; i < 1000; ++i) {
+                PS::OnFlip(1);
+            }
+            std::this_thread::sleep_for(120ms);
+        }
+        const std::uint64_t written = PS::RowsWritten();
+        for (int i = 0; i < 1000; ++i) {
+            PS::OnFlip(1);
+        }
+        const std::uint64_t flips = PS::FrameId();
+        while (PS::RowsWritten() == written) {
+            std::this_thread::sleep_for(20us);
+        }
+        WriteInfo(flips, PS::RowsDropped());
+        std::_Exit(0);
+    }
+    if (mode == "exit-steady") {
+        // One flip every 2 ms, then exit at once: only the rows since the last pass are lost.
+        const auto end = std::chrono::steady_clock::now() + 700ms;
+        while (std::chrono::steady_clock::now() < end) {
+            PS::OnFlip(1);
+            std::this_thread::sleep_for(2ms);
+        }
+        const std::uint64_t flips = PS::FrameId();
+        WriteInfo(flips, PS::RowsDropped());
+        std::_Exit(0);
+    }
+    // exit-flush: flips stopped, then FlushForExit: every flip is on file.
+    // exit-flush-live: another thread keeps flipping through FlushForExit and _Exit.
+    const bool live = mode == "exit-flush-live";
+    std::atomic<bool> run{true};
+    std::thread flipper([&] {
+        while (run.load(std::memory_order_relaxed)) {
+            PS::OnFlip(2);
+            std::this_thread::sleep_for(1ms);
+        }
+    });
+    std::this_thread::sleep_for(400ms);
+    if (!live) {
+        run.store(false);
+        flipper.join();
+    }
+    const std::uint64_t flips = PS::FrameId();
+    const auto t0 = std::chrono::steady_clock::now();
+    PS::FlushForExit();
+    const auto waited = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+    WriteInfo(flips, static_cast<std::uint64_t>(waited));
+    std::_Exit(0); // `flipper` may still be flipping (live): _Exit does not join it
+}
+
+static int Spawn(const char* self, const char* mode, const std::string& csv) {
+#ifdef _WIN32
+    _putenv_s("GOW3_PIPE_STATS", csv.c_str());
+    const char* args[] = {self, mode, nullptr};
+    return static_cast<int>(_spawnv(_P_WAIT, self, args));
+#else
+    // The driver runs no other thread, so setenv before fork is safe.
+    setenv("GOW3_PIPE_STATS", csv.c_str(), 1);
+    const pid_t pid = fork();
+    if (pid == 0) {
+        char* args[] = {const_cast<char*>(self), const_cast<char*>(mode), nullptr};
+        execv(self, args);
+        std::_Exit(127);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    unsetenv("GOW3_PIPE_STATS");
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+#endif
+}
+
+static std::string Child(const char* self, const char* mode, const char* name) {
+    const std::string csv = std::string(test_dir) + "/" + name;
+    const int code = Spawn(self, mode, csv);
+    if (code != 0) {
+        std::fprintf(stderr, "child %s exited with %d\n", mode, code);
+        std::exit(1);
+    }
+    return csv;
+}
+
+static void TestExits(const char* self) {
+    // Frames after the last row on file were either dropped by a full ring (counted in
+    // `dropped`) or queued and lost with the process.
+    auto lost_queued = [](const Parsed& p, std::uint64_t flips, std::uint64_t dropped_total) {
+        const std::uint64_t last = CheckRows(p);
+        const std::uint64_t dropped_on_file =
+            p.rows.empty() ? 0 : Cell(p.rows.back(), Column(p, "dropped"));
+        assert(last <= flips && dropped_total >= dropped_on_file);
+        return flips - last - (dropped_total - dropped_on_file);
+    };
+    { // _Exit in the middle of a pass: complete rows in order, at most the last line cut.
+        const std::string csv = Child(self, "exit-burst", "burst.csv");
+        std::uint64_t flips = 0, dropped = 0;
+        ReadInfo(csv, flips, dropped);
+        const Parsed p = Parse(csv);
+        const std::uint64_t lost = lost_queued(p, flips, dropped);
+        std::printf("exit mid-pass: %llu flips, %zu complete rows, %llu queued rows lost, "
+                    "%d cut line(s)\n",
+                    static_cast<unsigned long long>(flips), p.rows.size(),
+                    static_cast<unsigned long long>(lost), p.cut);
+        std::fflush(stdout);
+        assert(lost <= 1024); // at most one ring of rows
+    }
+    { // _Exit during steady flips: only rows since the last pass (100 ms here: ~50) are lost.
+        const std::string csv = Child(self, "exit-steady", "steady.csv");
+        std::uint64_t flips = 0, dropped = 0;
+        ReadInfo(csv, flips, dropped);
+        const Parsed p = Parse(csv);
+        const std::uint64_t lost = lost_queued(p, flips, dropped);
+        std::printf("exit during steady flips (2 ms): %llu flips, %zu complete rows, %llu queued "
+                    "rows lost, %d cut line(s)\n",
+                    static_cast<unsigned long long>(flips), p.rows.size(),
+                    static_cast<unsigned long long>(lost), p.cut);
+        std::fflush(stdout);
+        assert(dropped == 0 && lost <= 150); // 150 rows = 300 ms of flips: 3 write periods
+    }
+    { // FlushForExit then _Exit: every flip before the call is on file.
+        const std::string csv = Child(self, "exit-flush", "flush.csv");
+        std::uint64_t flips = 0, waited_us = 0;
+        ReadInfo(csv, flips, waited_us);
+        const Parsed p = Parse(csv);
+        const std::uint64_t last = CheckRows(p);
+        std::printf("FlushForExit + _Exit: %llu flips, last frame on file %llu, waited %llu us\n",
+                    static_cast<unsigned long long>(flips), static_cast<unsigned long long>(last),
+                    static_cast<unsigned long long>(waited_us));
+        std::fflush(stdout);
+        assert(last == flips && p.cut == 0);
+        assert(waited_us < 500000);
+    }
+    { // Same with a thread still flipping through the call and the exit.
+        const std::string csv = Child(self, "exit-flush-live", "flush-live.csv");
+        std::uint64_t flips = 0, waited_us = 0;
+        ReadInfo(csv, flips, waited_us);
+        const Parsed p = Parse(csv);
+        const std::uint64_t last = CheckRows(p);
+        std::printf("FlushForExit + _Exit, still flipping: frame %llu at the call, last frame on "
+                    "file %llu, waited %llu us\n",
+                    static_cast<unsigned long long>(flips), static_cast<unsigned long long>(last),
+                    static_cast<unsigned long long>(waited_us));
+        std::fflush(stdout);
+        // The frame number is published just before its row is queued: allow that one row.
+        assert(last + 1 >= flips);
+    }
+}
+
+int main(int argc, char** argv) {
+    const std::string mode = argc > 1 ? argv[1] : "";
+    if (mode == "main") {
+        return RunMain();
+    }
+    if (mode.rfind("exit-", 0) == 0) {
+        return RunExit(mode);
+    }
+    // Driver: `enabled` is read once at startup, so each case runs as a child process with
+    // GOW3_PIPE_STATS set. The driver itself starts no thread. Run with the variable already
+    // set (the old way), it is the main case alone.
+    if (PS::enabled) {
+        return RunMain();
+    }
+    std::filesystem::remove_all(test_dir);
+    std::filesystem::create_directory(test_dir);
+    Child(argv[0], "main", "main.csv");
+    TestExits(argv[0]);
+    if (!std::getenv("GOW3_PIPE_STATS_KEEP")) {
+        std::filesystem::remove_all(test_dir);
+    }
+    std::puts("pipe stats exits: ok");
     return 0;
 }

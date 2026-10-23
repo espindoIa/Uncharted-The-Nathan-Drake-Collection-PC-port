@@ -170,9 +170,15 @@ void OnFlip(u64 a_frame_id, u64 a_seq = NoSeq) noexcept;
 /// Last frame number OnFlip handed out (0 before the first flip).
 u64 FrameId() noexcept;
 
-/// Writes what is queued and stops the writer (also registered with atexit). Later flips are
-/// counted and ignored.
+/// Writes what is queued and stops the writer (also registered with atexit, which only runs
+/// on exit(): the game ends with std::_Exit/_exit, see FlushForExit). Later flips are counted
+/// and ignored.
 void Shutdown() noexcept;
+
+/// Before a std::_Exit/_exit that skips Shutdown: asks the writer to write and flush every row
+/// queued so far and waits for it, at most 500 ms. Takes no lock the flip path or the writer
+/// holds while writing; any thread, any number of times. Flips after the call may be lost.
+void FlushForExit() noexcept;
 
 /// Statistics for tests: rows written, rows dropped (ring full or concurrent flip).
 u64 RowsWritten() noexcept;
@@ -184,6 +190,7 @@ inline u64 FrameId() noexcept {
     return 0;
 }
 inline void Shutdown() noexcept {}
+inline void FlushForExit() noexcept {}
 inline u64 RowsWritten() noexcept {
     return 0;
 }
