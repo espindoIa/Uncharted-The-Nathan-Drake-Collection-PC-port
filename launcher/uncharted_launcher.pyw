@@ -198,7 +198,7 @@ INI_DEFAULTS = {
     "display_mode": "windowed", "vsync": "1", "fps_limit": "60", "frames_queued": "1",
     "async_shaders": "1", "fsr1": "0", "rcas": "1", "rcas_strength": "75", "show_fps": "1",
     "upscaler": "off", "preset": "0", "dlss_model": "k", "gpu_id": "-1", "anisotropy": "16",
-    "reflex": "0", "frame_gen": "0",
+    "reflex": "0", "frame_gen": "0", "nv_backend": "ngx",
 }
 # FSR/DLSS quality modes (the runtime's preset key, also in the in-game menu): 0 draws the scene at
 # the render resolution (Native AA / DLAA); the others draw it smaller and rebuild it at the render
@@ -231,6 +231,16 @@ def dlss_available():
 
 def frame_gen_available():
     return dlss_available() and (ROOT / "gow3_pc" / "out" / NGX_FG_DLL).is_file()
+
+
+# 23 Oct 2026: NVIDIA Streamline (the runtime's nv_backend key): its signed DLLs ship with the
+# package (MIT); it still uses the player's nvngx_dlss.dll / nvngx_dlssg.dll.
+STREAMLINE_DLL = "sl.interposer.dll"
+
+
+def streamline_available():
+    return (ROOT / "gow3_pc" / "out" / STREAMLINE_DLL).is_file() and \
+        (ROOT / "gow3_pc" / "out" / NGX_DLL).is_file()
 
 
 def fps_limits():
@@ -1996,6 +2006,14 @@ class Launcher:
                         "DLSS) and NVIDIA's nvngx_dlssg.dll (add it below). The frame rate limit counts the "
                         "frames shown. Also in the in-game menu.",
                         [("0", "Off"), ("1", "On")], recommended="0")
+        if streamline_available():
+            self.ini_choice(page, "nv_backend", "NVIDIA features through",
+                            "How DLSS, Frame Generation and Reflex reach NVIDIA's files. NGX is the port's own "
+                            "bridge. Streamline is NVIDIA's SDK: its Frame Generation paces the frames itself, "
+                            "switches Reflex on with it and ignores VSync (Vulkan), and its latency markers let "
+                            "PresentMon and NVIDIA's overlay measure input delay. Takes effect the next time the "
+                            "game starts.",
+                            [("ngx", "NGX"), ("streamline", "Streamline")], recommended="ngx")
         self.ini_choice(page, "display_mode", "Display mode",
                         "A normal window, a borderless window (quick Alt+Tab) or fullscreen.",
                         [("windowed", "Windowed"), ("borderless", "Borderless"), ("fullscreen", "Fullscreen")])
