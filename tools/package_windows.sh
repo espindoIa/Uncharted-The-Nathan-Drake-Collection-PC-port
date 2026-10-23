@@ -51,6 +51,24 @@ fi
 [[ ! -e $stage/gow3_pc/out/nvngx_dlss.dll ]] || { echo "nvngx_dlss.dll must not be packaged" >&2; exit 1; }
 [[ ! -e $stage/gow3_pc/out/nvngx_dlssg.dll ]] || { echo "nvngx_dlssg.dll must not be packaged" >&2; exit 1; }
 
+# NVIDIA Streamline (optional, 23 Oct 2026): STREAMLINE_SDK=<the Streamline SDK release, e.g.
+# streamline-sdk-v2.14.16 unpacked> adds its NVIDIA-signed production plugins next to the runtime
+# (nv_backend=streamline). The release's license.txt is MIT for them; the nvngx_* DLLs in the same
+# folder are under NVIDIA's RTX SDK license and NvLowLatencyVk.dll under the Reflex SDK license, so
+# those stay out (the player adds nvngx_dlss.dll / nvngx_dlssg.dll in the launcher, as for NGX).
+# They need the Visual C++ 2015-2022 runtime; without it the runtime keeps the NGX bridge.
+STREAMLINE_DLLS=(sl.interposer.dll sl.common.dll sl.dlss.dll sl.dlss_g.dll sl.reflex.dll sl.pcl.dll)
+if [[ -n ${STREAMLINE_SDK:-} ]]; then
+    for dll in "${STREAMLINE_DLLS[@]}"; do
+        [[ -f $STREAMLINE_SDK/bin/x64/$dll ]] || { echo "Streamline: $dll missing in $STREAMLINE_SDK/bin/x64" >&2; exit 1; }
+        cp "$STREAMLINE_SDK/bin/x64/$dll" "$stage/gow3_pc/out/"
+    done
+    mkdir -p "$stage/licenses/nvidia-streamline"
+    cp "$STREAMLINE_SDK/license.txt" "$stage/licenses/nvidia-streamline/LICENSE.txt"
+    echo "Streamline: ${STREAMLINE_DLLS[*]} included"
+fi
+[[ ! -e $stage/gow3_pc/out/NvLowLatencyVk.dll ]] || { echo "NvLowLatencyVk.dll must not be packaged" >&2; exit 1; }
+
 cp gow3_pc/scripts/*.py "$stage/gow3_pc/scripts/"
 cp tools/probe_uncharted.py tools/hang_report.py tools/apply_update.py tools/play.py tools/install_update.py "$stage/tools/"
 # PkgTool (LibOrbisPkg, LGPL-3.0): Advanced -> Install game update unpacks the player's own update PKG.
@@ -94,8 +112,9 @@ for dll in "$stage"/gow3_pc/out/*.dll; do
 done
 owned=$("$pacman" -Qo "${dlls[@]}" 2>/dev/null || true)
 for dll in "${dlls[@]}"; do
-    # gow3_dlss.dll is built by this project (MIT bridge, licensed under licenses/gow3-dlss-bridge).
-    [[ $(basename -- "$dll") == gow3_dlss.dll ]] && continue
+    # gow3_dlss.dll is built by this project (MIT bridge, licensed under licenses/gow3-dlss-bridge);
+    # Streamline's sl.*.dll come from NVIDIA (licenses/nvidia-streamline).
+    [[ $(basename -- "$dll") == gow3_dlss.dll || $(basename -- "$dll") == sl.*.dll ]] && continue
     grep -qF -- "/$(basename -- "$dll") is owned by " <<< "$owned" || { echo "no MSYS2 package owns $(basename -- "$dll"): no license to ship" >&2; exit 1; }
 done
 mapfile -t packages < <(awk '/ is owned by /{print $(NF-1)}' <<< "$owned" | sort -u)
