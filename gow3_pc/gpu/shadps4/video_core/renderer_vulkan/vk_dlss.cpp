@@ -93,7 +93,7 @@ bool CollectExtensions(const VkExtensionProperties* required, u32 count,
 } // namespace
 
 struct Dlss::Impl {
-    /// gow3 23 Oct 2026: nv_backend=streamline loaded (gow3_streamline.h): every call goes there
+    /// gow3 23 Oct 2026: Streamline loaded (gow3_streamline.h): every call goes there
     /// and the NGX bridge is not loaded.
     bool streamline{};
     HMODULE module{};

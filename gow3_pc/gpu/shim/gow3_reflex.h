@@ -30,7 +30,7 @@ bool ExtensionWanted();
 /// GOW3_REFLEX_LOG.
 void Init(vk::Device device, bool extension_enabled, u32 revision);
 
-/// gow3 23 Oct 2026: instead of Init when Streamline is used (nv_backend=streamline): the markers,
+/// gow3 23 Oct 2026: instead of Init when Streamline is used (gow3_streamline.h): the markers,
 /// the sleep, the mode and the timings go through sl.pcl / sl.reflex (gow3_streamline.h), which own
 /// VK_NV_low_latency2. Available() stays false (no latency swapchain, OnSwapchain does nothing);
 /// the markers and the sleep are sent every frame, also with Reflex off.

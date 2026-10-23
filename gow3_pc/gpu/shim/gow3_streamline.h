@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// gow3 23 Oct 2026: NVIDIA Streamline 2.14 (github.com/NVIDIA-RTX/Streamline, MIT) as the second way
-// to NVIDIA's features beside the NGX bridge (gpu/dlss_bridge): DLSS super resolution (sl.dlss),
-// DLSS Frame Generation (sl.dlss_g), Reflex (sl.reflex) and PC Latency markers (sl.pcl), chosen at
-// start with nv_backend=streamline (setting) or GOW3_NV_BACKEND=streamline. The port links nothing
-// from it: sl.interposer.dll is loaded from beside the executable after its NVIDIA signature is
-// checked, and every call goes through the pointers it exports. Without the DLLs, on other GPUs or
-// when anything fails before the Vulkan instance exists, the NGX bridge is used as before.
+// gow3 23 Oct 2026: NVIDIA Streamline 2.14 (github.com/NVIDIA-RTX/Streamline, MIT) is the way to
+// NVIDIA's features: DLSS super resolution (sl.dlss), DLSS Frame Generation (sl.dlss_g), Reflex
+// (sl.reflex) and PC Latency markers (sl.pcl). The player preferred its Frame Generation pacing
+// (23 Oct), so there is no setting; GOW3_NV_BACKEND=ngx keeps it off for A/B tests. The port links
+// nothing from it: sl.interposer.dll is loaded from beside the executable after its NVIDIA
+// signature is checked, and every call goes through the pointers it exports. Without its DLLs or
+// nvngx_dlss.dll, without an NVIDIA GPU, or when anything fails before the device exists, the NGX
+// bridge (gpu/dlss_bridge) and the direct VK_NV_low_latency2 Reflex are used as before.
 //
 // Vulkan: Streamline's own vkCreateInstance / vkCreateDevice add the extensions, features and
 // queues its plugins ask for (the optical flow queue of frame generation included) and hand it the
@@ -27,7 +28,7 @@
 
 namespace Gow3Streamline {
 
-/// The backend asked for this run (setting nv_backend, GOW3_NV_BACKEND), whether or not it loads.
+/// Streamline is wanted for this run (always, unless GOW3_NV_BACKEND=ngx), whether or not it loads.
 bool Requested();
 
 /// Before the Vulkan instance, once: checks and loads sl.interposer.dll and calls slInit with DLSS,
@@ -45,6 +46,9 @@ PFN_vkVoidFunction DeviceProc(VkDevice device, const char* name);
 
 /// After vkCreateDevice went through Streamline: what each feature supports on this GPU.
 void OnDevice(VkPhysicalDevice physical, VkDevice device);
+/// Before vkCreateDevice, when the chosen GPU is not NVIDIA's (a hybrid laptop's other GPU):
+/// slShutdown, and the device is created without Streamline. Active() is false afterwards.
+void Abandon(const char* reason);
 /// slShutdown, before the device is destroyed.
 void Shutdown();
 

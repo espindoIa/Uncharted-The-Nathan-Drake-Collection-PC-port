@@ -456,13 +456,18 @@ void ImageTab() {
                 // NVIDIA's DLSS license asks for its attribution where DLSS is offered.
                 InfoRow("NVIDIA DLSS", "NVIDIA technology");
                 Help("NVIDIA, RTX and DLSS are trademarks of NVIDIA Corporation.");
+                // DLSS on the NGX bridge: say why Streamline did not load (missing VC++ runtime...).
+                if (Gow3Streamline::Requested() && !Gow3Streamline::Active()) {
+                    InfoRow("NVIDIA Streamline", Gow3Streamline::Problem());
+                }
             }
             if (s.frame_gen_supported) {
                 static const char* const fg_labels[] = {"Off", "On"};
                 ChoiceRow("DLSS Frame Generation", s.frame_gen, fg_labels, nullptr, int(std::size(fg_labels)),
                           "Adds one AI-generated frame between every two: about twice the frames shown, with a "
                           "little more input delay. Needs an RTX 40 or newer, an anti-aliasing mode (TAA, FSR "
-                          "or DLSS) and NVIDIA's nvngx_dlssg.dll. The frame rate limit counts the frames shown.");
+                          "or DLSS) and NVIDIA's nvngx_dlssg.dll. The frame rate limit counts the frames shown. "
+                          "Frames are only added while the game window has the focus; it also turns Reflex on.");
             } else if (const char* fg_problem = s.frame_gen_problem.load()) {
                 InfoRow("DLSS Frame Generation", fg_problem);
             }
@@ -602,17 +607,6 @@ void PerformanceTab() {
                  "Big FPS gain. Switch it off if lighting or objects look wrong.");
         CheckRow("Deferred GPU readbacks", s.deferred_readback,
                  "Fewer waits for the GPU. Switch it off if textures or shadows look wrong.");
-        if (s.dlss_supported || Gow3Streamline::Requested()) {
-            static const char* const backend_labels[] = {"NGX (direct)", "Streamline"};
-            ChoiceRow("NVIDIA DLSS, Frame Generation and Reflex through", s.nv_backend, backend_labels,
-                      nullptr, int(std::size(backend_labels)),
-                      "NGX: the port's own bridge to NVIDIA's DLSS files. Streamline: NVIDIA's SDK, whose "
-                      "Frame Generation paces its frames itself and turns Reflex on with it, and whose PC "
-                      "Latency markers let PresentMon and the NVIDIA overlay measure the delay.");
-            if (Gow3Streamline::Requested() && !Gow3Streamline::Active()) {
-                InfoRow("Streamline", Gow3Streamline::Problem());
-            }
-        }
         ImGui::EndTable();
     }
 }
@@ -1297,8 +1291,7 @@ void ControlsTab() {
 // Startup options changed since this launch (applied by "Apply and restart").
 int RestartChanges() {
     const auto& s = Gow3Settings::Get();
-    return (s.deferred_readback != s.startup_deferred_readback) + (s.stale_readback != s.startup_stale_readback) +
-           (s.nv_backend != s.startup_nv_backend);
+    return (s.deferred_readback != s.startup_deferred_readback) + (s.stale_readback != s.startup_stale_readback);
 }
 
 // The running game's trophies: earned pictures bright, the others dimmed.

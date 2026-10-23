@@ -275,7 +275,7 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     static vk::detail::DynamicLoader dl;
     VULKAN_HPP_DEFAULT_DISPATCHER.init(
         dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
-    // gow3 23 Oct 2026: with nv_backend=streamline the instance is created by Streamline's own
+    // gow3 23 Oct 2026: when Streamline loads the instance is created by Streamline's own
     // vkCreateInstance (its plugins' extensions); everything else stays vulkan-1's.
     const bool streamline = window_type != Frontend::WindowSystemType::Headless &&
                             Gow3Streamline::Init();

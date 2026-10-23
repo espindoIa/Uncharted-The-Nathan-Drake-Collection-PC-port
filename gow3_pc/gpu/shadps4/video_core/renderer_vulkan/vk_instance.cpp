@@ -458,6 +458,21 @@ bool Instance::CreateDevice() {
     // are created as before. GOW3_REFLEX_EXT=0 keeps it off.
     // gow3 23 Oct 2026: with Streamline its sl.reflex adds VK_NV_low_latency2 and drives it; the
     // port only adds VK_KHR_present_id, which the extension needs.
+    // Streamline only on NVIDIA's GPU: another one chosen on a hybrid laptop gets its device, surface
+    // and swapchain from vulkan-1 as before Streamline.
+    if (Gow3Streamline::Active() && properties.vendorID != 0x10DE) {
+        Gow3Streamline::Abandon("the chosen graphics card is not NVIDIA's");
+        auto& d = VULKAN_HPP_DEFAULT_DISPATCHER;
+        const auto proc = [&](const char* name) { return d.vkGetInstanceProcAddr(*instance, name); };
+        d.vkEnumeratePhysicalDevices =
+            reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(proc("vkEnumeratePhysicalDevices"));
+        d.vkCreateDevice = reinterpret_cast<PFN_vkCreateDevice>(proc("vkCreateDevice"));
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+        d.vkCreateWin32SurfaceKHR =
+            reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(proc("vkCreateWin32SurfaceKHR"));
+#endif
+        d.vkDestroySurfaceKHR = reinterpret_cast<PFN_vkDestroySurfaceKHR>(proc("vkDestroySurfaceKHR"));
+    }
     const bool streamline = Gow3Streamline::Active();
     bool low_latency = false;
     u32 low_latency_revision = 0;

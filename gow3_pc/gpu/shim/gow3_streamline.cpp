@@ -19,6 +19,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <dxgi.h>
 
 #include "sl.h"
 #include "sl_dlss.h"
@@ -34,10 +35,8 @@ namespace Gow3Streamline {
 
 bool Requested() {
     static const bool requested = [] {
-        if (const char* env = std::getenv("GOW3_NV_BACKEND"); env && env[0]) {
-            return std::strcmp(env, "streamline") == 0 || std::strcmp(env, "1") == 0;
-        }
-        return Gow3Settings::Get().nv_backend.load() == Gow3Settings::NvBackendStreamline;
+        const char* env = std::getenv("GOW3_NV_BACKEND");
+        return !(env && (std::strcmp(env, "ngx") == 0 || std::strcmp(env, "0") == 0));
     }();
     return requested;
 }
@@ -202,6 +201,26 @@ void Fail(const std::string& reason) {
     std::printf("Streamline: not used (%s); the NGX bridge stays\n", reason.c_str());
 }
 
+constexpr UINT NvidiaVendor = 0x10DE;
+
+/// Any NVIDIA adapter in the system (DXGI): AMD and Intel PCs never load Streamline, whose
+/// vkCreateDevice would add its plugins' extensions to their devices.
+bool NvidiaAdapterPresent() {
+    IDXGIFactory1* factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)))) {
+        return true; // cannot tell: the device check in Instance::CreateDevice still applies
+    }
+    bool found = false;
+    IDXGIAdapter1* adapter = nullptr;
+    for (UINT a = 0; !found && factory->EnumAdapters1(a, &adapter) != DXGI_ERROR_NOT_FOUND; ++a) {
+        DXGI_ADAPTER_DESC1 desc{};
+        found = SUCCEEDED(adapter->GetDesc1(&desc)) && desc.VendorId == NvidiaVendor;
+        adapter->Release();
+    }
+    factory->Release();
+    return found;
+}
+
 sl::Resource Describe(const Image& image) {
     sl::Resource resource(sl::ResourceType::eTex2d, reinterpret_cast<void*>(image.image), nullptr,
                           reinterpret_cast<void*>(image.view), uint32_t(image.layout));
@@ -252,6 +271,16 @@ bool Init() {
     const auto interposer = directory / InterposerName;
     if (!std::filesystem::is_regular_file(interposer)) {
         Fail("sl.interposer.dll is missing");
+        return false;
+    }
+    // DLSS needs the player's nvngx_dlss.dll on either path; without it Streamline has nothing to
+    // run but Reflex, which the direct VK_NV_low_latency2 path covers.
+    if (!std::filesystem::is_regular_file(directory / L"nvngx_dlss.dll")) {
+        Fail("nvngx_dlss.dll is missing");
+        return false;
+    }
+    if (!NvidiaAdapterPresent()) {
+        Fail("no NVIDIA graphics card");
         return false;
     }
     // Streamline's integration checklist: load only an NVIDIA-signed interposer (it checks its
@@ -435,6 +464,16 @@ void Shutdown() {
     g.shut_down = true;
     g.dlss = g.frame_gen = g.reflex = g.pcl = false;
     g.shutdown();
+}
+
+void Abandon(const char* reason) {
+    if (!g.active) {
+        return;
+    }
+    Shutdown();
+    g.active = false;
+    g.dlss_problem = g.frame_gen_problem = reason;
+    Fail(reason);
 }
 
 bool DlssReady() {
@@ -837,6 +876,7 @@ void FrameGenSetMode(bool, uint32_t) {}
 FgState FrameGenGetState() {
     return {};
 }
+void Abandon(const char*) {}
 bool WindowFocused(void*) {
     return true;
 }
