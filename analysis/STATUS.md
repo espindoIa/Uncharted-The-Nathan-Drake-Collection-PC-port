@@ -23,7 +23,7 @@ New entries go at the end, dated, measured numbers only.
 - Reflex GPU idle diagnosis and early submit: `Reflex: GPU idle diagnosis and early submit (22 Oct 2026)`
 - FG model selector (none in NGX 310.9.16): `Frame Generation model (NGX)`
 - RTSS / MSI Afterburner OSD flicker, present queue, dev NGX banner: `RivaTuner / MSI Afterburner OSD flicker: the present queue (22 Oct 2026)`
-- Streamline backend (DLSS, FG, Reflex through SL 2.14.16; FG needs the window focused): `NVIDIA Streamline backend (23 Oct 2026)`
+- Streamline backend (DLSS, FG, Reflex through SL 2.14.16; FG needs the window focused; the only option since the same day, NGX as fallback): `NVIDIA Streamline backend (23 Oct 2026)`, `Streamline as the only option (23 Oct 2026, later)`
 - Measuring method (ab2.sh, abstats.py, PresentMon, profilers): see the Tools list in the U3 performance section above, and AGENTS.md "Measuring".
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
@@ -3882,3 +3882,15 @@ Environment note: since about 09:20 on 23 Oct every build, the 2bf79ce one inclu
 Seen once, not investigated: in one SL 4K screenshot Nate's head was missing in an idle animation (C:\dev\bench\sl_fg4k_on2.png); other SL shots show it. One NGX 1080p FG session (slab2 fg1080k_ngx_3) ran at 76.9 real / 104.3 shown instead of 60 / 120.
 
 Not verified: the regression checks (RTSS / Afterburner OSD with SL, Vulkan validation, U1 and U2 boots, a soak), the focused FG A/B (user stopped it), Reflex latency through SL (PCL markers in PresentMon or NVIDIA's overlay), the 4K Reflex loss's cause, packaging with STREAMLINE_SDK (script not run), a PC without the VC++ runtime (fallback path read, not run), HDR, exclusive fullscreen, AMD/Intel GPUs (SL should not load features there; not run).
+
+### Streamline as the only option (23 Oct 2026, later)
+
+The player asked for Streamline as the only option, with NGX kept as a fallback.
+- The `nv_backend` setting is gone: the menu row, the launcher choice, the ini key and the restart check. An old `nv_backend=` line in an ini is ignored. `GOW3_NV_BACKEND=ngx` (or 0) keeps Streamline off for A/B tests.
+- Streamline is not loaded without `nvngx_dlss.dll` (it would only run Reflex, which the direct path covers) or without an NVIDIA DXGI adapter (AMD/Intel PCs: its vkCreateDevice adds its plugins' extensions and features). If the chosen Vulkan device is not NVIDIA's (a hybrid laptop's other GPU picked in the settings), Instance::CreateDevice calls Gow3Streamline::Abandon (slShutdown) and puts back vulkan-1's vkEnumeratePhysicalDevices, vkCreateDevice and surface entries before the device is created.
+- In-game menu: when DLSS runs on the NGX bridge, the "NVIDIA Streamline" row gives the reason Streamline did not load. The Frame Generation help (menu and launcher) says that frames are only added while the window has the focus.
+- Packaging without STREAMLINE_SDK now prints a warning.
+
+Tested: build.sh. One U3 session (1080p, DLSS K, FG and Reflex off) with no GOW3_NV_BACKEND: "Streamline: SDK 2.14.16 loaded", "DLSS: through Streamline", "Reflex: through Streamline", 93 real FPS. PresentMon showed SyncInterval 1 again, without tearing, so the morning's tearing note no longer applies.
+
+Not tested: the Abandon path (no non-NVIDIA GPU here), a PC without NVIDIA or without nvngx_dlss.dll, GOW3_NV_BACKEND=ngx after this change.
