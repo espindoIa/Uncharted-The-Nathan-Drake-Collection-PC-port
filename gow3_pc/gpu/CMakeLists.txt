@@ -373,6 +373,18 @@ set_source_files_properties(../tests/test_taa_shader.cpp PROPERTIES
 target_link_libraries(taa-shader-test PRIVATE gow3gpu)
 add_dependencies(taa-shader-test host_shaders)
 
+# gow3: GOW3_PIPE_STATS (shim/gow3_pipe_stats.h): the CSV header names the commit configured.
+execute_process(COMMAND git rev-parse --short=12 HEAD WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE GOW3_GIT_REV OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if (NOT GOW3_GIT_REV)
+    set(GOW3_GIT_REV unknown)
+endif()
+set_property(SOURCE shim/gow3_pipe_stats.cpp APPEND PROPERTY
+    COMPILE_DEFINITIONS GOW3_GIT_REV="${GOW3_GIT_REV}")
+add_executable(pipe-stats-test EXCLUDE_FROM_ALL ../tests/test_pipe_stats.cpp shim/gow3_pipe_stats.cpp)
+target_include_directories(pipe-stats-test PRIVATE shim shadps4)
+target_compile_options(pipe-stats-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(pipe-stats-test PRIVATE -pthread)
 add_executable(flat-camera-test EXCLUDE_FROM_ALL ../tests/test_flat_camera.cpp)
 target_compile_options(flat-camera-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(flat-camera-test PRIVATE shadps4)
