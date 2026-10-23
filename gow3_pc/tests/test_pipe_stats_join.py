@@ -1,5 +1,6 @@
 """tools/pipe_stats.py: rows join GPU records on a_seq while flips lag stage A by 1-2 frames;
 rows the process did not finish writing (std::_Exit, a crash) are left out and counted."""
+import contextlib
 import csv
 import io
 import random
@@ -224,6 +225,33 @@ class PipeStatsSessionTests(unittest.TestCase):
         self.assertIn("same.20261023T150000Z-100000.csv", r.stdout)
         for name in same[:1] + same[2:]:
             self.assertNotIn(name, r.stdout)
+
+    def test_legacy_file_next_to_sessions_warns(self):
+        # O1 (SENTINEL r3): an old <stem>.csv still wins, but says it hides the session files.
+        d = Path(self.dir.name)
+        main, _, _, _ = simulate(frames=40, seed=11)
+        (d / "legacy.csv").write_text(main)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            found = pipe_stats.sessions(str(d / "legacy.csv"))
+        self.assertEqual(found, [str(d / "legacy.csv")])
+        self.assertEqual(err.getvalue(), "")  # alone: no warning
+        for seed, name in enumerate(["legacy.20261023T150000Z-12.csv",
+                                     "legacy.20261023T150001Z-13.csv"], start=1):
+            main, _, _, _ = simulate(frames=40 + seed, seed=seed)
+            (d / name).write_text(main)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            found = pipe_stats.sessions(str(d / "legacy.csv"))
+        self.assertEqual(found, [str(d / "legacy.csv")])
+        self.assertIn("warning:", err.getvalue())
+        self.assertIn("2 session file(s)", err.getvalue())
+        self.assertIn("legacy.20261023T150001Z-13.csv", err.getvalue())
+        r = subprocess.run([sys.executable, str(REPO / "tools" / "pipe_stats.py"), str(d / "legacy.csv"),
+                            "--skip-s", "0"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("2 session file(s)", r.stderr)
+        self.assertNotIn("legacy.20261023T150000Z-12.csv", r.stdout)
 
     def test_no_sessions_is_an_error(self):
         r = subprocess.run([sys.executable, str(REPO / "tools" / "pipe_stats.py"),

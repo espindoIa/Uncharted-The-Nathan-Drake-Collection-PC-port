@@ -140,15 +140,28 @@ def session_key(name):
     return (m.group(1), int(m.group(2))) if m else ("", -1)
 
 
+def session_files(stem):
+    """<stem>.<UTC start>-<pid>.csv files, oldest first by (UTC start, pid)."""
+    return sorted((p for p in glob.glob(glob.escape(stem) + ".*.csv")
+                   if SESSION.match(p[len(stem):])),
+                  key=lambda p: session_key(p[len(stem):]))
+
+
 def sessions(path):
     """The files to report for `path`: itself if it exists, else the session files the game
-    wrote for GOW3_PIPE_STATS=<path>, oldest first by (UTC start, pid); --latest takes the last."""
-    if os.path.exists(path):
-        return [path]
+    wrote for GOW3_PIPE_STATS=<path>, oldest first by (UTC start, pid); --latest takes the last.
+    A file named `path` itself (one a build from before per-session files wrote) still wins, but
+    a warning on stderr says when session files sit next to it, so it is not read by mistake."""
     stem = path[:-4] if path.endswith(".csv") else path
-    found = sorted((p for p in glob.glob(glob.escape(stem) + ".*.csv")
-                    if SESSION.match(p[len(stem):])),
-                   key=lambda p: session_key(p[len(stem):]))
+    if os.path.exists(path):
+        others = session_files(stem)
+        if others:
+            print(f"warning: {path} exists and is the only file reported; {len(others)} session "
+                  f"file(s) {stem}.<UTC start>-<pid>.csv next to it are ignored (newest: "
+                  f"{os.path.basename(others[-1])}). Move or rename {path} to report them.",
+                  file=sys.stderr)
+        return [path]
+    found = session_files(stem)
     if not found:
         sys.exit(f"{path}: no such file, and no {stem}.<UTC start>-<pid>.csv files")
     return found
