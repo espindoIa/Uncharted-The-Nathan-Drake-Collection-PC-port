@@ -401,8 +401,17 @@ target_link_libraries(pipe-stats-test PRIVATE -pthread)
 add_executable(draw-pipe-test EXCLUDE_FROM_ALL ../tests/test_draw_pipe.cpp shim/gow3_pipe_stats.cpp)
 target_include_directories(draw-pipe-test PRIVATE ../tests/stubs/draw_pipe ../tests/stubs shim shadps4)
 target_compile_options(draw-pipe-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-target_compile_definitions(draw-pipe-test PRIVATE GOW3_PIPE_STATS_BUILD=1)
+target_compile_definitions(draw-pipe-test PRIVATE GOW3_PIPE_STATS_BUILD=1 DRAW_PIPE_TEST_EXPECT_BUILD=1)
 target_link_libraries(draw-pipe-test PRIVATE -pthread)
+# The same test with the hooks compiled out (the release default): the ring must behave the same
+# and the stats API must be the no-op stubs. -U drops the =1 a GOW3_PIPE_STATS_BUILD=ON
+# configure adds to every target (options come after definitions on the command line), so the
+# header default 0 applies; the test's static_assert checks it. gow3_pipe_stats.cpp is not linked.
+add_executable(draw-pipe-test-off EXCLUDE_FROM_ALL ../tests/test_draw_pipe.cpp)
+target_include_directories(draw-pipe-test-off PRIVATE ../tests/stubs/draw_pipe ../tests/stubs shim shadps4)
+target_compile_options(draw-pipe-test-off PRIVATE -UNDEBUG -UGOW3_PIPE_STATS_BUILD -Wall -Wextra -Werror)
+target_compile_definitions(draw-pipe-test-off PRIVATE DRAW_PIPE_TEST_EXPECT_BUILD=0)
+target_link_libraries(draw-pipe-test-off PRIVATE -pthread)
 add_executable(flat-camera-test EXCLUDE_FROM_ALL ../tests/test_flat_camera.cpp)
 target_compile_options(flat-camera-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(flat-camera-test PRIVATE shadps4)

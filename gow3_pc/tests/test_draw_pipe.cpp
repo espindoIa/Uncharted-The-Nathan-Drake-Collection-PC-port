@@ -4,11 +4,16 @@
 // (spin then sleep), bursts that force sleep and wake, many wraps, shutdown with stage B asleep,
 // blocked in the handler or A blocked on a full ring, and A waiting in Drain. Items must arrive
 // once, in order, unchanged; a deadlock ends the test through a watchdog.
-// With GOW3_PIPE_STATS=<file> set, the pipe-stats hooks must have seen the waits; unset, nothing
-// is counted. Thread CPU figures are measured on Linux only (/proc, pthread CPU clocks).
-// Build: ninja -C out/gpu draw-pipe-test; run it with and without GOW3_PIPE_STATS, and with
-// `slow` (fewer items) under TSan/ASan/UBSan.
+// With GOW3_PIPE_STATS=<file> set, the pipe-stats hooks must have seen the waits and counted
+// exactly the packets committed and executed; unset, nothing is counted. draw-pipe-test-off is
+// the same test built with GOW3_PIPE_STATS_BUILD=0 (the release default): the stats API must be
+// the no-op stubs, the counters stay zero even with GOW3_PIPE_STATS set, and the ring passes the
+// same checks. Thread CPU figures are measured on Linux only (/proc, pthread CPU clocks).
+// Build: ninja -C out/gpu draw-pipe-test draw-pipe-test-off; run draw-pipe-test with and
+// without GOW3_PIPE_STATS, draw-pipe-test-off once, and both with `slow` (fewer items) under
+// TSan/ASan/UBSan.
 #include "video_core/renderer_vulkan/vk_draw_pipe.h"
+#include <cstdlib>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
@@ -17,6 +22,18 @@
 #include <vector>
 #ifdef __linux__
 #include <pthread.h>
+#endif
+
+#ifndef DRAW_PIPE_TEST_EXPECT_BUILD
+#error "DRAW_PIPE_TEST_EXPECT_BUILD must name the GOW3_PIPE_STATS_BUILD this target is for"
+#endif
+static_assert(GOW3_PIPE_STATS_BUILD == DRAW_PIPE_TEST_EXPECT_BUILD,
+              "the target was built with the wrong GOW3_PIPE_STATS_BUILD");
+#if !GOW3_PIPE_STATS_BUILD
+// BUILD=0: the stats API is compile-time no-ops (gow3_pipe_stats.h); gow3_pipe_stats.cpp is not
+// linked into this target.
+static_assert(!Gow3PipeStats::enabled, "BUILD=0: enabled must be constexpr false");
+static_assert(noexcept(Gow3PipeStats::FlushForExit()) && noexcept(Gow3PipeStats::OnFlip(0)));
 #endif
 
 extern "C" {
@@ -57,7 +74,10 @@ static void Handler(void* c, const u8* p, u32 size) {
     ctx->in_handler.store(false);
 }
 
+static u64 committed = 0; // every Put, all cases (stage A is this thread or one producer at a time)
+
 static void Put(DrawPipe& pipe, u64 seq, u32 payload) {
+    ++committed;
     u8* p = pipe.Begin(payload);
     std::memcpy(p, &seq, 8);
     for (u32 i = 8; i < payload; ++i) p[i] = u8(seq + i);
@@ -100,6 +120,15 @@ static void Watchdog(int seconds, const char* name) {
 
 int main(int argc, char**) {
     const bool slow = argc > 1;  // sanitizer runs: fewer items
+#if !GOW3_PIPE_STATS_BUILD
+    // The variable must change nothing in a BUILD=0 binary.
+#ifdef _WIN32
+    _putenv_s("GOW3_PIPE_STATS", "draw-pipe-test-off.csv");
+#else
+    setenv("GOW3_PIPE_STATS", "draw-pipe-test-off.csv", 1);
+#endif
+#endif
+    u64 delivered = 0; // items every case's handler executed
     const u64 N = slow ? 20000 : 200000;
     Watchdog(slow ? 600 : 120, "whole test");
 
@@ -122,6 +151,7 @@ int main(int argc, char**) {
                     (unsigned long long)ctx.order_errors.load(), (unsigned long long)ctx.bytes_errors.load(), ms, a1 - a0);
         CHECK(ctx.count == n && ctx.order_errors == 0 && ctx.bytes_errors == 0, "saturation lost/reordered items");
         pipe.reset();
+        delivered += ctx.count.load();
     }
     { // 2. Empty queue: stage B CPU while idle (spin then futex sleep).
         Ctx ctx; auto pipe = std::make_unique<DrawPipe>(Handler, &ctx);
@@ -139,6 +169,7 @@ int main(int argc, char**) {
         Put(*pipe, 1, 64); pipe->Drain();
         CHECK(ctx.count == 2, "packet after sleep lost");
         pipe.reset();
+        delivered += ctx.count.load();
     }
     { // 3. Bursts: random packet sizes, bursts separated by pauses > spin time (forces sleep/wake).
         Ctx ctx; auto pipe = std::make_unique<DrawPipe>(Handler, &ctx);
@@ -157,6 +188,7 @@ int main(int argc, char**) {
                     (unsigned long long)pipe->drains, (unsigned long long)pipe->packets);
         CHECK(ctx.count == seq && ctx.order_errors == 0 && ctx.bytes_errors == 0, "bursts lost items");
         pipe.reset();
+        delivered += ctx.count.load();
     }
     { // 4. Throughput with tiny packets (wrap path exercised many times: N * 64 B > 16 MiB).
         Ctx ctx; auto pipe = std::make_unique<DrawPipe>(Handler, &ctx);
@@ -165,6 +197,7 @@ int main(int argc, char**) {
         CHECK(ctx.count == N && ctx.order_errors == 0, "throughput lost items");
         std::printf("[4 wrap/throughput] items=%llu/%llu ok\n", (unsigned long long)ctx.count.load(), (unsigned long long)N);
         pipe.reset();
+        delivered += ctx.count.load();
     }
     { // 5a. Shutdown while stage B is asleep (futex wait): destructor must wake and join.
         Ctx ctx; auto pipe = std::make_unique<DrawPipe>(Handler, &ctx);
@@ -182,6 +215,7 @@ int main(int argc, char**) {
         opener.join();
         std::printf("[5b shutdown, B blocked in handler, 100 in flight] delivered=%llu/100\n", (unsigned long long)ctx.count.load());
         CHECK(ctx.count == 100, "shutdown lost items");
+        delivered += ctx.count.load();
     }
     { // 5c. Shutdown right after A was blocked on a full ring (WaitForSpace).
         Ctx ctx; ctx.gate_closed = true; auto pipe = std::make_unique<DrawPipe>(Handler, &ctx);
@@ -193,6 +227,7 @@ int main(int argc, char**) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         double a1 = ThreadCpuMs(prod);
         ctx.gate_closed = false; prod.join(); pipe.reset();
+        delivered += ctx.count.load();
         std::printf("[5c shutdown after A blocked on full ring] A was blocked=%d, A CPU %.1f ms / 50 ms wall, delivered=%llu/40\n",
                     blocked, a1 - a0, (unsigned long long)ctx.count.load());
         CHECK(blocked && ctx.count == 40, "full-ring shutdown");
@@ -209,9 +244,26 @@ int main(int argc, char**) {
         std::printf("[6 drain wait] A CPU while waiting in Drain: %.1f ms / 50 ms wall (drain_cycles=%llu)\n",
                     a1 - a0, (unsigned long long)pipe->drain_cycles);
         pipe.reset();
+        delivered += ctx.count.load();
     }
+    namespace PS = Gow3PipeStats;
+    const u64 a_packets = PS::stage_a.packets.Load(), b_packets = PS::stage_b.packets.Load();
+    std::printf("[count] committed=%llu delivered=%llu a_packets=%llu b_packets=%llu\n",
+                (unsigned long long)committed, (unsigned long long)delivered,
+                (unsigned long long)a_packets, (unsigned long long)b_packets);
+    CHECK(delivered == committed, "items committed %llu, delivered %llu", (unsigned long long)committed,
+          (unsigned long long)delivered);
+#if !GOW3_PIPE_STATS_BUILD
+    std::printf("[build 0] GOW3_PIPE_STATS=%s set, stats API is the no-op stubs\n", std::getenv("GOW3_PIPE_STATS"));
+    PS::OnFlip(1);
+    PS::FlushForExit();
+    PS::Shutdown();
+    CHECK(!PS::Active() && PS::OutputPath() == nullptr && PS::RowsWritten() == 0 && PS::RowsDropped() == 0 &&
+              PS::FrameId() == 0, "BUILD=0: stats API is not the no-op stubs");
+    CHECK(a_packets == 0 && b_packets == 0 && PS::stage_a.drains.Load() == 0 && PS::stage_a.bytes.Load() == 0 &&
+              PS::stage_b.sleeps.Load() == 0 && PS::stage_b.busy_cyc.Load() == 0, "BUILD=0: something was counted");
+#else
     if (Gow3PipeStats::Active()) { // GOW3_PIPE_STATS hooks (vector/pipe-stats): the waits above were seen
-        namespace PS = Gow3PipeStats;
         std::printf("[stats] a_packets=%llu a_drains=%llu drain_spin_cyc=%llu drain_yield_cyc=%llu space_waits=%llu space_spin_cyc=%llu wake_notifies=%llu occ_samples=%llu\n",
             (unsigned long long)PS::stage_a.packets.Load(), (unsigned long long)PS::stage_a.drains.Load(),
             (unsigned long long)PS::stage_a.drain_spin_cyc.Load(), (unsigned long long)PS::stage_a.drain_yield_cyc.Load(),
@@ -222,9 +274,13 @@ int main(int argc, char**) {
             (unsigned long long)PS::stage_b.wait_spin_cyc.Load(), (unsigned long long)PS::stage_b.wait_block_cyc.Load());
         CHECK(PS::stage_a.drains.Load() > 0 && PS::stage_a.drain_yield_cyc.Load() > 0, "drain stats");
         CHECK(PS::stage_a.space_waits.Load() > 0 && PS::stage_b.sleeps.Load() > 0, "space/sleep stats");
+        CHECK(a_packets == committed && b_packets == committed,
+              "packet counts: a_packets %llu, b_packets %llu, expected %llu", (unsigned long long)a_packets,
+              (unsigned long long)b_packets, (unsigned long long)committed);
     } else {
-        CHECK(Gow3PipeStats::stage_a.packets.Load() == 0 && Gow3PipeStats::stage_b.packets.Load() == 0, "stats off: nothing counted");
+        CHECK(a_packets == 0 && b_packets == 0, "stats off: nothing counted");
     }
+#endif
     std::printf(failures ? "RESULT: %d FAILURES\n" : "RESULT: PASS (%d failures)\n", failures);
     return failures ? 1 : 0;
 }
