@@ -64,9 +64,11 @@ enum : int { SrcDrainSpin = 3, SrcDrainYield = 4, SrcSpaceSpin = 10 };
 
 /// Reserved for VULCAN (recorder and submission, docs/team/PIPE_STATS_SCHEMA_v1.md): written
 /// empty so the column set stays the same when they are filled in.
-const char* const reserved[] = {"rec_busy_ns", "rec_wait_ns", "rec_draws", "rec_pipeline_miss",
-                                "rec_desc_writes", "rec_barriers", "sub_count", "sub_ns",
-                                "fence_wait_ns"};
+/// sub_*: the draw scheduler's SubmitExecution only (present and swapchain blits are not counted).
+const char* const reserved[] = {"rec_busy_ns",      "rec_wait_ns",     "rec_draws",
+                                "rec_pipeline_miss", "rec_desc_writes", "rec_barriers",
+                                "sub_count",        "sub_lock_ns",     "sub_sync_rec_ns",
+                                "sub_host_copy_ns", "sub_driver_ns",   "fence_wait_ns"};
 
 struct Row {
     u64 frame_id, t_ns, tsc, a_frame_id, toggles1, toggles2, dropped, b_max_cyc;
