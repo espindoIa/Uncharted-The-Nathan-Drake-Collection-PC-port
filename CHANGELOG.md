@@ -6,6 +6,21 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **New (23 Oct 2026): DLSS, Frame Generation and Reflex can go through NVIDIA Streamline.** A new
+  choice in the launcher (Display) and the in-game menu (Applied on restart) picks how the NVIDIA
+  features reach NVIDIA's files: NGX, the port's own way and still the default, or Streamline,
+  NVIDIA's SDK. It takes effect the next time the game starts. You still add `nvngx_dlss.dll` and
+  `nvngx_dlssg.dll` yourself; Streamline's own files come with the port and need the Microsoft
+  Visual C++ 2015-2022 runtime (without it the game uses NGX). Uncharted 3 (RTX 5070):
+  - DLSS upscaling: the same frame rate as NGX at 1080p and 4K.
+  - Frame Generation at 1080p: steadier frame times than NGX (99% of shown frames within 9.6 ms
+    against 12.2 ms, both at 60 real and 120 shown FPS; one Streamline run).
+  - Streamline's Frame Generation only adds frames while the game window has the focus. When you
+    switch to another window the frame rate limit counts real frames until you come back. It also
+    switches Reflex on and ignores VSync.
+  - At 4K with Frame Generation and Reflex, Streamline ran at about 43 real FPS, NGX at about 47.
+  Not tested: the RivaTuner overlay with Streamline, Uncharted 1 and 2, long sessions, input delay.
+
 - **Fixed (22 Oct 2026): the MSI Afterburner / RivaTuner overlay flickered or was missing.** Its
   on-screen display showed only now and then, with or without Frame Generation. On PCs whose screen
   is connected to the graphics card that runs the game, frames are now handed to the screen the

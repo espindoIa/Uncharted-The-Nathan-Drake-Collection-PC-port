@@ -23,6 +23,7 @@ New entries go at the end, dated, measured numbers only.
 - Reflex GPU idle diagnosis and early submit: `Reflex: GPU idle diagnosis and early submit (22 Oct 2026)`
 - FG model selector (none in NGX 310.9.16): `Frame Generation model (NGX)`
 - RTSS / MSI Afterburner OSD flicker, present queue, dev NGX banner: `RivaTuner / MSI Afterburner OSD flicker: the present queue (22 Oct 2026)`
+- Streamline backend (DLSS, FG, Reflex through SL 2.14.16; FG needs the window focused): `NVIDIA Streamline backend (23 Oct 2026)`
 - Measuring method (ab2.sh, abstats.py, PresentMon, profilers): see the Tools list in the U3 performance section above, and AGENTS.md "Measuring".
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
@@ -3843,3 +3844,41 @@ Performance A/B (bench.sh, 4K output, DLSS M, limit 120, FG and Reflex on, MT on
 - Third-queue anomalies, unexplained: one session never reached gameplay ("The game is not running"), one ran at 26.6 real / 53.2 shown FPS (p50 37.8 ms) in normal gameplay (end shot: the bar). Logs not kept (boot.log is overwritten per session). Not seen in the automatic sessions (3) nor in the A/A session.
 
 Not verified: a hybrid laptop with this build (the automatic choice should keep the third queue there: the iGPU owns the monitor's DXGI output); other overlays (Steam, Discord, OBS); U1 and U2; exclusive fullscreen; HDR; the cause of the two third-queue anomalies; RTSS's draw path by disassembly.
+
+## NVIDIA Streamline backend (23 Oct 2026)
+
+Goal: DLSS super resolution, DLSS Frame Generation, Reflex and PC Latency through NVIDIA Streamline (SL) 2.14.16 instead of the port's NGX bridge, as an option. Setting `nv_backend=ngx|streamline` (GOW3_NV_BACKEND), read at start; default `ngx`.
+
+Design:
+- SL is loaded by the runtime itself (gpu/shim/gow3_streamline.cpp), not by the MSVC bridge: the headers are MIT (vendored in gpu/third_party/streamline, `sl_nvperf.h` left out, Nsight Perf licence), the DLLs are loaded at run time. Only that file includes them, compiled with -std=gnu++20 (under C++23 sl_pcl.h aliases std::to_underlying and does not compile).
+- Load order: `sl.interposer.dll` from the exe folder, NVIDIA signature checked (sl::security::verifyEmbeddedSignature; GOW3_SL_UNSIGNED=1 accepts development DLLs), slInit with eDisableCLStateTracking | eUseManualHooking | eUseFrameBasedResourceTagging (the last one is needed by slSetTagForFrame), OTA off, projectId of the DLSS bridge. Any failure prints "Streamline: not used (<reason>); the NGX bridge stays" and the NGX path runs as before. The missing VC++ 2015-2022 runtime is one such reason (LoadLibrary error).
+- Vulkan routing (vk_platform.cpp, vk_instance.cpp): only vkCreateInstance, vkEnumeratePhysicalDevices, vkCreateDevice, vkCreate/DestroyWin32SurfaceKHR, swapchain create/destroy/get images, acquire, present and vkDeviceWaitIdle go through SL's proxies. Everything else stays on vulkan-1: SL's vkGetDeviceProcAddr also wraps hot vkCmd* calls (its log: "Hook sl.common:Vulkan:CmdBindPipeline is NOT supported"), which the recorder threads do not need.
+- Super resolution (vk_dlss.cpp, Dlss::ViaStreamline): viewport 1 with its own frame counter. The SL mode comes from slDLSSGetOptimalSettings (PickDlssMode, gpu/shim/gow3_streamline_mode.h): the smallest optimal size that holds the port's input, with the mode's minimum at or below it. Unit test `streamline-mode-test`.
+- Frame generation (vk_presenter.cpp): viewport 0, frame index = Reflex flip serial; inputs tagged per frame with slSetTagForFrame; the backbuffer tag only when the image is letterboxed (with a full-size tag SL warned "Invalid backbuffer resource extent"). DLSS-G is unloaded at device creation when frame_gen=0 and loaded/unloaded later with a swapchain recreate (Swapchain::RecreateAround; Swapchain::Destroy now clears the handle, the recreate otherwise destroyed it twice).
+- Reflex (gow3_reflex.cpp): markers, sleep and reports through SL's Reflex and PCL. With SL frame generation on, Reflex is forced to at least On: DLSS-G reports eFailReflexNotDetectedAtRuntime without it.
+- Launcher (Display) and in-game menu ("Applied on restart") offer the choice when sl.interposer.dll is present.
+- Packaging: STREAMLINE_SDK=<SL release> adds sl.interposer/common/dlss/dlss_g/reflex/pcl.dll (release license.txt: MIT) and licenses/nvidia-streamline. The nvngx_* DLLs of the release (RTX SDK licence) and NvLowLatencyVk.dll (Reflex SDK licence) stay out; the script refuses NvLowLatencyVk.dll. The player still adds nvngx_dlss.dll / nvngx_dlssg.dll.
+
+Frame generation only interpolates with the window focused:
+- Automated sessions (game started in the background) gave SL frame generation 60 real and 60 shown FPS in most runs, 120 shown in some. SL's verbose log (GOW3_SL_LOG=2): "dlfgPresent.cpp [shouldInterpolate] DLSS-G disabled: window not focused", then "interpolation state changed from disabled to enabled" once the game window got the focus. NGX frame generation does not depend on the focus.
+- C:\dev\bench\focusgame.ps1 gives the game window the focus after gameplay is reached (FOCUS=1 in bench.sh, slsmoke.sh, slab.sh). Focused, U3 meat market, 1080p, model K, FG on, Reflex off: 60.0 real / 120.2 shown FPS, shown p50 8.33 ms, p99 9.57 ms, 1% low 99 FPS (NGX in slab2, same case: 60 / 120.1, p50 6.07, p99 12.19 ms, 1% low ~80). One session; not an A/B.
+- Limiter fix: before, Presenter::FrameGenActive was true whenever the mode was on, so the frame limit halved real frames while SL showed none generated (60 real / 60 shown at a 120 cap). Now the presenter reads slDLSSGGetState every frame on the present thread and counts shown frames only while SL presented 2 frames for the last real one (one frame late). Unfocused check: about 86 real FPS, no generated frames, no halving. After 2 s on but not interpolating the log says so once, with whether the window has the focus. The FrameGen (Streamline) stats line now has with_inputs= and doubled=.
+
+Performance, interleaved A/B `slab2` (C:\dev\bench\slab.sh, slstats.py; one game session per window, 20 s standing, U3 meat market save; base = 2bf79ce build, ngx and sl = the new build; 3 rounds, rotated order; RTX 5070), real FPS by the port's count, medians, [bootstrap interval of the difference]:
+
+| Case | base | ngx | sl | sl - ngx |
+|---|---|---|---|---|
+| sr1080k (1080p, DLSS K, no FG, no Reflex) | 88.73 (3) | 89.21 (3) | 88.56 (3) | -0.65 [-2.77, +1.52] |
+| sr4k (player's settings, 4K DLAA, no FG, no Reflex) | 56.76 (3) | 55.49 (2) | 55.33 (3) | -0.16 [-0.50, +0.19] |
+
+- sr4k: SL's 1% low was 1.22 FPS lower than NGX [-1.83, -0.70]. The base's first session (59.0 FPS) is high against all the others (55.1-55.8); without it the base sits with the rest.
+- Upscaling through SL: no frame rate difference resolved.
+- 4K, FG + Reflex on (fgrx4k): SL 43.15 real FPS (3 sessions) against base 47.53 (2) and ngx 47.36 (1), -4.4 FPS [-4.89, -4.05] against base. Those SL sessions were not focused (no generated frames), so the loss is not frame generation work; SL's Reflex sleep grew to about 12-13 ms per frame. An earlier focused SL run at 4K: about 41.5 real / 83 shown, NGX 47.5 / 95. Not explained.
+- slab2's FG sessions with SL are invalid for frame generation (not focused). The focused FG A/B (slab3) was stopped by the user after one session (base fgrx4k: 48.7 real / 97.5 shown).
+- Harness: slab2 lost sessions when switching executables ("no gameplay", boot.log locked); slab.sh now copies the variant's exe with retries before each session.
+
+Environment note: since about 09:20 on 23 Oct every build, the 2bf79ce one included, shows SyncInterval 0 and AllowsTearing in PresentMon (Hardware: Independent Flip). Not caused by this change; cause not looked for.
+
+Seen once, not investigated: in one SL 4K screenshot Nate's head was missing in an idle animation (C:\dev\bench\sl_fg4k_on2.png); other SL shots show it. One NGX 1080p FG session (slab2 fg1080k_ngx_3) ran at 76.9 real / 104.3 shown instead of 60 / 120.
+
+Not verified: the regression checks (RTSS / Afterburner OSD with SL, Vulkan validation, U1 and U2 boots, a soak), the focused FG A/B (user stopped it), Reflex latency through SL (PCL markers in PresentMon or NVIDIA's overlay), the 4K Reflex loss's cause, packaging with STREAMLINE_SDK (script not run), a PC without the VC++ runtime (fallback path read, not run), HDR, exclusive fullscreen, AMD/Intel GPUs (SL should not load features there; not run).
