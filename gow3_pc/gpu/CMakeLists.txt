@@ -438,6 +438,9 @@ add_executable(page-state-test EXCLUDE_FROM_ALL ../tests/test_page_state.cpp)
 target_include_directories(page-state-test PRIVATE ../tests/stubs shim shadps4)
 target_link_libraries(page-state-test PRIVATE Boost::headers)
 target_compile_options(page-state-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_executable(skinning-writes-test EXCLUDE_FROM_ALL ../tests/test_skinning_writes.cpp)
+target_include_directories(skinning-writes-test PRIVATE shadps4)
+target_compile_options(skinning-writes-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 
 add_executable(fsr4-bench EXCLUDE_FROM_ALL tools/fsr4_bench.cpp
     shadps4/video_core/renderer_vulkan/fsr411/fsr411.cpp)

@@ -6,6 +6,16 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Experimental (23 Oct 2026): further Uncharted 3 crowd-rendering work.** Static mesh inputs can
+  stay in immutable GPU snapshots instead of being recycled through temporary copies. Two short
+  market comparisons did not establish a material FPS or smoothness improvement; this is opt-in
+  (`GOW3_STATIC_MESH_SNAPSHOTS=1`), not a released market fix. A separate opt-in experiment
+  (`GOW3_SKINNING_WRITE_BATCH=1`) prepares overlapping crowd-output views together. Deferred
+  forwarding (`GOW3_FORWARD_COPY_DEFER=1`, also needs `GOW3_FORWARD_COPIES=1`) is testing a way
+  to avoid a separate submission for each GPU copy while protecting immediate CPU consumers.
+  These are not verified market fixes. The installed
+  playable package is unchanged; technical evidence and rollback details are in `analysis/STATUS.md`.
+
 - **In progress (23 Oct 2026): Uncharted 3 market CPU stalls.** The earlier benchmarks stood
   at the save's gate, not in the meat market behind it. Readback handling now lets reads beside
   GPU results proceed on the game thread, and forwards copies of pending GPU results to the

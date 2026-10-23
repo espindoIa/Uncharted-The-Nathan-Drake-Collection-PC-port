@@ -301,8 +301,11 @@ public:
     /// them (the guest refills the buffer; see Rasterizer::ReadBackEopResults).
     /// gow3: `never_protect`: the pages stay accessible whatever the readback mode (results
     /// the guest reads only after a fence written when they land).
+    /// `guard_before_submit` (forwarding prototype): protect immediately, including false-sharing
+    /// accesses. A fault must submit an open tick on the GPU thread, not prewait on the guest.
     void DownloadRangesAsync(std::span<const std::pair<VAddr, u64>> ranges, bool protect = false,
-                             bool yield_to_cpu = false, bool never_protect = false);
+                             bool yield_to_cpu = false, bool never_protect = false,
+                             bool guard_before_submit = false);
 
     /// gow3 diagnostics (GOW3_CLOTH_PEEK=1): copies the GPU's data of [address, size) into a
     /// staging buffer (guest memory untouched); PollPeeks scans finished copies for exploded
@@ -790,6 +793,9 @@ private:
         /// for this readback only (GOW3_ASYNC_READBACK=1; =2 leaves them readable, stale).
         std::vector<std::pair<VAddr, u64>> watched;
         bool watching = false; ///< `watched` is read-protected (from the first poll after submission)
+        /// Forwarded memcpy: protected before return, even before submission. False-sharing
+        /// shortcuts must not open these pages; a CPU consumer submits/lands the copy first.
+        bool strict_guard = false;
         bool yield_to_cpu = false; ///< see DownloadRangesAsync
         bool open = false; ///< gow3: never protected (fence-gated results), in open_readback_ranges
         /// gow3: run once the data is in guest memory (fence labels of ray-cast batches).
@@ -846,6 +852,7 @@ private:
         u64 size;
         u64 tick;
         std::chrono::steady_clock::time_point queued;
+        bool strict_guard;
     };
     mutable std::mutex watched_index_mutex;
     std::unordered_map<u64, std::vector<WatchedPiece>> watched_index; ///< page number -> pieces
@@ -859,6 +866,7 @@ public:
     struct WatchedRead {
         u32 owners = 0;
         u64 tick = 0;
+        u64 strict_tick = 0; ///< strict guard on the whole page, including false-sharing accesses
         std::chrono::steady_clock::time_point queued{}; ///< of the newest readback it touches
     };
     [[nodiscard]] WatchedRead LookupWatchedRead(VAddr addr, u64 size) const;

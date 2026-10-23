@@ -42,6 +42,7 @@
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
+#include "video_core/renderer_vulkan/vk_skinning_writes.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -259,6 +260,14 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     GpuProfiler::Init(instance, scheduler);
     if (DrawPipeWanted()) {
         constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
+        // staticmesh1/2 (23 Oct): no material FPS gain yet. Keep the structural prototype
+        // opt-in and do not allocate its 64 MiB for players until it earns its residency.
+        const char* snapshots = std::getenv("GOW3_STATIC_MESH_SNAPSHOTS");
+        if (snapshots && snapshots[0] == '1') {
+            static_mesh_buffer = std::make_unique<VideoCore::Buffer>(
+                instance, 0, StaticMeshCapacity, VideoCore::MemoryType::Stream, "static crowd snapshots");
+            ASSERT(!static_mesh_buffer->mapped_data.empty());
+        }
         draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
     }
     // gow3: this thread joins the texture binding helper before it changes image state.
@@ -1776,6 +1785,7 @@ u64 Rasterizer::RingWatchToken(VAddr address, u64 size, bool probe) {
             if (!state.watched) {
                 page_manager.UpdatePageWatchers<true>(page, 4096);
                 state.watched = true;
+                state.version = ++ring_watch_version;
                 g_ring_watched.fetch_add(1, std::memory_order_relaxed);
                 ++g_ring_reuse.promoted;
             }
@@ -1828,6 +1838,105 @@ void Rasterizer::RingUnwatch(VAddr address, u64 size, bool written) {
         }
         ++it;
     }
+}
+
+// 23 Oct 2026: a per-range version rather than the global invalidation serial. Unrelated CPU
+// writes must not invalidate every mesh. A unique monotonically increasing serial is assigned
+// to each page promotion: changing any page makes the maximum newer; a missing watch refuses
+// reuse. The page-locking/CPU-fault protocol itself is the same as RingWatchToken.
+u64 Rasterizer::StaticMeshWatchVersion(VAddr address, u64 size) {
+    std::scoped_lock lock{ring_watch_mutex};
+    u64 version = 0;
+    for (VAddr page = Common::AlignDown(address, VAddr{4096}); page < address + size; page += 4096) {
+        const auto it = ring_watch_pages.find(page);
+        if (it == ring_watch_pages.end() || !it->second.watched) {
+            return 0;
+        }
+        version = std::max(version, it->second.version);
+    }
+    return version;
+}
+
+bool Rasterizer::TryStaticMeshSnapshot(
+    u32 index, VAddr address, u64 size,
+    boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out) {
+    if (!static_mesh_buffer || LateConstantsEnabled() ||
+        Gow3Toggle::Disabled(Gow3Toggle::RingReuse) ||
+        Gow3Toggle::Disabled2(Gow3Toggle::StaticMeshSnapshots) ||
+        Gow3Toggle::Disabled2(Gow3Toggle::RingDurableReuse)) {
+        return false;
+    }
+    const VAddr lo = Common::AlignDown(address, VAddr{4096});
+    const VAddr hi = Common::AlignUp(address + size, VAddr{4096});
+    if (Core::MemoryManager::BackingWritten(address, size) ||
+        buffer_cache.MayBeGpuWritten(lo, hi - lo) || PendingWriteOverlaps(address, size)) {
+        return false;
+    }
+    const u64 key = address ^ (size << 48);
+    const u64 generation = ring_watch_gen.load(std::memory_order_acquire);
+    auto it = static_mesh_copies.find(key);
+    if (it != static_mesh_copies.end() &&
+        (it->second.address != address || it->second.size != size)) {
+        // The compact hash is not a range identity. A collision can evict a lookup only;
+        // the old immutable allocation remains alive for packets already using it.
+        static_mesh_copies.erase(it);
+        it = static_mesh_copies.end();
+    }
+    u64 version = 0;
+    if (it != static_mesh_copies.end()) {
+        auto& copy = it->second;
+        if (copy.observed_gen != generation) {
+            ++static_mesh_rechecks;
+            version = StaticMeshWatchVersion(address, size);
+            if (!version || version != copy.version) {
+                static_mesh_copies.erase(it);
+                it = static_mesh_copies.end();
+            } else {
+                copy.observed_gen = generation;
+            }
+        }
+    }
+    if (it == static_mesh_copies.end()) {
+        if (!version) {
+            version = StaticMeshWatchVersion(address, size);
+        }
+        if (!version) {
+            return false; // let the existing ring's repeated-use heuristic establish watches
+        }
+        const u64 alignment = std::max<u64>(instance.StorageMinAlignment(), instance.UniformMinAlignment());
+        const u64 offset = Common::AlignUp(static_mesh_position, alignment);
+        if (offset > StaticMeshCapacity || size > StaticMeshCapacity - offset) {
+            ++static_mesh_full;
+            return false;
+        }
+        memory->CopySparseMemory(address, static_mesh_buffer->mapped_data.data() + offset, size);
+        static_mesh_buffer->Flush(offset, size);
+        static_mesh_position = offset + size;
+        it = static_mesh_copies.emplace(key, StaticMeshCopy{address, size, offset, version, generation}).first;
+        ++static_mesh_uploads;
+    } else {
+        ++static_mesh_hits;
+    }
+    const u64 offset = it->second.offset;
+    // Keep sampled verification separate from RingReuseCheck (which copies every transient
+    // reuse). This can accompany a short performance check without restoring all ring copies.
+    static const bool check = [] {
+        const char* env = std::getenv("GOW3_STATIC_MESH_CHECK");
+        return env && env[0] == '1';
+    }();
+    if ((check || RingReuseCheck()) && ((static_mesh_hits + static_mesh_uploads) & 255) == 0) {
+        thread_local std::vector<u8> bytes;
+        bytes.resize(size);
+        memory->CopySparseMemory(address, bytes.data(), size);
+        ++static_mesh_checks;
+        if (std::memcmp(bytes.data(), static_mesh_buffer->mapped_data.data() + offset, size) != 0) {
+            ++static_mesh_mismatches;
+            static_mesh_copies.erase(it);
+            return false; // refuse stale input; original ring path takes a fresh snapshot
+        }
+    }
+    out.push_back({index, static_cast<u32>(size), offset | StaticMeshOffsetFlag, address});
+    return true;
 }
 
 void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
@@ -1886,6 +1995,13 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
                         (unsigned long long)ring_size_buckets[0], (unsigned long long)ring_size_buckets[1],
                         (unsigned long long)ring_size_buckets[2], (unsigned long long)ring_size_buckets[3]);
             std::fflush(stdout);
+            std::printf("Static mesh snapshots (5 s): %llu hits, %llu uploads, %llu full, %.1f MiB "
+                        "resident, %llu range rechecks; verify %llu checks, %llu mismatches\n",
+                        static_mesh_hits, static_mesh_uploads, static_mesh_full,
+                        static_mesh_position / 1048576.0, static_mesh_rechecks,
+                        static_mesh_checks, static_mesh_mismatches);
+            static_mesh_hits = static_mesh_uploads = static_mesh_full = static_mesh_rechecks = 0;
+            static_mesh_checks = static_mesh_mismatches = 0;
             ring_copy_count = ring_copy_bytes = ring_repeat_count = ring_repeat_bytes = 0;
             ring_size_buckets = {};
         }
@@ -2059,6 +2175,15 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         }
         const VAddr address = vsharp.base_address;
         if (address == 0 || vsharp.GetSize() == 0) {
+            continue;
+        }
+        // Resident immutable inputs already have page-watch/mapping lifetime validation. On a
+        // hit do not repeat ClampRangeSize and the buffer tracker's locked dirty-page lookup
+        // for every tiny skinning dispatch. Pending/GPU/backing writes are checked by the pool.
+        const u64 requested = vsharp.GetSize();
+        if (stage.pgm_hash == 0x8f067540 && index < 5 && !desc.is_written &&
+            requested >= RingWatchMinBytes && requested <= VideoCore::BufferCache::STREAM_THRESHOLD &&
+            TryStaticMeshSnapshot(index, address, requested, out)) {
             continue;
         }
         const u64 size = memory->ClampRangeSize(address, vsharp.GetSize());
@@ -6011,6 +6136,22 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                              Shader::PushData& push_data, u32& write_index) {
     const u64 alignment = instance.StorageMinAlignment();
     const bool compute_stage = stage.hw_stage == Shader::HwStage::Compute;
+    // 23 Oct profile (prof_st1): ObtainBuffer is 15.4% of stage B, GpuRangesAdd 4.7%.
+    // The crowd kernel writes position/normal/tangent through overlapping views of one output
+    // allocation (+0/+12/+20). Acquire/synchronize their exact contiguous union once, not three
+    // times. This memo lasts ONE dispatch: no cached residency, content or lifetime assumptions.
+    struct WriteGroup {
+        const VideoCore::Buffer* buffer = nullptr;
+        VAddr address = 0;
+        u64 size = 0, offset = 0;
+    } write_group;
+    static const bool batch_writes = [] {
+        const char* env = std::getenv("GOW3_SKINNING_WRITE_BATCH");
+        return env && env[0] == '1';
+    }();
+    const bool coalesce = batch_writes && compute_stage && stage.pgm_hash == 0x8f067540 &&
+                          !Gow3Toggle::Disabled2(Gow3Toggle::CoalescedSkinningWrites);
+    static u64 write_groups = 0, write_group_refused = 0, write_group_bytes = 0;
     ClothTrace(stage.pgm_hash, ~0u, 0, 0, false, compute_stage);
     for (u32 buffer_index = 0; buffer_index < stage.buffers.size(); ++buffer_index) {
         const auto& desc = stage.buffers[buffer_index];
@@ -6054,25 +6195,30 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             }
         }
         if (ring) {
+            const bool persistent = (ring->offset & StaticMeshOffsetFlag) != 0;
+            const u64 offset = ring->offset & ~StaticMeshOffsetFlag;
+            const u8* snapshot = persistent ? static_mesh_buffer->mapped_data.data() + offset
+                                            : constant_ring->Data(offset);
             // Uncharted 2's camera in the vertex user data: with multithreaded rendering the flat
             // user data reaches this stage as a ring copy made at stage A (the stage's own copy
             // may already hold a later draw's), so the camera is read from the ring.
             if (desc.buffer_type == Shader::BufferType::Flatbuf && flat_camera_depth &&
                 stage.sw_stage == Shader::SwStage::Vertex &&
                 camera_motion->OnFlatConstants(
-                    reinterpret_cast<const u32*>(constant_ring->Data(ring->offset)),
+                    reinterpret_cast<const u32*>(snapshot),
                     ring->size / sizeof(u32), flat_camera_depth)) {
                 flat_camera_depth = {};
             }
             // Copied by the GPU command thread into the constant ring (read-only).
             if (FrameCapture::Active() && memory->IsValidGpuMapping(ring->address, 0)) {
                 FrameCapture::Buffer(stage.pgm_hash, buffer_index, ring->address,
-                                     reinterpret_cast<const void*>(ring->address), ring->size);
+                                      snapshot, ring->size);
             }
             if (!desc.IsSpecial()) {
                 if (compute_stage && DispatchTraceCapturing()) [[unlikely]] {
                     DispatchTraceBind(buffer_index, desc, AmdGpu::Buffer{}, ring->address, ring->size,
-                                      "constant-ring-copy", nullptr, 0, ring->offset);
+                                       persistent ? "static-mesh-snapshot" : "constant-ring-copy",
+                                       nullptr, 0, offset);
                 }
                 if (ring->size == 864 && gbuffer_draw &&
                     memory->IsValidGpuMapping(ring->address, 0)) {
@@ -6080,7 +6226,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 }
                 push_data.AddOffset(binding.buffer, 0);
             }
-            buffer_infos.emplace_back(constant_ring->Handle(), ring->offset, ring->size);
+            buffer_infos.emplace_back(persistent ? static_mesh_buffer->Handle() : constant_ring->Handle(),
+                                      offset, ring->size);
         } else if (desc.IsSpecial()) {
             if (desc.buffer_type == Shader::BufferType::GdsBuffer) {
                 const auto* gds_buf = buffer_cache.GetGdsBuffer();
@@ -6256,8 +6403,63 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                             vsharp.num_records != 0 && !vsharp.swizzle_enable
                         ? u64(vsharp.num_records - 1) * vsharp.stride + desc.access_extent
                         : 0;
-                const auto [buffer, offset] = buffer_cache.ObtainBuffer(
-                    vsharp.base_address, size, desc.is_written, desc.is_formatted);
+                if (coalesce && buffer_index == 6 && stage.buffers.size() >= 9 &&
+                    desc.is_written && size == vsharp.GetSize() && size) {
+                    std::array<SkinningWriteView, 3> views{};
+                    views[0] = {vsharp.base_address, size};
+                    bool eligible = true;
+                    for (u32 slot = 7; slot <= 8; ++slot) {
+                        const auto& other = stage.buffers[slot];
+                        if (other.IsSpecial() || !other.is_written) {
+                            eligible = false;
+                            break;
+                        }
+                        const auto sharp = prepared ? prepared->buffer_sharps[slot]
+                                                    : other.GetSharp(stage);
+                        if (!sharp) {
+                            eligible = false;
+                            break;
+                        }
+                        views[slot - 6] = {sharp.base_address, sharp.GetSize()};
+                    }
+                    const u64 bytes = SkinningWriteUnion(views);
+                    eligible = eligible && bytes &&
+                               memory->ClampRangeSize(vsharp.base_address, bytes) == bytes;
+                    if (eligible) {
+                        // All descriptors here remain storage buffers. SynchronizeMemory's
+                        // is_texel_buffer path is only taken for !is_written, so formatted
+                        // stores have exactly the same acquisition semantics as raw stores.
+                        const auto [buffer, offset] =
+                            buffer_cache.ObtainBuffer(vsharp.base_address, bytes, true, false);
+                        write_group = {buffer, vsharp.base_address, bytes, offset};
+                        ++write_groups;
+                        write_group_bytes += bytes;
+                    } else {
+                        ++write_group_refused;
+                    }
+                    if (((write_groups + write_group_refused) & 4095) == 0) {
+                        static auto report = std::chrono::steady_clock::now();
+                        if (const auto now = std::chrono::steady_clock::now();
+                            now - report >= std::chrono::seconds{5}) {
+                            report = now;
+                            std::printf("Skinning write groups (5 s): %llu groups, %llu refused, "
+                                        "%llu acquisitions saved, %.1f MB union bytes\n",
+                                        write_groups, write_group_refused, write_groups * 2,
+                                        write_group_bytes / 1e6);
+                            write_groups = write_group_refused = write_group_bytes = 0;
+                        }
+                    }
+                }
+                const bool grouped = write_group.buffer && desc.is_written &&
+                                     buffer_index >= 6 && buffer_index <= 8 &&
+                                     vsharp.base_address >= write_group.address &&
+                                     size <= write_group.size &&
+                                     vsharp.base_address - write_group.address <= write_group.size - size;
+                const auto [buffer, offset] = grouped
+                    ? std::pair{write_group.buffer,
+                                write_group.offset + vsharp.base_address - write_group.address}
+                    : buffer_cache.ObtainBuffer(vsharp.base_address, size, desc.is_written,
+                                                desc.is_formatted);
                 if (compute_stage && DispatchTraceCapturing()) [[unlikely]] {
                     DispatchTraceBind(buffer_index, desc, vsharp, vsharp.base_address, size,
                                       desc.is_written ? "gpu-written-buffer"
@@ -8110,13 +8312,16 @@ int Rasterizer::GuestReadFault(VAddr addr) {
     if (read.owners == 0) {
         return 0; // not a buffer readback's watch (or landed meanwhile): the usual path
     }
-    if (!read.tick) {
+    const u64 tick = std::max(read.tick, read.strict_tick);
+    if (!tick) {
         return open && buffer_cache.OpenFalseSharingPage(addr, read.owners) ? 1 : 0;
     }
     const auto start = std::chrono::steady_clock::now();
-    if (prewait) {
-        scheduler.GetWorkSemaphore()->Wait(read.tick);
+    if (prewait && tick < scheduler.CurrentTick()) {
+        scheduler.GetWorkSemaphore()->Wait(tick);
     }
+    // A strict forwarded-copy guard can precede submission. Do NOT wait on that tick here:
+    // the normal fault command runs Scheduler::Wait, which flushes the open command buffer.
     // GOW3_FAULT_STATS: how old the readback was when the guest read its GPU bytes (queued at the
     // submission that holds the GPU work), and how long the guest then waited for the GPU.
     if (Gow3Stats::fault_stats) {
@@ -8181,14 +8386,31 @@ bool Rasterizer::ForwardGuestCopy(VAddr dst, VAddr src, u64 size) {
     }
     const auto start = std::chrono::steady_clock::now();
     bool done = false;
+    std::vector<u8> expected;
     liverpool->SendFaultCommand(
-        [this, dst, src, size, &done] {
+        [this, dst, src, size, &done, &expected] {
             DrainDrawPipe();
             // Landed meanwhile, or bytes the texture cache owns: the guest copies as usual.
             if (!buffer_cache.IsRegionGpuModified(src, size) ||
                 texture_cache.FindImageFromRange(src, size) ||
                 texture_cache.FindImageFromRange(dst, size)) {
                 return;
+            }
+            // A diagnostic copy checks the destination's immediate CPU-consumer contract,
+            // including a false-sharing read first. Capture a known source BEFORE the GPU
+            // copy; only this sampled verifier deliberately waits/lands the source early.
+            static const bool verify = [] {
+                const char* env = std::getenv("GOW3_FORWARD_COPY_VERIFY");
+                return env && env[0] == '1';
+            }();
+            static u64 copies = 0;
+            if (verify && ((copies++ & 127) == 0)) {
+                const std::pair<VAddr, u64> source{src, size};
+                buffer_cache.DownloadRanges(std::span{&source, 1});
+                expected.resize(size);
+                if (!memory->TryReadBacking(src, expected.data(), size)) {
+                    memory->CopySparseMemory(src, expected.data(), size);
+                }
             }
             texture_cache.InvalidateMemoryFromGPU(dst, size);
             const u32 bytes = static_cast<u32>(size);
@@ -8200,18 +8422,38 @@ bool Rasterizer::ForwardGuestCopy(VAddr dst, VAddr src, u64 size) {
                 .size = size,
             };
             runtime.CopyBuffer(src_buffer, dst_buffer, std::span{&copy, 1});
-            // The import is memcpy, not an asynchronous API: a CPU read of the destination
-            // immediately after return must see the copied value. Queue a protected readback
-            // and submit it before returning; the read then waits for this tick, not old RAM.
-            // Do not rely on the next per-frame poll (which leaves a readable stale window).
+            // memcpy is not an asynchronous API: protect its destination BEFORE returning.
+            // The deferred prototype protects even before submission, without allowing a
+            // false-sharing read to open the page. A CPU consumer submits/lands it on demand;
+            // GPU-only consumers use the queued result without a per-copy submission/drain.
             const std::pair<VAddr, u64> range{dst, size};
-            buffer_cache.DownloadRangesAsync(std::span{&range, 1}, true);
+            static const bool defer_requested = [] {
+                const char* env = std::getenv("GOW3_FORWARD_COPY_DEFER");
+                return env && env[0] == '1';
+            }();
+            const bool deferred = defer_requested &&
+                                  !Gow3Toggle::Disabled2(Gow3Toggle::ForwardCopyDefer);
+            buffer_cache.DownloadRangesAsync(std::span{&range, 1}, true, false, false, deferred);
             VideoCore::NoteReadbackKind(dst, size, VideoCore::ReadbackCpWrite);
-            Flush();
-            buffer_cache.PollReadbacksNow();
+            if (!deferred) {
+                Flush();
+                buffer_cache.PollReadbacksNow();
+            }
             done = true;
         },
         "forward-copy");
+    if (done && !expected.empty()) {
+        if ((dst & 4095) && IsMapped(dst - 1, 1)) {
+            const volatile u8 neighbour = *reinterpret_cast<const volatile u8*>(dst - 1);
+            (void)neighbour;
+        }
+        std::vector<u8> actual(size);
+        std::memcpy(actual.data(), reinterpret_cast<const void*>(dst), size); // MUST fault/land if pending
+        const bool match = actual == expected;
+        std::printf("Forwarded copy guard verify: %s, %llu bytes at %#llx (immediate CPU read)\n",
+                    match ? "OK" : "MISMATCH", size, dst);
+        ASSERT_MSG(match, "forwarded memcpy exposed stale destination bytes");
+    }
     if (Gow3Stats::fault_stats) {
         static std::atomic<u64> forwarded{0}, declined{0}, bytes{0}, us{0};
         static std::atomic<s64> last_s{0};

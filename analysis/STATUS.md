@@ -26,6 +26,7 @@ New entries go at the end, dated, measured numbers only.
 - Streamline backend (DLSS, FG, Reflex through SL 2.14.16; FG needs the window focused; the only option since the same day, NGX as fallback): `NVIDIA Streamline backend (23 Oct 2026)`, `Streamline as the only option (23 Oct 2026, later)`
 - Measuring method (ab2.sh, abstats.py, PresentMon, profilers): see the Tools list in the U3 performance section above, and AGENTS.md "Measuring".
 - U3 market stutter and CPU work (earlier 23 Oct benchmarks stood at the save's gate): `Cartagena market: stutter and lower frame rate from readback faults (23 Oct 2026)`.
+- Structural crowd experiments and exact rollback: `Structural crowd snapshots and output grouping (23 Oct 2026)`.
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
@@ -3947,4 +3948,159 @@ Interpretation: the baseline itself moved materially with external load. Cache w
 
 The direct compute-variant check (Disabled2 bit 33, ComputeVariantCheck) was added before this retest. Buffer-only compute variants validate all current descriptors, binding validity, stride/format/swizzle fields and RuntimeInfo against the previously used specialization; on any mismatch they run full construction. No resource addresses or contents are assumed immutable. It shares DescribeBuffer with the full constructor to avoid divergent field rules.
 
-`cpu_retest4k` (4K DLAA M, FG/Reflex on, backward route to the street, four six-second windows): original before 39.7 FPS (p99 32.8 ms, 1.17 external CPU cores); guest-read handling 43.6 (35.3 ms, 2.13 cores); protected forwarding 42.9 (32.7 ms, 1.55 cores); original after 44.1 (33.7 ms, 2.52 cores). Forwarding was exercised: 118 GPU copies / 5 s (~848 KB); GPU-byte read fault time fell to 151.7 ms in one reporting interval. However, this is NOT a valid FPS comparison: Streamline lost window focus during the guest-read/forwarding sequence (log: "game window does not have the focus", doubled fell from all frames to zero), and external CPU load also changed. Do not use these numbers as a gain/loss claim. The previous 25–31 FPS result was not reproduced, but its cause is not resolved. Eleven "Stuck fault" notices appeared across the whole run, including before the forwarding window; not attributable to forwarding alone. No assert/exception/device-loss report found. Game stopped and original toggle mask 0 0 restored. No further sessions started: user requested fewer tests.
+`cpu_retest4k` (4K DLAA M, FG/Reflex on, backward route to the street, four six-second windows): original before 39.7 FPS (p99 32.8 ms, 1.17 external CPU cores); guest-read handling 43.6 (35.3 ms, 2.13 cores); protected forwarding 42.9 (32.7 ms, 1.55 cores); original after 44.1 (33.7 ms, 2.52 cores). Forwarding was exercised: 118 GPU copies / 5 s (~848 KB); GPU-byte read fault time fell to 151.7 ms in one reporting interval. However, this is NOT a valid FPS comparison: Streamline lost window focus during the guest-read/forwarding sequence (log: "game window does not have the focus", doubled fell from all frames to zero), and external CPU load also changed. Do not use these numbers as a gain/loss claim. The previous 25–31 FPS result was not reproduced, but its cause is not resolved. Eleven "Stuck fault" notices appeared across the whole run, including before the forwarding window; not attributable to forwarding alone. No assert/exception/device-loss report found. Game stopped and original toggle mask 0 0 restored. No further sessions started in that retest task: user requested fewer tests.
+
+## Structural crowd snapshots and output grouping (23 Oct 2026)
+
+The user authorized invasive structural experiments, provided the exact previous state remains
+recoverable. Local checkpoint **c48f91f** contains the preceding CPU experiments and engineering
+notes; its matching unstripped executable is `C:/dev/bench/cpu_before_structural_20261023.exe`.
+Nothing pushed and the installed playable package has not been replaced. Do not reset unrelated
+work to return: leave the new environment overrides unset (their paths are opt-in), or build the
+checkpoint separately / use the preserved executable for an exact executable-level comparison.
+
+**Persistent immutable mesh snapshots.** Only read-only slots 0..4 of crowd compute `8f067540`,
+1 KiB to STREAM_THRESHOLD, qualify. A bounded 64 MiB append-only mapped buffer never overwrites an
+allocation; CPU write/unmap watch versions invalidate lookups, not already queued GPU bytes.
+Each watch promotion gets a unique increasing version; a range checks every page and takes the
+maximum version, so dropping/re-watching ANY page changes its answer. The global watch generation
+avoids walking unchanged ranges. Exact address/size checks reject compact-key collisions.
+GPU-written, backing-written and pending-written inputs are refused, changing bone slot 5 stays
+on the original ring path, and capacity exhaustion falls back without reclaiming in-flight bytes.
+No generic asynchronous memcpy, live guest pointer or omitted shader work is used.
+
+`C:/dev/bench/staticmesh_ab.py`: one U3 session per version, backward market route ending on the
+street, 1080p DLAA K, FG/Reflex off, four eight-second OFF/ON/ON/OFF windows, external CPU load
+recorded. These are short CPU-isolation measurements, NOT the player's 4K settings and NOT
+independent replications or an A/A-calibrated gain:
+
+| Test / window | Real FPS (S events) | p99 ms | External CPU cores |
+|---|---:|---:|---:|
+| staticmesh1 off / on / on / off | 79.8 / 79.4 / 81.6 / 79.8 | 16.3 / 16.4 / 16.0 / 15.9 | 1.41 / 1.81 / 1.52 / 1.44 |
+| staticmesh2 off / on / on / off | 78.2 / 79.9 / 78.9 / 78.5 | 15.9 / 15.8 / 16.2 / 15.6 | 2.16 / 2.30 / 2.44 / 2.10 |
+
+staticmesh1 qualifies/reuses the pool but retains mapping/dirty checks per buffer; staticmesh2
+tries residency BEFORE those checks and adds sampled byte verification. Its `.boot.log` records
+985 uploads, ~4.5 MiB resident, about two million hits per full five-second ON interval, no
+capacity failures, **29,870 sampled byte comparisons and zero mismatches**. The `.png` records
+the actual street view. Neither test establishes a material overall FPS or p99 improvement.
+Keep this prototype opt-in (`GOW3_STATIC_MESH_SNAPSHOTS=1`, Disabled2 bit 35 restores transient
+snapshots live). `GOW3_STATIC_MESH_CHECK=1` samples every 256 uses, independently of the expensive
+full transient-ring check; a mismatch refuses the snapshot and takes the original path.
+
+**Per-dispatch output grouping.** The existing `prof_st1` stage-B sampling report 7 (matching
+executable in that folder; symbolized with `symprof_k.py`) attributes 23.5% inclusive to BindBuffers,
+15.4% to ObtainBuffer, 4.7% to GpuRangesAdd and 10.7% to CompleteReadbacks. This is an older profile,
+not a new measured speedup. The next experiment acquires/synchronizes slots 6..8's overlapping
++0/+12/+20 output views once per dispatch, while preserving every descriptor offset/size and
+exact per-view hazard range. Only the observed contiguous equal-size layout qualifies; no holes
+become GPU-written. Null, differently sized, unmapped, oversized or small-write
+history-threshold-crossing groups take the original path. No memo survives the dispatch.
+Opt-in `GOW3_SKINNING_WRITE_BATCH=1`; Disabled2 bit 36 restores separate acquisitions live.
+This is NOT dispatch fusion and does not reduce the shader dispatch count.
+
+`skinwrite1` did NOT exercise grouping: an unnecessarily strict formatted-store exclusion kept
+the output views on the original path. Source inspection of BufferCache::SynchronizeMemory
+shows its is_texel_buffer branch runs only for READS; written storage descriptors have the same
+acquisition semantics whether formatted or raw. The next version removes that exclusion.
+Do not claim the test's 1.9 -> 76.2 FPS transition as an improvement: its OFF window hit an
+existing severe stall before grouping could run. Log evidence: repeated 0.5-1.0 s frames,
+Wait profile `buffer_cache.cpp:2667` (CompleteReadbacks -> scheduler.Wait) up to 997.5 ms,
+low game CPU (0.57 cores), and a stuck read of page 0x103c561000. The cause of these long waits
+is NOT established by the log. Later ON/OFF windows, which both used separate acquisitions,
+were 79.8/81.1 FPS at 1.21/1.19 external cores. Retain this run as stutter evidence, not a
+performance comparison. Its `.on.png`/`.png` show the intended street scene.
+
+`skinwrite2` exercised grouping (1080p DLAA K, FG/Reflex off, static snapshots disabled):
+OFF/ON/ON/OFF 74.5/78.0/77.8/74.0 real FPS; p99 18.7/16.5/16.2/18.0 ms; external CPU
+2.22/1.97/1.99/2.40 cores. Full ON reporting intervals record ~594-606k groups and ~1.2M
+redundant acquisitions saved per five seconds, zero refusals. This verifies the path runs, NOT
+an isolated 5% gain (external load was lower ON). `skinning-writes-test` passed with asserts
+enabled, checking exact union coverage, offsets, unequal sizes, overflow, gaps and the 4 KiB
+history boundary. No assert/device-loss/stuck-fault line in that run; screenshots are limited
+visual evidence, not proof that every vertex/readback is correct. Other games/long sessions not
+tested. The feature stays opt-in.
+
+### Updated diagnosis at 4K, before further changes
+
+`C:/dev/bench/market_bottleneck1` is one short U3 backward-market diagnostic (4K DLAA M, Reflex
+on, FG off, 120 cap, MT on; BOTH new structural paths off). Contains matching executable,
+CPU stacks every five seconds at a 3 ms sampling interval, GPU-label timestamps, submit timeline,
+exact stationary window (`window.json`), start/end screenshots and boot log. Instrumented run:
+absolute FPS and costs are NOT a clean performance comparison. The GPU label "DLSS evaluate
+(NGX)" is a legacy hardcoded profiler string; startup confirms the Streamline backend.
+
+The saved street scene's last GPU windows show DLAA evaluation ~7.6-8.1 ms/frame, crowd compute
+~1.2-1.4 ms/frame for ~1,530 dispatches, and ~5-6 ms/frame BETWEEN submissions. The last term
+does not establish a CPU-saturation bottleneck: it includes CPU/guest dependencies, pacing and
+Reflex. The 16 s stationary window used 3.45 logical CPU equivalents for the game, 1.46 external
+(40.9% system CPU). Worker startup reports `6 (+1 scanner, 12 hardware threads)`; Available()
+counts the process's allowed affinity mask, so helpers are not restricted to six CPUs.
+
+Sample report 13 (1,394 command-thread / 1,399 stage-B samples): CollectRingBindings now 13.8%
+inclusive of the command thread, GetComputePipeline 6.2%, DrainDrawPipe 13.7%, and ProcessLoop
+kernel waiting ~23%; stage B's BindBuffers 14.3%, ObtainBuffer 9.1%, wait/backoff ~40.4%.
+These percentages are per-thread wall samples and overlap through inclusive callers; NEVER
+sum them into frame time. They do not support "add workers until all twelve CPUs are busy" as
+the fix at 4K. The earlier 31.6% CPU-bound profile is not the current 4K bottleneck ranking.
+
+The concrete guest dependency remains: one report records 107 reads of solver matrices at
+guest RIP 0xd23c6ec, ~1,016 ms summed guest-thread wait per five seconds; the average GPU wait
+for such a read was ~9.07 ms. A later interval has 69 reads / 689 ms. These are SUMS across
+threads, not seconds added directly to frame time. The CPU then copies the matrices into the
+skinning palette that the GPU reads. More idle CPU helpers cannot execute through that fence.
+The half-to-one-second stall from skinwrite1 did not reproduce in this diagnostic; its cause
+remains unverified.
+
+### Deferred guarded forwarding prototype
+
+To remove the per-copy submission/round trip without the earlier stale-destination window,
+`GOW3_FORWARD_COPY_DEFER=1` (also needs `GOW3_FORWARD_COPIES=1`, Disabled2 bit 37 restores the
+old submitted-copy path) queues the destination's readback and protects it BEFORE memcpy
+returns, including when its tick has not been submitted. CPU faults on an unsubmitted tick go
+to the command thread to submit it, never prewait for an unsignalled tick. Strict memcpy pages
+are excluded from both false-sharing opens and queued unwatch requests. CPU-only upload pieces
+use the backing RAM view in this mode, avoiding a copy-worker fault while submission waits for
+that worker. GPU ownership exclusions remain in the upload selection; no GPU-owned upload is
+replaced with stale CPU bytes.
+
+`GOW3_FORWARD_COPY_VERIFY=1` samples one accepted copy per 128: captures known source bytes,
+deliberately reads a destination-page neighbour then the destination immediately after the
+forwarded operation, compares bytes and asserts on mismatch. Only this diagnostic sample lands
+the source early; normal forwarded operations do not. Results below cover sampled runtime
+verification, not a general correctness or FPS claim. Generic copy forwarding remains
+opt-in and this is not a released market fix.
+
+`copydefer1` subsequently built and ran the guarded protocol (4K DLAA M, Reflex on, FG off,
+static pool/output grouping disabled). OFF here means the PREVIOUS protected GPU-forwarding
+path, not a no-forwarding baseline; both modes have GOW3_FORWARD_COPIES=1. Four six-second
+OFF/ON/ON/OFF windows: 39.8/39.7/40.0/42.2 real FPS, p99 30.2/31.2/31.1/34.3 ms, external
+0.95/0.73/1.40/3.20 CPU equivalents. No throughput or p99 improvement demonstrated. Around
+150-160 copies/five seconds ran; moving their submission did not materially accelerate the frame.
+14 diagnostic immediate-read byte comparisons passed, zero mismatches; four were in the deferred
+ON phase (10,320-byte copies). The other checks include a 1,584-byte case on the previous path.
+This verifies those samples only, not all races, map/unmap, other games or long sessions.
+Three stuck-fault notices occurred, including two before ON, no assert/exception/device loss
+found. Screenshots show the expected street scene. Mask restored to 0 0, INI bytes restored and
+the script's own game stopped. The final rebuild adds guard-allocation assertions and corrects
+the queued-age statistic for a strict false-sharing read (one diagnostic line had a zero epoch
+and printed an impossible age); no further game run for those diagnostic/assertion additions.
+
+**Conclusion after this experiment:** readback waits are real and a concrete synchronization
+cost, but eliminating/forwarding an individual wait is NOT proof it is the frame's critical
+path. Earlier statements treating that cost alone as the sustained-FPS cause were too strong.
+The updated 4K evidence shows the largest individual GPU pass is DLAA M, plus serialized
+CPU/guest/GPU dependencies and pacing gaps; there is no single proven whole-market fix yet.
+No new optimization is enabled by default and no released FPS gain is claimed.
+
+Submit timeline cross-check for the same 16 s stationary diagnostic: all three schedulers'
+GPU timestamp spans, aligned by the minimum host-done minus GPU-end offset and merged, cover
+12,482 ms of 16,000 ms (~78%); ~3,518 ms lies outside those spans. This is NOT ALU utilization
+and not evidence all gaps are avoidable. Instrumented S-event throughput 44.6 FPS, p99 32.1 ms.
+File modification times mapped to the monotonic clock confirm CPU reports 13 and 14 fit wholly
+inside the stationary window (not the backward walk). Raw evidence stays outside the repository.
+
+Final checks: runtime rebuild succeeded; `skinning-writes-test` passed again (asserts enabled),
+`git diff --check` clean apart from Git's CRLF-conversion notices; no game instance left running.
+No regression suite/FG comparison/other-game tests, following the request for fewer short tests.
+Structural source changes remain uncommitted; the earlier checkpoint remains c48f91f.

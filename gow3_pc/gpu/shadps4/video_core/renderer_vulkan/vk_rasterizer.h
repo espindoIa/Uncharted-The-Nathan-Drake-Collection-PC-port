@@ -704,13 +704,34 @@ private:
     struct RingWatchPage {
         bool watched;
         u8 faults; ///< CPU writes that dropped its watch; RingWatchMaxFaults: never again
+        u64 version; ///< unique promotion serial; a re-watched/re-mapped page gets a new one
     };
     std::mutex ring_watch_mutex;
     std::unordered_map<VAddr, RingWatchPage> ring_watch_pages;
     std::atomic<u64> ring_watch_gen{0};
+    u64 ring_watch_version = 0; ///< under ring_watch_mutex, never reused after an unmap
     /// `probe` (GOW3_STAGEA_VERIFY): changes nothing; 0 when a page would need a new watch.
     u64 RingWatchToken(VAddr address, u64 size, bool probe = false);
     void RingUnwatch(VAddr address, u64 size, bool written);
+    u64 StaticMeshWatchVersion(VAddr address, u64 size);
+    bool TryStaticMeshSnapshot(u32 index, VAddr address, u64 size,
+                              boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out);
+    // Append-only: invalidating a lookup NEVER overwrites an earlier packet's snapshot.
+    // Bounded to 64 MiB; exhausted or untracked inputs fall back to the constant ring.
+    static constexpr u64 StaticMeshCapacity = 64ull << 20;
+    static constexpr u64 StaticMeshOffsetFlag = 1ull << 63;
+    struct StaticMeshCopy {
+        VAddr address;
+        u64 size;
+        u64 offset;
+        u64 version;
+        u64 observed_gen;
+    };
+    std::unique_ptr<VideoCore::Buffer> static_mesh_buffer;
+    std::unordered_map<u64, StaticMeshCopy> static_mesh_copies;
+    u64 static_mesh_position = 0;
+    u64 static_mesh_hits = 0, static_mesh_uploads = 0, static_mesh_full = 0;
+    u64 static_mesh_rechecks = 0, static_mesh_checks = 0, static_mesh_mismatches = 0;
     static constexpr u32 RingCopyBits = 12;
     std::array<RingCopy, 1u << RingCopyBits> ring_copies{};
     // 23 Oct 2026 profile: CollectRingBindings is 31.6% of stage A, including 13% copying.

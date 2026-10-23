@@ -221,6 +221,16 @@ enum : std::uint64_t {
     /// Opt-in experiment (GOW3_COMMANDS_STAGE_B=1): cache/fault commands execute in-order on
     /// stage B rather than draining it on stage A. Set: original command-thread execution.
     CommandsOnStageB = 1ull << 34,
+    /// Opt-in (GOW3_STATIC_MESH_SNAPSHOTS=1): immutable crowd inputs survive ring recycling in
+    /// an append-only GPU buffer. CPU write/unmap versions invalidate lookups, not queued bytes.
+    /// Set: original transient snapshots. 23 Oct short tests: no material FPS gain established.
+    StaticMeshSnapshots = 1ull << 35,
+    /// Opt-in (GOW3_SKINNING_WRITE_BATCH=1): acquire the overlapping output views of one crowd
+    /// dispatch together. Keeps each descriptor's offset/size and each exact barrier range.
+    CoalescedSkinningWrites = 1ull << 36,
+    /// Opt-in (GOW3_FORWARD_COPY_DEFER=1, also needs forwarded copies): protect a memcpy
+    /// destination before returning, but submit with normal work unless the CPU consumes it.
+    ForwardCopyDefer = 1ull << 37,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

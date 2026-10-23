@@ -627,7 +627,17 @@ bool BufferCache::DiscardCpuWritePage(VAddr page) {
 void BufferCache::RunGuestCopy(const Gow3Copy::Item& item) {
     auto* cache = static_cast<BufferCache*>(item.context);
     auto* dst = reinterpret_cast<u8*>(item.destination);
-    cache->memory->CopySparseMemory(item.source, dst, item.size);
+    // Only CPU-owned upload pieces reach this helper (ObtainBuffer's clean stream path, or
+    // ForEachLazyUploadPiece excluding GPU-owned bytes). Read the same physical RAM through
+    // its backing view: a no-access neighbour in a forwarded-copy page must not fault on a
+    // copy worker while submission waits for that worker. GPU-owned inputs never use this path.
+    static const bool guarded_copies = [] {
+        const char* env = std::getenv("GOW3_FORWARD_COPY_DEFER");
+        return env && env[0] == '1';
+    }();
+    if (!guarded_copies || !cache->memory->TryReadBacking(item.source, dst, item.size)) {
+        cache->memory->CopySparseMemory(item.source, dst, item.size);
+    }
     auto* buffer = reinterpret_cast<Buffer*>(item.extra);
     buffer->Flush(dst - buffer->mapped_data.data(), item.size);
 }
@@ -676,7 +686,7 @@ void BufferCache::ReleaseStuckPage(VAddr page, bool is_write, bool assume_locks)
             if (!holders(newest)) {
                 outcome = "landed (polled)";
                 landed.fetch_add(1, std::memory_order_relaxed);
-            } else if (newest < scheduler.CurrentTick()) {
+            } else if (newest < scheduler.CurrentTick() || LookupWatchedRead(page, 4096).strict_tick) {
                 CompleteReadbacks(true, newest);
                 outcome = "landed (waited for the GPU)";
                 waited.fetch_add(1, std::memory_order_relaxed);
@@ -2047,7 +2057,8 @@ void BufferCache::RecycleSnapshot(SnapshotBytes& bytes) {
 }
 
 void BufferCache::DownloadRangesAsync(std::span<const std::pair<VAddr, u64>> ranges, bool protect,
-                                      bool yield_to_cpu, bool never_protect) {
+                                      bool yield_to_cpu, bool never_protect, bool guard_before_submit) {
+    ASSERT(!guard_before_submit || (protect && !yield_to_cpu && !never_protect));
     const ReadbackScope readback_scope{*this, "DownloadRangesAsync"};
     last_readback_tick = scheduler.CurrentTick();
     PendingReadback readback;
@@ -2075,6 +2086,7 @@ void BufferCache::DownloadRangesAsync(std::span<const std::pair<VAddr, u64>> ran
         });
     }
     if (total_size_bytes == 0) {
+        ASSERT(!guard_before_submit); // a forwarded copy cannot return without a destination guard
         return;
     }
     for (const auto& [address, size] : readback.pieces) {
@@ -2246,6 +2258,16 @@ void BufferCache::DownloadRangesAsync(std::span<const std::pair<VAddr, u64>> ran
         }
     }
     pending_readbacks.push_back(std::move(readback));
+    if (guard_before_submit) {
+        auto& guarded = pending_readbacks.back();
+        guarded.strict_guard = true;
+        ASSERT(!guarded.watched.empty());
+        IndexWatched(guarded); // deque element identity, NOT the moved local object
+        for (const auto& [address, size] : guarded.watched) {
+            page_manager->UpdatePageWatchers<true, true>(address, size);
+        }
+        guarded.watching = true;
+    }
     ++g_async_readbacks;
     SweepTracking();
 }
@@ -2883,14 +2905,15 @@ void BufferCache::IndexWatched(const PendingReadback& readback) {
     std::scoped_lock lock{watched_index_mutex};
     for (const auto& [address, size] : watched) {
         for (VAddr page = address; page < address + size; page += 4096) {
-            watched_index[page >> 12].push_back({&readback, 0, 0, readback.tick, readback.queued});
+            watched_index[page >> 12].push_back(
+                {&readback, 0, 0, readback.tick, readback.queued, readback.strict_guard});
         }
     }
     for (const auto& [piece, piece_size] : readback.pieces) {
         for (VAddr page = Common::AlignDown(piece, VAddr{4096}); page < piece + piece_size; page += 4096) {
             if (is_watched(page)) {
                 watched_index[page >> 12].push_back(
-                    {&readback, piece, piece_size, readback.tick, readback.queued});
+                    {&readback, piece, piece_size, readback.tick, readback.queued, readback.strict_guard});
             }
         }
     }
@@ -2920,10 +2943,18 @@ BufferCache::WatchedRead BufferCache::LookupWatchedRead(VAddr addr, u64 size) co
     for (const auto& entry : it->second) {
         if (entry.address == 0) {
             ++read.owners;
+            if (entry.strict_guard) {
+                if (entry.tick >= std::max(read.tick, read.strict_tick)) {
+                    read.queued = entry.queued;
+                }
+                read.strict_tick = std::max(read.strict_tick, entry.tick);
+            }
         } else if (entry.address < addr + size && addr < entry.address + entry.size &&
                    entry.tick >= read.tick) {
             read.tick = entry.tick;
-            read.queued = entry.queued;
+            if (entry.tick >= read.strict_tick) {
+                read.queued = entry.queued;
+            }
         }
     }
     return read;
@@ -2931,8 +2962,17 @@ BufferCache::WatchedRead BufferCache::LookupWatchedRead(VAddr addr, u64 size) co
 
 bool BufferCache::OpenFalseSharingPage(VAddr addr, u32 owners) {
     const VAddr page = Common::AlignDown(addr, VAddr{4096});
-    if (!page_manager->OpenForReads(page, owners)) {
-        return false;
+    {
+        // Serialize the strict-guard check with IndexWatched. An older false-sharing request
+        // must not open a newer memcpy guard, even if an older watcher left in the meantime.
+        std::scoped_lock lock{watched_index_mutex};
+        if (const auto it = watched_index.find(page >> 12); it != watched_index.end() &&
+            std::ranges::any_of(it->second, [](const WatchedPiece& p) { return p.strict_guard; })) {
+            return false;
+        }
+        if (!page_manager->OpenForReads(page, owners)) {
+            return false;
+        }
     }
     ++g_read_same_page;
     ++g_read_same_page_guest;
@@ -2948,6 +2988,9 @@ bool BufferCache::OpenFalseSharingPage(VAddr addr, u32 owners) {
 void BufferCache::UnwatchPage(VAddr page) {
     const ReadbackScope readback_scope{*this, "UnwatchPage"};
     for (auto& readback : pending_readbacks) {
+        if (readback.strict_guard) {
+            continue; // a returned memcpy must never expose stale destination RAM
+        }
         for (size_t i = 0; i < readback.watched.size(); ++i) {
             const auto [address, size] = readback.watched[i];
             if (page < address || page >= address + size) {
