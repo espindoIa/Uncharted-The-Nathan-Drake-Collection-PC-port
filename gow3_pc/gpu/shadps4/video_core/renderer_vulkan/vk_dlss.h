@@ -36,6 +36,10 @@ public:
     [[nodiscard]] bool Available() const;
     /// Why DLSS cannot run on this system (empty when it can, or before device creation).
     [[nodiscard]] std::string Problem() const;
+    /// gow3 23 Oct 2026: the calls go through Streamline (nv_backend=streamline, gow3_streamline.h)
+    /// instead of the NGX bridge. Frame generation then presents through Streamline's swapchain
+    /// hooks, not through FrameGenCreate / FrameGenEvaluate.
+    [[nodiscard]] bool ViaStreamline() const;
 
     struct Resource {
         vk::Image image;

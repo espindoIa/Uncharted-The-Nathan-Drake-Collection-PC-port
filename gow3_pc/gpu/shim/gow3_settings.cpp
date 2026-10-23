@@ -176,6 +176,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.reflex = std::clamp(i, 0, 2);
     } else if (key == "frame_gen") {
         v.frame_gen = std::clamp(i, 0, 1);
+    } else if (key == "nv_backend") {
+        v.nv_backend = value == "streamline" || value == "1" ? NvBackendStreamline : NvBackendNgx;
     } else if (key == "render_resolution") {
         v.render_resolution = Gow3Graphics::ParseResolution(value);
     } else if (key == "engine_fps") {
@@ -288,6 +290,7 @@ void Load() {
         {"GOW3_RCAS", "rcas"},                        {"GOW3_FRAMES_AHEAD", "frames_queued"},
         {"GOW3_DLSS_MODEL", "dlss_model"},            {"GOW3_ANISOTROPY", "anisotropy"},
         {"GOW3_REFLEX", "reflex"},                    {"GOW3_FRAME_GEN", "frame_gen"},
+        {"GOW3_NV_BACKEND", "nv_backend"},
         {"GOW3_PAD_MAP", "pad_map"},                  {"GOW3_KEY_MAP", "key_map"},
         {"GOW3_MOUSE_MAP", "mouse_map"},              {"GOW3_MOUSE", "mouse"},
         {"GOW3_MOUSE_SENS", "mouse_sens"},            {"GOW3_MOUSE_INVERT", "mouse_invert"},
@@ -312,6 +315,7 @@ void Load() {
                                                  : v.engine_fps.load();
     v.startup_deferred_readback = v.deferred_readback;
     v.startup_stale_readback = v.stale_readback;
+    v.startup_nv_backend = v.nv_backend;
     synced = Current();
     ControlsChanged();
 }
@@ -319,7 +323,7 @@ void Load() {
 bool GraphicsNeedRestart() {
     const auto& v = Get();
     return v.deferred_readback != v.startup_deferred_readback ||
-           v.stale_readback != v.startup_stale_readback;
+           v.stale_readback != v.startup_stale_readback || v.nv_backend != v.startup_nv_backend;
 }
 
 namespace {
@@ -466,7 +470,8 @@ KeyValues Current() {
                  int(v.fsr1.load()), int(v.rcas.load()), v.rcas_strength.load(), v.frames_queued.load(),
                  int(v.deferred_readback.load()), int(v.stale_readback.load()),
                  int(v.restart_unconfirmed.load()));
-    Append(text, "reflex=%d\nframe_gen=%d\n", v.reflex.load(), v.frame_gen.load());
+    Append(text, "reflex=%d\nframe_gen=%d\nnv_backend=%s\n", v.reflex.load(), v.frame_gen.load(),
+           v.nv_backend == NvBackendStreamline ? "streamline" : "ngx");
     // Read by run.sh at start.
     Append(text, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
                                                   : v.live_resolution ? "1" : "0");

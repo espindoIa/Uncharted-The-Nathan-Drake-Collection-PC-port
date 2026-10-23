@@ -165,6 +165,10 @@ target_compile_definitions(gow3gpu PRIVATE IMGUI_IMPL_VULKAN_NO_PROTOTYPES
     GOW3_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf")
 set_source_files_properties(shim/gow3_overlay.cpp PROPERTIES
     OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf)
+# NVIDIA Streamline's headers (third_party/streamline, MIT), for gow3_streamline.cpp only. C++20
+# there: under C++23 sl_pcl.h aliases std::to_underlying, which does not compile.
+target_include_directories(gow3gpu PRIVATE third_party/streamline/include)
+set_source_files_properties(shim/gow3_streamline.cpp PROPERTIES COMPILE_OPTIONS -std=gnu++20)
 target_include_directories(gow3gpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include third_party/half/include)
 target_compile_definitions(gow3gpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
 target_compile_options(gow3gpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
@@ -379,6 +383,9 @@ target_include_directories(flat-camera-test PRIVATE shadps4)
 add_executable(frame-gen-camera-test EXCLUDE_FROM_ALL ../tests/test_frame_gen_camera.cpp)
 target_compile_options(frame-gen-camera-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(frame-gen-camera-test PRIVATE shadps4)
+add_executable(streamline-mode-test EXCLUDE_FROM_ALL ../tests/test_streamline_mode.cpp)
+target_compile_options(streamline-mode-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(streamline-mode-test PRIVATE shim)
 add_executable(scene-coord-test EXCLUDE_FROM_ALL ../tests/test_scene_coord.cpp)
 target_compile_options(scene-coord-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(scene-coord-test PRIVATE shadps4)

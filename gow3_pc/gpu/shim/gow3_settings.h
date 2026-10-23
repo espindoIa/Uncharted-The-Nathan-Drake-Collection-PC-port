@@ -34,6 +34,9 @@ enum Preset : int {
     PresetCount
 };
 enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugViewCount };
+/// gow3 23 Oct 2026: the way to NVIDIA's DLSS, Frame Generation and Reflex: the NGX bridge with
+/// VK_NV_low_latency2, or Streamline (gow3_streamline.h).
+enum NvBackend : int { NvBackendNgx = 0, NvBackendStreamline = 1 };
 /// DLSS models J, K, L, M (NVSDK_NGX_DLSS_Hint_Render_Preset 10-13).
 inline constexpr int DlssModelCount = 4;
 inline constexpr int DlssModelDefault = 1; ///< K
@@ -100,6 +103,10 @@ struct Values {
     /// frame between two real ones (vk_presenter.cpp). Live; needs an upscaler (TAA, FSR, DLSS):
     /// its depth and motion vectors are the inputs.
     std::atomic<int> frame_gen{0};
+    /// gow3 23 Oct 2026: NvBackend (nv_backend=ngx|streamline, GOW3_NV_BACKEND). Read once, before
+    /// the Vulkan instance exists: a change takes a restart.
+    std::atomic<int> nv_backend{NvBackendNgx};
+    int startup_nv_backend = NvBackendNgx;
     // Startup: run.py turns them into patches and environment variables; "Apply and restart".
     std::atomic<int> render_resolution{0};
     std::atomic<int> engine_fps{120};

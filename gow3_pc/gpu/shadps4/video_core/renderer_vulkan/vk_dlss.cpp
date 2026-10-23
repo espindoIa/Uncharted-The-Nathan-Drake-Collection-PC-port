@@ -12,6 +12,7 @@
 
 #include "video_core/renderer_vulkan/vk_dlss.h"
 #include "gow3_settings.h"
+#include "gow3_streamline.h"
 #include "gow3_toggles.h"
 
 #ifdef _WIN32
@@ -92,6 +93,9 @@ bool CollectExtensions(const VkExtensionProperties* required, u32 count,
 } // namespace
 
 struct Dlss::Impl {
+    /// gow3 23 Oct 2026: nv_backend=streamline loaded (gow3_streamline.h): every call goes there
+    /// and the NGX bridge is not loaded.
+    bool streamline{};
     HMODULE module{};
     const Gow3DlssApi* api{};
     std::vector<std::string> instance_extensions, device_extensions;
@@ -127,7 +131,9 @@ Dlss* Dlss::Get() {
             return nullptr;
         }
         const auto directory = ExecutableDirectory();
-        if (!std::filesystem::is_regular_file(directory / BridgeName) ||
+        // Streamline needs nvngx_dlss.dll beside its plugins too, but not the bridge.
+        const bool streamline = Gow3Streamline::Requested() && Gow3Streamline::Init();
+        if ((!streamline && !std::filesystem::is_regular_file(directory / BridgeName)) ||
             !std::filesystem::is_regular_file(directory / NgxName)) {
             return nullptr;
         }
@@ -144,6 +150,10 @@ Dlss* Dlss::Get() {
 }
 
 Dlss::Dlss() : impl{std::make_unique<Impl>()} {
+    if (Gow3Streamline::Active()) {
+        impl->streamline = true;
+        return; // Initialize asks Streamline what runs here
+    }
     const auto directory = ExecutableDirectory();
     impl->module = LoadLibraryW((directory / BridgeName).c_str());
     const auto get_api =
@@ -183,8 +193,8 @@ Dlss::~Dlss() {
 }
 
 void Dlss::AppendInstanceExtensions(std::vector<const char*>& enabled) {
-    if (!impl->eligible) {
-        return;
+    if (!impl->eligible || impl->streamline) {
+        return; // Streamline's vkCreateInstance adds its own
     }
     u32 count{};
     const VkExtensionProperties* required{};
@@ -213,7 +223,7 @@ void Dlss::AppendInstanceExtensions(std::vector<const char*>& enabled) {
 
 void Dlss::AppendDeviceExtensions(vk::Instance instance, vk::PhysicalDevice physical,
                                   std::vector<const char*>& enabled) {
-    if (!impl->eligible || !impl->instance_ready) {
+    if (!impl->eligible || !impl->instance_ready || impl->streamline) {
         return;
     }
     const auto properties = physical.getProperties();
@@ -245,6 +255,20 @@ void Dlss::AppendDeviceExtensions(vk::Instance instance, vk::PhysicalDevice phys
 }
 
 void Dlss::Initialize(vk::Instance instance, vk::PhysicalDevice physical, vk::Device device) {
+    if (impl->streamline) {
+        if (impl->initialized) {
+            return;
+        }
+        impl->initialized = true;
+        impl->available = Gow3Streamline::DlssReady();
+        impl->problem = impl->available ? "" : Gow3Streamline::DlssProblem();
+        impl->frame_gen_available = Gow3Streamline::FrameGenReady();
+        impl->frame_gen_problem = impl->frame_gen_available ? "" : Gow3Streamline::FrameGenProblem();
+        std::printf("DLSS: through Streamline (%s; Frame Generation %s)\n",
+                    impl->available ? "ready" : impl->problem.c_str(),
+                    impl->frame_gen_available ? "ready" : impl->frame_gen_problem.c_str());
+        return;
+    }
     if (!impl->eligible || !impl->device_ready || impl->initialized) {
         return;
     }
@@ -282,8 +306,8 @@ bool Dlss::HasFrameGenFeature(const FrameGenDesc& desc) const {
 }
 
 bool Dlss::FrameGenCreate(vk::CommandBuffer command, const FrameGenDesc& desc) {
-    if (!FrameGenAvailable()) {
-        return false;
+    if (!FrameGenAvailable() || impl->streamline) {
+        return false; // Streamline: the presenter's own path (Presenter::PresentStreamlineFrameGen)
     }
     std::scoped_lock lock{impl->frame_gen_mutex};
     impl->frame_gen_feature.reset();
@@ -298,7 +322,7 @@ bool Dlss::FrameGenCreate(vk::CommandBuffer command, const FrameGenDesc& desc) {
 
 bool Dlss::FrameGenEvaluate(vk::CommandBuffer command, const FrameGenFrame& frame) {
     std::scoped_lock lock{impl->frame_gen_mutex};
-    if (!impl->frame_gen_feature) {
+    if (!impl->frame_gen_feature || impl->streamline) {
         return false; // dropped by FrameGenRelease: the presenter creates it again
     }
     const auto image = [](const Resource& r) {
@@ -367,6 +391,15 @@ bool Dlss::CreateFeature(vk::CommandBuffer command, const FeatureDesc& desc) {
         return false;
     }
     impl->feature.reset();
+    if (impl->streamline) {
+        // Streamline creates the NGX feature at the first evaluate with these options.
+        if (!Gow3Streamline::SrSetOptions({desc.input_width, desc.input_height, desc.output_width,
+                                           desc.output_height, desc.preset, desc.hdr})) {
+            return false;
+        }
+        impl->feature = desc;
+        return true;
+    }
     const Gow3DlssFeature feature{desc.input_width,  desc.input_height, desc.output_width,
                                 desc.output_height, desc.quality,      0,
                                 desc.preset, desc.hdr ? 1 : 0};
@@ -380,6 +413,24 @@ bool Dlss::CreateFeature(vk::CommandBuffer command, const FeatureDesc& desc) {
 bool Dlss::Evaluate(vk::CommandBuffer command, const Frame& frame) {
     if (!impl->available || !impl->feature) {
         return false;
+    }
+    if (impl->streamline) {
+        // The upscaler keeps every image in the General layout (RecordDlss callers).
+        const auto image = [](const Resource& r, VkImageUsageFlags usage) {
+            return Gow3Streamline::Image{static_cast<VkImage>(r.image),
+                                         static_cast<VkImageView>(r.view),
+                                         static_cast<VkFormat>(r.format),
+                                         r.width,
+                                         r.height,
+                                         usage,
+                                         VK_IMAGE_LAYOUT_GENERAL};
+        };
+        constexpr VkImageUsageFlags read = VK_IMAGE_USAGE_SAMPLED_BIT;
+        return Gow3Streamline::SrEvaluate(
+            command, {image(frame.color, read), image(frame.depth, read), image(frame.motion, read),
+                      image(frame.output, read | VK_IMAGE_USAGE_STORAGE_BIT),
+                      frame.bias_mask.image ? image(frame.bias_mask, read) : Gow3Streamline::Image{},
+                      frame.jitter_x, frame.jitter_y, frame.reset});
     }
     const auto image = [](const Resource& r) {
         const vk::ImageSubresourceRange range{r.aspect, 0, 1, 0, 1};
@@ -399,13 +450,27 @@ bool Dlss::Evaluate(vk::CommandBuffer command, const Frame& frame) {
 
 void Dlss::ReleaseFeature() {
     impl->feature.reset();
+    if (impl->streamline) {
+        Gow3Streamline::SrRelease();
+        return;
+    }
     // 22 Oct review: frame generation state stays; the swap thread may still use that feature.
     if (impl->api) {
         impl->api->ReleaseFeature();
     }
 }
 
+bool Dlss::ViaStreamline() const {
+    return impl->streamline;
+}
+
 void Dlss::Shutdown() {
+    if (impl->streamline) {
+        impl->available = impl->frame_gen_available = false;
+        impl->feature.reset();
+        Gow3Streamline::Shutdown();
+        return;
+    }
     impl->available = false;
     impl->feature.reset();
     {
@@ -446,6 +511,9 @@ bool Dlss::Evaluate(vk::CommandBuffer, const Frame&) {
     return false;
 }
 void Dlss::ReleaseFeature() {}
+bool Dlss::ViaStreamline() const {
+    return false;
+}
 bool Dlss::FrameGenAvailable() const {
     return false;
 }

@@ -16,6 +16,7 @@
 #include "gow3_overlay.h"
 #include "gow3_reflex.h"
 #include "gow3_settings.h"
+#include "gow3_streamline.h"
 #include "gow3_toggles.h"
 #include "gow3_graphics.h"
 #include "gow3_trigger_files.h"
@@ -1230,6 +1231,10 @@ void Presenter::PresentLoadingFrame() {
     info.AddWait(swapchain.GetImageAcquiredSemaphore());
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     present_scheduler.Flush(info);
+    if (const Dlss* dlss = Dlss::Get(); dlss && dlss->ViaStreamline()) {
+        Gow3Streamline::FrameGenSetMode(false, 1); // a loading frame has nothing to interpolate
+        frame_gen_active.store(false, std::memory_order_relaxed);
+    }
     {
         std::scoped_lock present_lock{PresentLock(instance)};
         swapchain.Present();
@@ -1267,7 +1272,13 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     // gow3 22 Oct 2026: DLSS Frame Generation presents its frame first. Any frame without one
     // (frame generation off or skipped, black, loading or repeated frames) makes the next
     // evaluation a reset: the two frames it would interpolate between are not neighbours.
-    if (!is_game_frame || is_reusing_frame || !PresentGenerated(frame)) {
+    // gow3 23 Oct 2026: through Streamline its swapchain hooks generate and present the frame
+    // inside the present below; this only hands it the frame's inputs and the mode.
+    if (const Dlss* dlss = Dlss::Get(); dlss && dlss->ViaStreamline()) {
+        UpdateStreamlineFrameGenLoad();
+        frame_gen_active.store(
+            StreamlineFrameGen(frame, is_game_frame && !is_reusing_frame), std::memory_order_relaxed);
+    } else if (!is_game_frame || is_reusing_frame || !PresentGenerated(frame)) {
         frame_gen_reset = true;
         frame_gen_active.store(false, std::memory_order_relaxed);
     }
@@ -1765,6 +1776,119 @@ bool Presenter::PresentGenerated(Frame* frame) {
         }
     }
     return true;
+}
+
+void Presenter::UpdateStreamlineFrameGenLoad() {
+    if (!Gow3Streamline::FrameGenReady()) {
+        return;
+    }
+    const bool wanted = Dlss::FrameGenWanted();
+    if (wanted == Gow3Streamline::FrameGenLoaded()) {
+        return;
+    }
+    // Streamline's DLSS-G guide 18: loaded, the plugin presents through its own queue from
+    // off-screen copies, which costs a copy and a queue hand-over per frame even with the mode
+    // off; it acts at swapchain creation, so the swapchain is made again around the change.
+    Gow3Streamline::FrameGenSetMode(false, 1);
+    present_scheduler.Finish();
+    swapchain.RecreateAround([wanted] { Gow3Streamline::SetFrameGenLoaded(wanted); });
+    frame_gen_reset = true;
+    std::printf("Frame generation (Streamline): %s; swapchain recreated\n",
+                wanted ? "loaded" : "unloaded");
+}
+
+bool Presenter::StreamlineFrameGen(Frame* frame, bool game_frame) {
+    static auto stats_at = std::chrono::steady_clock::now();
+    static auto undoubled_since = std::chrono::steady_clock::time_point{};
+    static bool undoubled_reported = false;
+    static u32 real = 0, generated = 0, doubled = 0;
+    if (!Dlss::FrameGenWanted() || !Gow3Streamline::FrameGenLoaded()) {
+        frame_gen_reset = true;
+        return false; // unloaded (UpdateStreamlineFrameGenLoad): nothing to hand over
+    }
+    // 23 Oct 2026: Streamline decides per present whether it really interpolates. Its log says
+    // "DLSS-G disabled: window not focused" while another window has the focus (2 of 3 automated
+    // U3 sessions: 60 real and 60 shown FPS, the limiter halving real frames for nothing). The
+    // frames it presented for the last real one (2 when it added one, 1 when not) decide whether
+    // the limiter counts shown frames (Presenter::FrameGenActive), one frame late.
+    const auto fg_state = Gow3Streamline::FrameGenGetState();
+    const bool last_doubled = fg_state.presented >= 2;
+    const auto off = [&] {
+        frame_gen_reset = true;
+        if (game_frame && frame->serial != 0) {
+            Gow3Streamline::FrameGenSetFrame(frame->serial, nullptr);
+        }
+        Gow3Streamline::FrameGenSetMode(false, 1);
+        return false;
+    };
+    if (const auto now = std::chrono::steady_clock::now();
+        now - stats_at >= std::chrono::seconds(5)) {
+        // with_inputs: frames handed over with the mode on; doubled: frames Streamline presented
+        // with a generated one.
+        std::printf("FrameGen (Streamline): real=%u with_inputs=%u doubled=%u status=0x%x\n", real,
+                    generated, doubled, fg_state.status);
+        std::fflush(stdout);
+        stats_at = now;
+        real = generated = doubled = 0;
+    }
+    ++real;
+    doubled += last_doubled ? 1 : 0;
+    // As PresentGenerated: game frames with an upscale's inputs, not under the in-game menu and
+    // not right after an HDR switch.
+    if (!game_frame || frame->serial == 0 || !frame->frame_gen || Gow3Overlay::CapturesInput() ||
+        frame->is_hdr != swapchain.GetHDR()) {
+        return off();
+    }
+    const auto& inputs = frame->frame_gen_inputs;
+    const bool camera_cut = Vulkan::IsCameraCut(frame_gen_prev_camera, inputs.camera);
+    frame_gen_prev_camera = inputs.camera;
+    // Where the letterboxed game image lands in the backbuffer (BlitToSwapchain).
+    const vk::Extent2D extent = swapchain.GetExtent();
+    const vk::ImageBlit blit = MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height);
+    const bool covers = blit.dstOffsets[0].x == 0 && blit.dstOffsets[0].y == 0 &&
+                        blit.dstOffsets[1].x == s32(extent.width) &&
+                        blit.dstOffsets[1].y == s32(extent.height);
+    const auto image = [](const Dlss::Resource& r) {
+        return Gow3Streamline::Image{static_cast<VkImage>(r.image), static_cast<VkImageView>(r.view),
+                                     static_cast<VkFormat>(r.format), r.width, r.height,
+                                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                     VK_IMAGE_LAYOUT_GENERAL};
+    };
+    Gow3Streamline::FgFrame fg{
+        .depth = image(inputs.depth),
+        .motion = image(inputs.motion),
+        .camera = inputs.camera,
+        .jitter = {inputs.jitter[0], inputs.jitter[1]},
+        .reset = frame_gen_reset || inputs.reset || camera_cut,
+    };
+    if (!covers) {
+        fg.sub_x = u32(blit.dstOffsets[0].x);
+        fg.sub_y = u32(blit.dstOffsets[0].y);
+        fg.sub_w = u32(blit.dstOffsets[1].x - blit.dstOffsets[0].x);
+        fg.sub_h = u32(blit.dstOffsets[1].y - blit.dstOffsets[0].y);
+    }
+    if (!Gow3Streamline::FrameGenSetFrame(frame->serial, &fg)) {
+        return off();
+    }
+    Gow3Streamline::FrameGenSetMode(true, 1);
+    frame_gen_reset = false;
+    ++generated;
+    // Said once per stretch: on, but not interpolating for 2 s (Streamline's own reason is in its
+    // log with GOW3_SL_LOG=2, usually the window focus).
+    const auto now = std::chrono::steady_clock::now();
+    if (last_doubled) {
+        undoubled_since = {};
+        undoubled_reported = false;
+    } else if (undoubled_since == std::chrono::steady_clock::time_point{}) {
+        undoubled_since = now;
+    } else if (!undoubled_reported && now - undoubled_since >= std::chrono::seconds(2)) {
+        undoubled_reported = true;
+        const bool focused = Gow3Streamline::WindowFocused(window.GetWindowInfo().render_surface);
+        std::printf("Frame generation (Streamline): on but not interpolating for 2 s (game window "
+                    "%s); the limiter counts real frames meanwhile\n",
+                    focused ? "has the focus" : "does not have the focus");
+    }
+    return last_doubled;
 }
 
 Frame* Presenter::GetRenderFrame() {

@@ -131,6 +131,12 @@ private:
     /// DLSS Frame Generation: evaluates and presents the frame between the last one and `frame`,
     /// then waits until `frame` is due. False (nothing presented) when it does not apply.
     bool PresentGenerated(Frame* frame);
+    /// gow3 23 Oct 2026: frame generation through Streamline (Dlss::ViaStreamline): loads or
+    /// unloads its plugin with the setting (the swapchain is made again around it), then hands
+    /// the frame's inputs and the mode over before the present, which Streamline's hook turns
+    /// into the generated frame and the real one. True when frame generation is on for it.
+    void UpdateStreamlineFrameGenLoad();
+    bool StreamlineFrameGen(Frame* frame, bool game_frame);
     /// Blits `source` (General layout, kept) letterboxed into the acquired swapchain image and
     /// draws the overlay over it; the image ends in the present layout.
     void BlitToSwapchain(vk::CommandBuffer cmdbuf, vk::Image source, u32 width, u32 height);

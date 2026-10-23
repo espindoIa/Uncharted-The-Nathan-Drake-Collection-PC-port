@@ -378,6 +378,7 @@ void Swapchain::Destroy() {
     if (swapchain) {
         Gow3Reflex::OnSwapchain(vk::SwapchainKHR{}); // no marker or sleep names it from here on
         device.destroySwapchainKHR(swapchain);
+        swapchain = vk::SwapchainKHR{}; // RecreateAround destroys before Create destroys again
     }
 
     for (const auto& sem : image_acquired) {

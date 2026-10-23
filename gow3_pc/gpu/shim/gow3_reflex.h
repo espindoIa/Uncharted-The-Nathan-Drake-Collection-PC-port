@@ -30,12 +30,21 @@ bool ExtensionWanted();
 /// GOW3_REFLEX_LOG.
 void Init(vk::Device device, bool extension_enabled, u32 revision);
 
+/// gow3 23 Oct 2026: instead of Init when Streamline is used (nv_backend=streamline): the markers,
+/// the sleep, the mode and the timings go through sl.pcl / sl.reflex (gow3_streamline.h), which own
+/// VK_NV_low_latency2. Available() stays false (no latency swapchain, OnSwapchain does nothing);
+/// the markers and the sleep are sent every frame, also with Reflex off.
+void InitStreamline(bool ready);
+
 /// Destroys what Init created (device teardown).
 void Shutdown(vk::Device device);
 
 /// The extension is enabled and its entry points are loaded: swapchains are created with low
 /// latency mode and every call below can reach Vulkan.
 bool Available();
+
+/// Reflex can be switched on here: the extension (Available) or Streamline (InitStreamline).
+bool Offered();
 
 /// The swapchain markers and sleeps go to; null before it is destroyed (and none are sent until
 /// the next one). A new swapchain starts with the mode off: the current one is applied here.

@@ -26,6 +26,7 @@
 #include "gow3_graphics.h"
 #include "gow3_perf_stats.h"
 #include "gow3_reflex.h"
+#include "gow3_streamline.h"
 
 extern "C" void runtime_restart(void); // src/probe.c: hands restart to the launcher
 extern "C" int runtime_gamesettings_active(void); // src/runtime_gamesettings.c
@@ -583,7 +584,7 @@ void PerformanceTab() {
         static const char* const queued_labels[] = {"1 (recommended)", "2 (faster; U2 NPCs float)", "Unlimited"};
         ChoiceRow("Frames queued", s.frames_queued, queued_labels, G::FramesQueued.data(),
                   int(G::FramesQueued.size()), "More frames queued: steadier FPS, slower response to input.");
-        if (Gow3Reflex::Available()) {
+        if (Gow3Reflex::Offered()) {
             static const char* const reflex_labels[] = {"Off (recommended)", "On", "On + Boost"};
             ChoiceRow("NVIDIA Reflex", s.reflex, reflex_labels, nullptr, int(std::size(reflex_labels)),
                       "Lets the NVIDIA driver time the start of each frame. When the graphics card limits the "
@@ -601,6 +602,17 @@ void PerformanceTab() {
                  "Big FPS gain. Switch it off if lighting or objects look wrong.");
         CheckRow("Deferred GPU readbacks", s.deferred_readback,
                  "Fewer waits for the GPU. Switch it off if textures or shadows look wrong.");
+        if (s.dlss_supported || Gow3Streamline::Requested()) {
+            static const char* const backend_labels[] = {"NGX (direct)", "Streamline"};
+            ChoiceRow("NVIDIA DLSS, Frame Generation and Reflex through", s.nv_backend, backend_labels,
+                      nullptr, int(std::size(backend_labels)),
+                      "NGX: the port's own bridge to NVIDIA's DLSS files. Streamline: NVIDIA's SDK, whose "
+                      "Frame Generation paces its frames itself and turns Reflex on with it, and whose PC "
+                      "Latency markers let PresentMon and the NVIDIA overlay measure the delay.");
+            if (Gow3Streamline::Requested() && !Gow3Streamline::Active()) {
+                InfoRow("Streamline", Gow3Streamline::Problem());
+            }
+        }
         ImGui::EndTable();
     }
 }
@@ -1285,7 +1297,8 @@ void ControlsTab() {
 // Startup options changed since this launch (applied by "Apply and restart").
 int RestartChanges() {
     const auto& s = Gow3Settings::Get();
-    return (s.deferred_readback != s.startup_deferred_readback) + (s.stale_readback != s.startup_stale_readback);
+    return (s.deferred_readback != s.startup_deferred_readback) + (s.stale_readback != s.startup_stale_readback) +
+           (s.nv_backend != s.startup_nv_backend);
 }
 
 // The running game's trophies: earned pictures bright, the others dimmed.

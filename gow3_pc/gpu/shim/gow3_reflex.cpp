@@ -19,6 +19,7 @@
 #include <mutex>
 
 #include "gow3_settings.h"
+#include "gow3_streamline.h"
 #include "gow3_toggles.h"
 
 namespace Gow3Reflex {
@@ -52,6 +53,9 @@ struct State {
     vk::Semaphore semaphore; ///< timeline: vkLatencySleepNV signals it, the guest thread waits
     std::FILE* log = nullptr; ///< GOW3_REFLEX_LOG
     std::atomic<bool> available{false};
+    /// gow3 23 Oct 2026: Streamline's sl.reflex and sl.pcl take the markers, the sleep and the mode
+    /// (InitStreamline); the extension is then Streamline's and nothing here calls it.
+    std::atomic<bool> streamline{false};
     /// Markers go to the driver (the mode is on, or the log): the one flag the idle paths read.
     std::atomic<bool> active{false};
     /// The mode the driver holds for the current swapchain.
@@ -101,7 +105,28 @@ int EffectiveMode() {
     if (Gow3Toggle::Disabled2(Gow3Toggle::ReflexSleep)) {
         return 0;
     }
-    return std::clamp(Gow3Settings::Get().reflex.load(std::memory_order_relaxed), 0, 2);
+    const int mode = std::clamp(Gow3Settings::Get().reflex.load(std::memory_order_relaxed), 0, 2);
+    // 23 Oct 2026: Streamline's frame generation reports eFailReflexNotDetectedAtRuntime (and its
+    // guide 8.0 requires Reflex) while Reflex is off, so it runs with at least Reflex On.
+    if (mode == 0 && g.streamline.load(std::memory_order_relaxed) &&
+        Gow3Settings::Get().frame_gen.load(std::memory_order_relaxed) &&
+        !Gow3Toggle::Disabled2(Gow3Toggle::FrameGeneration) && Gow3Streamline::FrameGenReady()) {
+        return 1;
+    }
+    return mode;
+}
+
+Gow3Streamline::Marker StreamlineMarker(vk::LatencyMarkerNV marker) {
+    using M = Gow3Streamline::Marker;
+    switch (marker) {
+    case vk::LatencyMarkerNV::eSimulationStart: return M::SimulationStart;
+    case vk::LatencyMarkerNV::eSimulationEnd: return M::SimulationEnd;
+    case vk::LatencyMarkerNV::eRendersubmitStart: return M::RenderSubmitStart;
+    case vk::LatencyMarkerNV::eRendersubmitEnd: return M::RenderSubmitEnd;
+    case vk::LatencyMarkerNV::ePresentStart: return M::PresentStart;
+    case vk::LatencyMarkerNV::ePresentEnd: return M::PresentEnd;
+    default: return M::ControllerInputSample; // the input sample (PCL has no other for it)
+    }
 }
 
 /// Sets the mode on the current swapchain. Under g.mutex, with a swapchain.
@@ -133,6 +158,10 @@ void MarkerLocked(u64 id, vk::LatencyMarkerNV marker) {
 }
 
 void Marker(u64 id, vk::LatencyMarkerNV marker) {
+    if (g.streamline.load(std::memory_order_relaxed)) {
+        Gow3Streamline::SetMarker(StreamlineMarker(marker), id);
+        return;
+    }
     std::scoped_lock lock{g.mutex};
     if (g.swapchain) {
         MarkerLocked(id, marker);
@@ -141,11 +170,18 @@ void Marker(u64 id, vk::LatencyMarkerNV marker) {
 
 /// The driver paces the game here: vkLatencySleepNV, then the semaphore it signals when the game
 /// should start sampling input for its next frame.
-void Sleep() {
+void Sleep(u64 id) {
     const s64 start = NowNs();
     const s64 last_present = g.last_present_ns.load(std::memory_order_relaxed);
     if (last_present == 0 || start - last_present > IdleNs ||
         start < g.skip_sleep_until_ns.load(std::memory_order_relaxed)) {
+        return;
+    }
+    if (g.streamline.load(std::memory_order_relaxed)) {
+        // slReflexSleep waits for the driver itself (sl.chi, vknvll2.cpp).
+        Gow3Streamline::Sleep(id);
+        g.sleeps.fetch_add(1, std::memory_order_relaxed);
+        g.sleep_ns.fetch_add(u64(NowNs() - start), std::memory_order_relaxed);
         return;
     }
     u64 value;
@@ -190,13 +226,23 @@ void Sleep() {
 /// do nothing.
 void Update() {
     const int mode = EffectiveMode();
+    const bool streamline = g.streamline.load(std::memory_order_relaxed);
     if (mode != g.applied_mode.load(std::memory_order_relaxed)) {
-        std::scoped_lock lock{g.mutex};
-        if (g.swapchain) {
-            ApplyLocked(mode);
+        if (streamline) {
+            Gow3Streamline::SetReflexMode(mode);
+            g.applied_mode.store(mode, std::memory_order_relaxed);
+            std::printf("Reflex: mode %d through Streamline (%s)\n", mode,
+                        mode == 0 ? "off" : mode == 1 ? "on" : "on + boost");
+        } else {
+            std::scoped_lock lock{g.mutex};
+            if (g.swapchain) {
+                ApplyLocked(mode);
+            }
         }
     }
-    const bool want = mode != 0 || g.log != nullptr;
+    // Streamline's Reflex guide (4.0, checklist): the markers and the sleep every frame, also with
+    // Reflex off (PC Latency measures from them).
+    const bool want = mode != 0 || g.log != nullptr || streamline;
     if (g.active.load(std::memory_order_relaxed) != want) {
         g.active.store(want, std::memory_order_relaxed);
     }
@@ -223,6 +269,28 @@ void PrintStats() {
     last_sleeps = sleeps;
     last_sleep_ns = sleep_ns;
     last_timeouts = timeouts;
+}
+
+/// GOW3_REFLEX_LOG and GOW3_REFLEX_VARIANT, once at Init or InitStreamline.
+void OpenLogAndVariant() {
+    if (const char* path = std::getenv("GOW3_REFLEX_LOG"); path && path[0]) {
+        g.log = std::fopen(path, "w");
+        if (g.log) {
+            std::fprintf(g.log,
+                         "presentID inputSampleTimeUs simStartTimeUs simEndTimeUs "
+                         "renderSubmitStartTimeUs renderSubmitEndTimeUs presentStartTimeUs "
+                         "presentEndTimeUs driverStartTimeUs driverEndTimeUs "
+                         "osRenderQueueStartTimeUs osRenderQueueEndTimeUs gpuRenderStartTimeUs "
+                         "gpuRenderEndTimeUs state\n");
+            std::fflush(g.log);
+        }
+        std::printf("Reflex: driver timings %s %s\n", g.log ? "go to" : "cannot be written to",
+                    path);
+    }
+    if (const char* v = std::getenv("GOW3_REFLEX_VARIANT"); v && (v[0] == '2' || v[0] == '3')) {
+        g.variant = v[0] - '0'; // diagnostic (22 Oct 2026); anything else stays 0
+        std::printf("Reflex: marker variant %d (diagnostic)\n", g.variant);
+    }
 }
 
 } // namespace
@@ -263,26 +331,19 @@ void Init(vk::Device device, bool extension_enabled, u32 revision) {
     }
     g.device = device;
     g.semaphore = semaphore;
-    if (const char* path = std::getenv("GOW3_REFLEX_LOG"); path && path[0]) {
-        g.log = std::fopen(path, "w");
-        if (g.log) {
-            std::fprintf(g.log,
-                         "presentID inputSampleTimeUs simStartTimeUs simEndTimeUs "
-                         "renderSubmitStartTimeUs renderSubmitEndTimeUs presentStartTimeUs "
-                         "presentEndTimeUs driverStartTimeUs driverEndTimeUs "
-                         "osRenderQueueStartTimeUs osRenderQueueEndTimeUs gpuRenderStartTimeUs "
-                         "gpuRenderEndTimeUs state\n");
-            std::fflush(g.log);
-        }
-        std::printf("Reflex: driver timings %s %s\n", g.log ? "go to" : "cannot be written to",
-                    path);
-    }
-    if (const char* v = std::getenv("GOW3_REFLEX_VARIANT"); v && (v[0] == '2' || v[0] == '3')) {
-        g.variant = v[0] - '0'; // diagnostic (22 Oct 2026); anything else stays 0
-        std::printf("Reflex: marker variant %d (diagnostic)\n", g.variant);
-    }
+    OpenLogAndVariant();
     g.available.store(true, std::memory_order_release);
     std::printf("Reflex: VK_NV_low_latency2 revision %u\n", revision);
+}
+
+void InitStreamline(bool ready) {
+    if (!ready) {
+        std::printf("Reflex: Streamline's sl.reflex / sl.pcl unavailable\n");
+        return;
+    }
+    OpenLogAndVariant();
+    g.streamline.store(true, std::memory_order_relaxed);
+    std::printf("Reflex: through Streamline (sl.reflex, sl.pcl)\n");
 }
 
 void Shutdown(vk::Device device) {
@@ -307,6 +368,10 @@ void Shutdown(vk::Device device) {
 
 bool Available() {
     return g.available.load(std::memory_order_acquire);
+}
+
+bool Offered() {
+    return Available() || g.streamline.load(std::memory_order_relaxed);
 }
 
 void OnSwapchain(vk::SwapchainKHR swapchain) {
@@ -346,11 +411,18 @@ void InputSample() {
     const bool reflex_on = EffectiveMode() != 0;
     const bool sleeps = reflex_on && !Gow3Toggle::Disabled2(Gow3Toggle::ReflexNoSleep);
     const u8 state = sleeps ? 1 : reflex_on ? 2 : 0;
-    if (sleeps) {
-        Sleep();
-    }
     const u64 id = g.guest_flips.load(std::memory_order_relaxed) + 1;
+    const bool streamline = g.streamline.load(std::memory_order_relaxed);
+    // Streamline: slReflexSleep also with Reflex off (it returns at once then; Reflex guide 4.0).
+    if (sleeps || (streamline && !Gow3Toggle::Disabled2(Gow3Toggle::ReflexNoSleep))) {
+        Sleep(id);
+    }
     g.frame_state[id % g.frame_state.size()].store(state, std::memory_order_relaxed);
+    if (streamline) {
+        Marker(id, vk::LatencyMarkerNV::eSimulationStart);
+        Marker(id, vk::LatencyMarkerNV::eInputSample);
+        return;
+    }
     std::scoped_lock lock{g.mutex};
     if (g.swapchain) {
         MarkerLocked(id, vk::LatencyMarkerNV::eSimulationStart);
@@ -412,7 +484,7 @@ void RenderSubmitEnd(u64 serial) {
 }
 
 void PresentStart(u64 serial) {
-    if (!Available()) {
+    if (!Available() && !g.streamline.load(std::memory_order_relaxed)) {
         return;
     }
     Update();
@@ -441,13 +513,14 @@ void PresentEnd(u64 serial) {
 }
 
 void GeneratedPresentStart(u64 serial) {
-    if (g.active.load(std::memory_order_relaxed)) {
+    // Streamline presents its generated frames itself, with its own markers.
+    if (g.active.load(std::memory_order_relaxed) && !g.streamline.load(std::memory_order_relaxed)) {
         Marker(serial, vk::LatencyMarkerNV::eOutOfBandPresentStart);
     }
 }
 
 void GeneratedPresentEnd(u64 serial) {
-    if (g.active.load(std::memory_order_relaxed)) {
+    if (g.active.load(std::memory_order_relaxed) && !g.streamline.load(std::memory_order_relaxed)) {
         Marker(serial, vk::LatencyMarkerNV::eOutOfBandPresentEnd);
     }
 }
@@ -459,7 +532,29 @@ void Report() {
     }
     std::array<vk::LatencyTimingsFrameReportNV, MaxReports> reports{};
     u32 count = 0;
-    {
+    if (g.streamline.load(std::memory_order_relaxed)) {
+        // The same driver reports through slReflexGetState (frame = the frame token, our id).
+        std::array<Gow3Streamline::ReflexReport, MaxReports> sl_reports{};
+        count = Gow3Streamline::ReflexReports(sl_reports.data(), MaxReports);
+        for (u32 i = 0; i < count; ++i) {
+            const auto& s = sl_reports[i];
+            auto& r = reports[i];
+            r.presentID = s.frame;
+            r.inputSampleTimeUs = s.input_sample;
+            r.simStartTimeUs = s.sim_start;
+            r.simEndTimeUs = s.sim_end;
+            r.renderSubmitStartTimeUs = s.render_submit_start;
+            r.renderSubmitEndTimeUs = s.render_submit_end;
+            r.presentStartTimeUs = s.present_start;
+            r.presentEndTimeUs = s.present_end;
+            r.driverStartTimeUs = s.driver_start;
+            r.driverEndTimeUs = s.driver_end;
+            r.osRenderQueueStartTimeUs = s.os_queue_start;
+            r.osRenderQueueEndTimeUs = s.os_queue_end;
+            r.gpuRenderStartTimeUs = s.gpu_render_start;
+            r.gpuRenderEndTimeUs = s.gpu_render_end;
+        }
+    } else {
         std::scoped_lock lock{g.mutex};
         if (!g.swapchain) {
             return;

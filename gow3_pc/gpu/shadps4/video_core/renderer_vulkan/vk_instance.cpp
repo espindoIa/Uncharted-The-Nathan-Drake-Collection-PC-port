@@ -14,6 +14,7 @@
 #include "common/types.h"
 #include "gow3_display_adapter.h"
 #include "gow3_reflex.h"
+#include "gow3_streamline.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -303,6 +304,7 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
 }
 
 Instance::~Instance() {
+    Gow3Streamline::Shutdown(); // slShutdown before the device goes (Streamline guide 2.0)
     Gow3Reflex::Shutdown(GetDevice());
     ImGui::Core::Shutdown(GetDevice());
     VideoCore::FlushImageReaper();
@@ -454,16 +456,19 @@ bool Instance::CreateDevice() {
     // dependency, VK_KHR_present_id with its feature (the display log may have added both
     // already: never twice). Only where the driver offers the extension, so AMD and Intel devices
     // are created as before. GOW3_REFLEX_EXT=0 keeps it off.
+    // gow3 23 Oct 2026: with Streamline its sl.reflex adds VK_NV_low_latency2 and drives it; the
+    // port only adds VK_KHR_present_id, which the extension needs.
+    const bool streamline = Gow3Streamline::Active();
     bool low_latency = false;
     u32 low_latency_revision = 0;
     const bool offers_low_latency = std::any_of(
         available_extensions.begin(), available_extensions.end(),
         [](const std::string& name) { return name == VK_NV_LOW_LATENCY_2_EXTENSION_NAME; });
-    if (offers_low_latency && Gow3Reflex::ExtensionWanted()) {
+    if (offers_low_latency && (streamline || Gow3Reflex::ExtensionWanted())) {
         if (!present_id && feature_chain.get<vk::PhysicalDevicePresentIdFeaturesKHR>().presentId) {
             present_id = add_extension(VK_KHR_PRESENT_ID_EXTENSION_NAME);
         }
-        low_latency = present_id && add_extension(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
+        low_latency = !streamline && present_id && add_extension(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
         if (low_latency) {
             // The driver's revision (2 on 616.92) decides what it does with submissions.
             const auto [props_result, props] = physical_device.enumerateDeviceExtensionProperties();
@@ -961,7 +966,24 @@ bool Instance::CreateDevice() {
     device = std::move(dev);
 
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*device);
-    Gow3Reflex::Init(*device, low_latency, low_latency_revision);
+    if (streamline) {
+        // gow3 23 Oct 2026: Streamline's hooks for the swapchain, present, acquire and device-wait
+        // entries (frame generation presents through them); every other device function stays
+        // vulkan-1's (gow3_streamline.h).
+        auto& d = VULKAN_HPP_DEFAULT_DISPATCHER;
+        const auto proc = [&](const char* name) { return Gow3Streamline::DeviceProc(*device, name); };
+        d.vkCreateSwapchainKHR = reinterpret_cast<PFN_vkCreateSwapchainKHR>(proc("vkCreateSwapchainKHR"));
+        d.vkDestroySwapchainKHR = reinterpret_cast<PFN_vkDestroySwapchainKHR>(proc("vkDestroySwapchainKHR"));
+        d.vkGetSwapchainImagesKHR =
+            reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(proc("vkGetSwapchainImagesKHR"));
+        d.vkAcquireNextImageKHR = reinterpret_cast<PFN_vkAcquireNextImageKHR>(proc("vkAcquireNextImageKHR"));
+        d.vkQueuePresentKHR = reinterpret_cast<PFN_vkQueuePresentKHR>(proc("vkQueuePresentKHR"));
+        d.vkDeviceWaitIdle = reinterpret_cast<PFN_vkDeviceWaitIdle>(proc("vkDeviceWaitIdle"));
+        Gow3Streamline::OnDevice(physical_device, *device);
+        Gow3Reflex::InitStreamline(Gow3Streamline::ReflexReady());
+    } else {
+        Gow3Reflex::Init(*device, low_latency, low_latency_revision);
+    }
     pipeline_binaries =
         InitializePipelineBinaryCache(*device, pipeline_binaries, pipeline_binary_global_key);
     if (Dlss* dlss = Dlss::Get()) {
