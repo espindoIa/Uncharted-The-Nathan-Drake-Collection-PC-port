@@ -166,7 +166,13 @@ static ABI void *guest_memset(void *dst, int value, size_t size) {
     atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed); return memset(dst, value, size);
 }
 static ABI void *guest_memcpy(void *dst, const void *src, size_t size) {
-    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed); return memcpy(dst, src, size);
+    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
+    /* gow3 23 Oct 2026 (GOW3_FORWARD_COPIES=1, experimental): a source holding GPU results
+     * still on their way back (Uncharted 3's
+     * cloth bone matrices copied into the frame's skinning palette) is copied by the GPU instead
+     * of waiting for them (Rasterizer::ForwardGuestCopy). */
+    if (size >= 256 && gow3gpu_forward_copy(dst, src, size)) return dst;
+    return memcpy(dst, src, size);
 }
 static ABI void *guest_memmove(void *dst, const void *src, size_t size) {
     atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed); return memmove(dst, src, size);

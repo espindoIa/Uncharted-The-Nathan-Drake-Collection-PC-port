@@ -117,6 +117,22 @@ struct StageSpecialization {
     StageSpecialization(const Info& info_, RuntimeInfo runtime_info_, const Profile& profile_,
                         Backend::Bindings start_, AmdGpu::Buffer* sharps_out = nullptr)
         : info{&info_}, runtime_info{runtime_info_}, start{start_} {
+        Refresh(info_, runtime_info_, profile_, start_, sharps_out);
+    }
+
+    /// Rebuild the specialization, retaining resource-vector capacity across dispatches.
+    /// All descriptor and runtime checks still run; no shader inputs are assumed constant.
+    void Refresh(const Info& info_, RuntimeInfo runtime_info_, const Profile& profile_,
+                 Backend::Bindings start_, AmdGpu::Buffer* sharps_out = nullptr) {
+        info = &info_;
+        runtime_info = runtime_info_;
+        start = start_;
+        bitset.reset();
+        vs_attribs.clear();
+        buffers.clear();
+        images.clear();
+        fmasks.clear();
+        samplers.clear();
         fetch_shader_data = Gcn::ParseFetchShader(info_);
         if (info_.sw_stage == SwStage::Vertex && fetch_shader_data) {
             // Specialize shader on VS input number types to follow spec.
@@ -139,21 +155,9 @@ struct StageSpecialization {
         // gow3 21 Oct: a garbage V# is bound as null (vk_rasterizer.cpp), so it must not
         // specialize either: its random stride/format made a new permutation per dispatch.
         ForEachBufferSharp(binding, buffers, info->buffers, sharps_out,
-                     [](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
-                         spec.stride = sharp.GetStride();
-                         spec.is_formatted = desc.is_formatted;
-                         spec.swizzle_enable = sharp.swizzle_enable;
-                         if (spec.is_formatted) {
-                             spec.data_format = static_cast<u32>(sharp.GetDataFmt());
-                             spec.num_format = static_cast<u32>(sharp.GetNumberFmt());
-                             spec.dst_select = sharp.DstSelect();
-                             spec.num_conversion = sharp.GetNumberConversion();
-                         }
-                         if (spec.swizzle_enable) {
-                             spec.index_stride = sharp.index_stride;
-                             spec.element_size = sharp.element_size;
-                         }
-                     });
+                      [](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
+                          DescribeBuffer(spec, desc, sharp);
+                      });
         ForEachSharp(binding, images, info->images,
                      [&](auto& spec, const auto& desc, AmdGpu::Image sharp) {
                          spec.type = sharp.GetViewType(desc.is_array);
@@ -186,6 +190,55 @@ struct StageSpecialization {
             info->ReadTessConstantBuffer(tess_constants);
             runtime_info.InitFromTessConstants(tess_constants);
         }
+    }
+
+    static void DescribeBuffer(BufferSpecialization& spec, const auto& desc, AmdGpu::Buffer sharp) {
+        spec.stride = sharp.GetStride();
+        spec.is_formatted = desc.is_formatted;
+        spec.swizzle_enable = sharp.swizzle_enable;
+        if (spec.is_formatted) {
+            spec.data_format = static_cast<u32>(sharp.GetDataFmt());
+            spec.num_format = static_cast<u32>(sharp.GetNumberFmt());
+            spec.dst_select = sharp.DstSelect();
+            spec.num_conversion = sharp.GetNumberConversion();
+        }
+        if (spec.swizzle_enable) {
+            spec.index_stride = sharp.index_stride;
+            spec.element_size = sharp.element_size;
+        }
+    }
+
+    /// 23 Oct 2026: compute kernels using buffers only (crowd skinning) can validate their
+    /// previous variant directly. Read every current descriptor and check every specialization
+    /// field; addresses and contents are deliberately NOT treated as unchanged. No temporary
+    /// specialization/resource vectors or fetch-shader parsing on a hit.
+    bool MatchesComputeBuffers(const Info& current, const RuntimeInfo& runtime,
+                               Backend::Bindings bindings, AmdGpu::Buffer* sharps_out) const {
+        if (!Valid() || current.sw_stage != SwStage::Compute || runtime_info != runtime ||
+            start != bindings || buffers.size() != current.buffers.size() ||
+            !current.images.empty() || !current.fmasks.empty() || !current.samplers.empty() ||
+            !images.empty() || !fmasks.empty() || !samplers.empty() || !vs_attribs.empty() ||
+            fetch_shader_data) {
+            return false;
+        }
+        const auto filter = g_garbage_buffer_filter.load(std::memory_order_relaxed);
+        for (u32 i = 0; i < current.buffers.size(); ++i) {
+            const auto& desc = current.buffers[i];
+            const auto sharp = desc.GetSharp(current);
+            sharps_out[i] = sharp;
+            const bool bound = sharp && !(filter && !desc.IsSpecial() && filter(sharp, current.pgm_hash));
+            if (bitset[i] != bound) {
+                return false;
+            }
+            if (bound) {
+                BufferSpecialization expected{};
+                DescribeBuffer(expected, desc, sharp);
+                if (!(buffers[i] == expected)) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     void ForEachSharp(auto& spec_list, auto& desc_list, auto&& func) {

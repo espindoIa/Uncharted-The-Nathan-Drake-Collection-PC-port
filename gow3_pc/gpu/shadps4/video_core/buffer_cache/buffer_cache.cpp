@@ -724,6 +724,8 @@ static std::atomic<u32> g_readback_read_waits;
 // hit those GPU bytes, or only other data on their page; time the faulting thread waited for the
 // GPU thread to take the request, and for the readback itself (microseconds).
 static std::atomic<u32> g_read_on_gpu_bytes, g_read_same_page;
+// gow3 23 Oct 2026: false-sharing reads opened on the faulting thread (OpenFalseSharingPage).
+static std::atomic<u32> g_read_same_page_guest;
 static std::atomic<u32> g_pieces_recurring, g_pieces_protected;
 static std::atomic<u64> g_readback_bytes;
 // gow3 statistics: fences deferred to ray-cast readbacks (label, delay until written).
@@ -981,10 +983,12 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                     const u64 total_us = g_read_queue_us.exchange(0);
                     const u64 wait_us = g_read_wait_us.exchange(0);
                     std::printf("  CPU read faults on readback pages: %u on the GPU bytes, %u elsewhere on "
-                                "their page; %.1f ms in all, %.1f ms of it waiting for the GPU; readback "
-                                "pieces: %u recurring (readable), %u new (protected)\n",
-                                on_bytes, same_page, total_us / 1e3, wait_us / 1e3,
-                                g_pieces_recurring.exchange(0), g_pieces_protected.exchange(0));
+                                "their page (%u opened on the faulting thread); %.1f ms in all, %.1f ms "
+                                "of it waiting for the GPU; readback pieces: %u recurring (readable), %u "
+                                "new (protected)\n",
+                                on_bytes, same_page, g_read_same_page_guest.exchange(0), total_us / 1e3,
+                                wait_us / 1e3, g_pieces_recurring.exchange(0),
+                                g_pieces_protected.exchange(0));
                     std::scoped_lock lock{g_read_pieces_mutex};
                     std::vector<std::pair<u32, u64>> pieces;
                     for (const auto& [key, n] : g_read_pieces) {
@@ -2617,6 +2621,7 @@ void BufferCache::CompleteReadbacks(bool wait, u64 wait_until) {
         if (readback.watching || readback.watched.empty() || readback.tick >= scheduler.CurrentTick()) {
             continue;
         }
+        IndexWatched(readback);
         for (const auto& [address, size] : readback.watched) {
             page_manager->UpdatePageWatchers<true, true>(address, size);
         }
@@ -2724,6 +2729,7 @@ void BufferCache::CompleteReadbacks(bool wait, u64 wait_until) {
         if (readback.watching) {
             for (const auto& [address, size] : readback.watched) {
                 page_manager->UpdatePageWatchers<false, true>(address, size);
+                UnindexWatched(readback, address, size);
             }
         }
         if (readback.open) {
@@ -2867,6 +2873,78 @@ void BufferCache::LandReadbacksWatching(VAddr page) {
     }
 }
 
+void BufferCache::IndexWatched(const PendingReadback& readback) {
+    const auto& watched = readback.watched;
+    const auto is_watched = [&](VAddr page) {
+        auto it = std::upper_bound(watched.begin(), watched.end(), page,
+                                   [](VAddr p, const auto& range) { return p < range.first; });
+        return it != watched.begin() && page < std::prev(it)->first + std::prev(it)->second;
+    };
+    std::scoped_lock lock{watched_index_mutex};
+    for (const auto& [address, size] : watched) {
+        for (VAddr page = address; page < address + size; page += 4096) {
+            watched_index[page >> 12].push_back({&readback, 0, 0, readback.tick, readback.queued});
+        }
+    }
+    for (const auto& [piece, piece_size] : readback.pieces) {
+        for (VAddr page = Common::AlignDown(piece, VAddr{4096}); page < piece + piece_size; page += 4096) {
+            if (is_watched(page)) {
+                watched_index[page >> 12].push_back(
+                    {&readback, piece, piece_size, readback.tick, readback.queued});
+            }
+        }
+    }
+}
+
+void BufferCache::UnindexWatched(const PendingReadback& readback, VAddr address, u64 size) {
+    std::scoped_lock lock{watched_index_mutex};
+    for (VAddr page = address; page < address + size; page += 4096) {
+        const auto it = watched_index.find(page >> 12);
+        if (it == watched_index.end()) {
+            continue;
+        }
+        std::erase_if(it->second, [&](const WatchedPiece& entry) { return entry.owner == &readback; });
+        if (it->second.empty()) {
+            watched_index.erase(it);
+        }
+    }
+}
+
+BufferCache::WatchedRead BufferCache::LookupWatchedRead(VAddr addr, u64 size) const {
+    WatchedRead read;
+    std::scoped_lock lock{watched_index_mutex};
+    const auto it = watched_index.find(addr >> 12);
+    if (it == watched_index.end()) {
+        return read;
+    }
+    for (const auto& entry : it->second) {
+        if (entry.address == 0) {
+            ++read.owners;
+        } else if (entry.address < addr + size && addr < entry.address + entry.size &&
+                   entry.tick >= read.tick) {
+            read.tick = entry.tick;
+            read.queued = entry.queued;
+        }
+    }
+    return read;
+}
+
+bool BufferCache::OpenFalseSharingPage(VAddr addr, u32 owners) {
+    const VAddr page = Common::AlignDown(addr, VAddr{4096});
+    if (!page_manager->OpenForReads(page, owners)) {
+        return false;
+    }
+    ++g_read_same_page;
+    ++g_read_same_page_guest;
+    liverpool->SendCommand<false>(
+        [this, page] {
+            noisy_pages[page >> 12] = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+            UnwatchPage(page);
+        },
+        "false-sharing");
+    return true;
+}
+
 void BufferCache::UnwatchPage(VAddr page) {
     const ReadbackScope readback_scope{*this, "UnwatchPage"};
     for (auto& readback : pending_readbacks) {
@@ -2877,6 +2955,7 @@ void BufferCache::UnwatchPage(VAddr page) {
             }
             if (readback.watching) {
                 page_manager->UpdatePageWatchers<false, true>(page, 4096);
+                UnindexWatched(readback, page, 4096);
             }
             // Split the range around the page.
             const VAddr tail = page + 4096;

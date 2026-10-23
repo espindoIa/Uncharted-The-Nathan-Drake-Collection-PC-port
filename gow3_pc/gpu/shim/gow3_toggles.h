@@ -191,6 +191,36 @@ enum : std::uint64_t {
     /// DLAA, RTX 5070): with the sleep the GPU idled 3.48 ms a frame before those end-of-batch
     /// flushes, 0.21 ms without (liverpool.cpp, EarlySubmit).
     ReflexEarlySubmit = 134217728,
+    /// Bit set: old behaviour. Clear, a guest read fault on a page that pending readbacks
+    /// read-protect, missing all of their GPU bytes (false sharing), makes the page readable on
+    /// the faulting thread; the command thread unwatches it later as before. 23 Oct 2026 U3
+    /// Cartagena street (4K, FG): ~35 such faults/s, ~1.3 ms each through the command thread.
+    GuestFalseSharing = 268435456,
+    /// Bit set: old behaviour. Clear, a guest read of GPU bytes still on their way back waits for
+    /// their submission on the faulting thread before asking the command thread to land them.
+    /// 23 Oct 2026 U3 Cartagena street: ~15 such faults/s, ~10 ms each with the command thread
+    /// waiting for the GPU (CompleteReadbacks) and feeding it nothing meanwhile.
+    GuestReadPrewait = 536870912,
+    /// Experiment, GOW3_FORWARD_COPIES=1 only (default off after the protected-destination
+    /// prototype regressed). Bit set: old behaviour. Clear, a guest memcpy whose source holds
+    /// GPU bytes still on their way back is made by the GPU instead, in stream order after the work that wrote them
+    /// (Rasterizer::ForwardGuestCopy). 23 Oct 2026 U3 Cartagena street: PrepareInstanceForRendering
+    /// (fg-draw-mgr.cpp, guest 0xe3c6e7) copies cloth-solver bone matrices into the frame's
+    /// skinning palette, ~20 times a second, each read waiting ~9.5 ms for the GPU.
+    ForwardedCopies = 1073741824,
+    /// 23 Oct 2026: stage-A snapshots use a four-way cache instead of one direct-mapped slot.
+    /// Keep the snapshots (not live guest pointers) across packets and reuse only with the
+    /// existing epoch/page tokens and constant-ring lifetime checks. Set: the old cache.
+    RingAssociative = 1ull << 31,
+    /// Rebuild compute specializations in reusable scratch storage, rather than initializing
+    /// and destroying their resource vectors for every dispatch. Set: old construction.
+    ComputeSpecScratch = 1ull << 32,
+    /// Validate the previous buffer-only compute variant directly against current descriptors
+    /// instead of constructing temporary specialization vectors. Set: full construction.
+    ComputeVariantCheck = 1ull << 33,
+    /// Opt-in experiment (GOW3_COMMANDS_STAGE_B=1): cache/fault commands execute in-order on
+    /// stage B rather than draining it on stage A. Set: original command-thread execution.
+    CommandsOnStageB = 1ull << 34,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

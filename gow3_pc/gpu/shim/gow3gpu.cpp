@@ -567,6 +567,26 @@ extern "C" int gow3gpu_prepare_cpu_write(void* addr, uint64_t size) {
     return rasterizer && rasterizer->PrepareCpuWrite(reinterpret_cast<VAddr>(addr), size) ? 1 : 0;
 }
 
+extern "C" int gow3gpu_forward_copy(void* dst, const void* src, uint64_t size) {
+    // 23 Oct 2026: the first prototype gained FPS but exposed stale destination bytes.
+    // Protecting the destination before returning preserves memcpy reads, but the short gate
+    // check fell to 26-31 FPS with repeated read faults. Keep this experiment opt-in, not a
+    // default performance change based on the unsafe prototype's numbers.
+    static const bool experimental = [] {
+        const char* env = std::getenv("GOW3_FORWARD_COPIES");
+        return env && env[0] == '1';
+    }();
+    if (!experimental || Gow3Toggle::Disabled2(Gow3Toggle::ForwardedCopies)) {
+        return 0;
+    }
+    auto* memory = Core::Memory::Instance();
+    auto* rasterizer = memory ? memory->GetRasterizer() : nullptr;
+    return rasterizer && rasterizer->ForwardGuestCopy(reinterpret_cast<VAddr>(dst),
+                                                      reinterpret_cast<VAddr>(src), size)
+               ? 1
+               : 0;
+}
+
 extern "C" unsigned gow3gpu_symbol_count(void) {
     return unsigned(g_symbols.size());
 }

@@ -13,6 +13,7 @@
 #include <vector>
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
+#include "common/unique_function.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_bind_helper.h"
@@ -127,6 +128,8 @@ public:
     /// NotePendingGpuWrite), so constant ring copies elsewhere stay reusable.
     bool RunInOrder(OrderedTask task, const void* data, u32 size,
                     u64 toggle = Gow3Toggle::PipelinedTasks, bool writes_noted = false);
+    bool CommandsInOrder() const;
+    void RunCommandInOrder(Common::UniqueFunction<void>&& command);
     /// Stage A: GPU work queued for the recording thread writes [address, address + size):
     /// constant ring copies of those bytes are not reused (NotePendingGpuWrite does this too).
     void NoteRingWrite(VAddr address, u64 size);
@@ -191,6 +194,13 @@ public:
     /// gow3: a guest instruction keeps faulting on one page (see BufferCache::ReleaseStuckPage).
     void ReleaseStuckPage(VAddr page, bool is_write, bool assume_locks);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
+    /// gow3 23 Oct 2026: a guest thread's read fault at `addr`, before ReadMemory: 1 when it was
+    /// a false-sharing read made possible here (handled); 2 when it read GPU bytes and waited
+    /// for their submission here (ReadMemory then lands them without a GPU wait); 0 otherwise.
+    int GuestReadFault(VAddr addr);
+    /// gow3 23 Oct 2026 (guest thread, guest memcpy): true when the GPU made the copy because its
+    /// source holds GPU bytes still on their way back (toggle ForwardedCopies).
+    bool ForwardGuestCopy(VAddr dst, VAddr src, u64 size);
     /// gow3: after a fault: lands a buffer readback that still read-protects the page of `addr`.
     void LandWatchedReadback(VAddr addr, bool assume_locks);
     void WaitDrawPipeForCapture();
@@ -703,6 +713,12 @@ private:
     void RingUnwatch(VAddr address, u64 size, bool written);
     static constexpr u32 RingCopyBits = 12;
     std::array<RingCopy, 1u << RingCopyBits> ring_copies{};
+    // 23 Oct 2026 profile: CollectRingBindings is 31.6% of stage A, including 13% copying.
+    // Heap storage avoids enlarging the rasterizer's stack allocation. Four candidates preserve
+    // collision victims without changing the snapshot's validity or ring-allocation lifetime.
+    static constexpr u32 RingSetBits = 14;
+    using RingSet = std::array<RingCopy, 4>;
+    std::unique_ptr<RingSet[]> ring_copy_sets{new RingSet[1u << RingSetBits]{}};
     u64 ring_epoch = 1;
     VAddr ring_epoch_min = ~VAddr{0}, ring_epoch_max = 0; ///< bounds of this epoch's copies
     u64 ring_reused_bytes = 0, ring_reuse_checks = 0, ring_reuse_mismatches = 0;

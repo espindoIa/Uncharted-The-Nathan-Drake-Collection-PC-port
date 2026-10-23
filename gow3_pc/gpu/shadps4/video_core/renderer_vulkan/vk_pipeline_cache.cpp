@@ -1754,9 +1754,26 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
     info.RefreshFlatBuf();
+    if (sharp_capture && hw_stage == HwStage::Compute &&
+        !Gow3Toggle::Disabled2(Gow3Toggle::ComputeVariantCheck) &&
+        program->last_used < program->modules.size()) {
+        const auto& previous = program->modules[program->last_used];
+        if (previous.spec.MatchesComputeBuffers(info, runtime_info, binding, compute_sharps.data())) {
+            compute_sharps_info = &info;
+            info.AddBindings(binding);
+            return std::make_tuple(&info, previous.module,
+                                   AssignFetch(fetch, previous.spec.fetch_shader_data),
+                                   HashCombine(params.hash, program->last_used));
+        }
+    }
     // gow3 22 Oct 2026: a compute dispatch's V#s, read again by Rasterizer::DispatchDirect.
-    auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding,
-                                            sharp_capture ? compute_sharps.data() : nullptr);
+    std::optional<Shader::StageSpecialization> local_spec;
+    auto& spec = hw_stage == HwStage::Compute &&
+                         !Gow3Toggle::Disabled2(Gow3Toggle::ComputeSpecScratch)
+                     ? compute_spec_scratch
+                     : local_spec.emplace();
+    spec.Refresh(info, runtime_info, profile, binding,
+                 sharp_capture ? compute_sharps.data() : nullptr);
     if (sharp_capture) {
         compute_sharps_info = &info;
     }

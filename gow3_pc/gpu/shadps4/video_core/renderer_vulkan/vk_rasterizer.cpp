@@ -1682,6 +1682,11 @@ void Rasterizer::NewGuestEpoch() {
 }
 
 bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
+    // Unknown cache commands can land GPU results into CPU-visible memory. Never capture
+    // constants ahead of such a task; stage B binds them after the task instead.
+    if (draw_pipe && !draw_pipe->Reached(pending_task_position)) {
+        return true;
+    }
     if (pending_writes.empty() || address >= pending_max || address + size <= pending_min) {
         return false;
     }
@@ -1906,6 +1911,21 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
             // in-order memory write or a GPU write over a copied range starts a new epoch.
             const u64 key = address ^ (size << 48);
             cached = &ring_copies[(key * 0x9E3779B97F4A7C15ull) >> (64 - RingCopyBits)];
+            if (!Gow3Toggle::Disabled2(Gow3Toggle::RingAssociative)) {
+                auto& set = ring_copy_sets[(key * 0x9E3779B97F4A7C15ull) >> (64 - RingSetBits)];
+                cached = &set[0];
+                for (auto& entry : set) {
+                    if (entry.key == key) {
+                        cached = &entry;
+                        break;
+                    }
+                    // Prefer an empty/old snapshot. Positions increase monotonically; eviction
+                    // affects only reuse, never whether the ring retains an allocation.
+                    if (!entry.key || (cached->key && entry.position < cached->position)) {
+                        cached = &entry;
+                    }
+                }
+            }
             if (cached->key == key && constant_ring->Reusable(cached->position)) {
                 const bool later = cached->epoch != ring_epoch;
                 if (later && (cached->cpu_token || cached->watch_token) && tracker) {
@@ -2679,6 +2699,27 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
         pending_task_position = draw_pipe->Head();
     }
     return true;
+}
+
+bool Rasterizer::CommandsInOrder() const {
+    static const bool experimental = [] {
+        const char* env = std::getenv("GOW3_COMMANDS_STAGE_B");
+        return env && env[0] == '1';
+    }();
+    return experimental && UseDrawPipe() && OnStageA() &&
+           !Gow3Toggle::Disabled2(Gow3Toggle::CommandsOnStageB) &&
+           !Gow3Toggle::Disabled(Gow3Toggle::PipelinedTasks);
+}
+
+void Rasterizer::RunCommandInOrder(Common::UniqueFunction<void>&& command) {
+    auto* heap = new Common::UniqueFunction<void>(std::move(command));
+    const OrderedTask task = [](Rasterizer&, const u8* data) {
+        Common::UniqueFunction<void>* function = nullptr;
+        std::memcpy(&function, data, sizeof(function));
+        std::unique_ptr<Common::UniqueFunction<void>> owned{function};
+        (*owned)();
+    };
+    RunInOrder(task, &heap, sizeof(heap));
 }
 
 void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
@@ -8050,6 +8091,146 @@ void Rasterizer::WaitDrawPipeForCapture() {
         }
         std::this_thread::yield();
     }
+}
+
+// gow3 23 Oct 2026 (U3 Cartagena street, 4K with FG; mode-1 async readbacks): guest read faults
+// on read-protected readback pages cost ~950 ms per 5 s across the game's threads, 40.6 real FPS
+// against 50.9 with the pages left readable (unsafe: stale reads). About 70% read only the CPU's
+// own bytes beside the GPU bytes (~1.3 ms each through the command thread, which then unwatches
+// the page); the rest read GPU bytes still on their way back, and the command thread waited ~10
+// ms for the GPU per fault, feeding it nothing meanwhile. Here the faulting thread does the first
+// alone and waits for the second itself (toggles GuestFalseSharing, GuestReadPrewait).
+int Rasterizer::GuestReadFault(VAddr addr) {
+    const bool open = !Gow3Toggle::Disabled2(Gow3Toggle::GuestFalseSharing);
+    const bool prewait = !Gow3Toggle::Disabled2(Gow3Toggle::GuestReadPrewait);
+    if (!open && !prewait && !Gow3Stats::fault_stats) {
+        return 0;
+    }
+    const auto read = buffer_cache.LookupWatchedRead(addr, 8);
+    if (read.owners == 0) {
+        return 0; // not a buffer readback's watch (or landed meanwhile): the usual path
+    }
+    if (!read.tick) {
+        return open && buffer_cache.OpenFalseSharingPage(addr, read.owners) ? 1 : 0;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    if (prewait) {
+        scheduler.GetWorkSemaphore()->Wait(read.tick);
+    }
+    // GOW3_FAULT_STATS: how old the readback was when the guest read its GPU bytes (queued at the
+    // submission that holds the GPU work), and how long the guest then waited for the GPU.
+    if (Gow3Stats::fault_stats) {
+        static std::atomic<u64> count{0}, age_us{0}, wait_us{0}, wait_max_us{0};
+        static std::atomic<s64> last_s{0};
+        const auto now = std::chrono::steady_clock::now();
+        const auto us = [](auto d) {
+            return static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(d).count());
+        };
+        ++count;
+        age_us += us(start - read.queued);
+        const u64 waited = us(now - start);
+        wait_us += waited;
+        for (u64 m = wait_max_us.load(); waited > m && !wait_max_us.compare_exchange_weak(m, waited);) {
+        }
+        const s64 second =
+            std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+        if (s64 last = last_s.load(); second - last >= 5 && last_s.compare_exchange_strong(last, second)) {
+            const u64 n = count.exchange(0);
+            std::printf("Guest reads of GPU bytes on their way back (5 s): %llu, readback queued %.2f "
+                        "ms before on average, then waited %.2f ms on average (%.2f at most)\n",
+                        static_cast<unsigned long long>(n), n ? age_us.exchange(0) / 1e3 / n : 0.0,
+                        n ? wait_us.exchange(0) / 1e3 / n : 0.0, wait_max_us.exchange(0) / 1e3);
+            std::fflush(stdout);
+        }
+    }
+    return 2;
+}
+
+// gow3 23 Oct 2026 (U3 Cartagena street): after GuestReadFault the guest threads still waited
+// ~9.5 ms per read of GPU bytes, 74-108 per 5 s, all of them one memcpy in
+// PrepareInstanceForRendering (fg-draw-mgr.cpp, guest 0xe3c6e7): the instance's bone matrices
+// (written by the cloth solvers cs 1c957b01 / 809864d3) copied into the frame's skinning palette,
+// which the GPU's skinning reads. The GPU makes that copy instead, in stream order after the
+// solver; the palette's CPU view comes back with the submission's small-write readback.
+bool Rasterizer::ForwardGuestCopy(VAddr dst, VAddr src, u64 size) {
+    if (!size || size > 1_MB || src + size < src || dst + size < dst ||
+        ((src | dst | size) & 3) || (dst < src + size && src < dst + size) || IsGpuSideThread()) {
+        return false;
+    }
+    const VAddr first_page = Common::AlignDown(src, VAddr{4096});
+    bool watched = false;
+    for (VAddr page = first_page; page < src + size; page += 4096) {
+        if (page_manager.IsReadWatched(page)) {
+            watched = true;
+            break;
+        }
+    }
+    if (!watched) {
+        return false;
+    }
+    bool gpu_bytes = false;
+    for (VAddr page = first_page; page < src + size && !gpu_bytes; page += 4096) {
+        const VAddr lo = std::max(page, src);
+        const VAddr hi = std::min(page + 4096, src + size);
+        gpu_bytes = buffer_cache.LookupWatchedRead(lo, hi - lo).tick != 0;
+    }
+    // Only beside GPU bytes (false sharing): the plain copy opens the pages on this thread.
+    if (!gpu_bytes || !IsMapped(dst, size) ||
+        !IsMapped(src, size)) {
+        return false;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    bool done = false;
+    liverpool->SendFaultCommand(
+        [this, dst, src, size, &done] {
+            DrainDrawPipe();
+            // Landed meanwhile, or bytes the texture cache owns: the guest copies as usual.
+            if (!buffer_cache.IsRegionGpuModified(src, size) ||
+                texture_cache.FindImageFromRange(src, size) ||
+                texture_cache.FindImageFromRange(dst, size)) {
+                return;
+            }
+            texture_cache.InvalidateMemoryFromGPU(dst, size);
+            const u32 bytes = static_cast<u32>(size);
+            const auto [src_buffer, src_offset] = buffer_cache.ObtainBuffer(src, bytes, false, true);
+            const auto [dst_buffer, dst_offset] = buffer_cache.ObtainBuffer(dst, bytes, true, true);
+            const vk::BufferCopy copy = {
+                .srcOffset = src_offset,
+                .dstOffset = dst_offset,
+                .size = size,
+            };
+            runtime.CopyBuffer(src_buffer, dst_buffer, std::span{&copy, 1});
+            // The import is memcpy, not an asynchronous API: a CPU read of the destination
+            // immediately after return must see the copied value. Queue a protected readback
+            // and submit it before returning; the read then waits for this tick, not old RAM.
+            // Do not rely on the next per-frame poll (which leaves a readable stale window).
+            const std::pair<VAddr, u64> range{dst, size};
+            buffer_cache.DownloadRangesAsync(std::span{&range, 1}, true);
+            VideoCore::NoteReadbackKind(dst, size, VideoCore::ReadbackCpWrite);
+            Flush();
+            buffer_cache.PollReadbacksNow();
+            done = true;
+        },
+        "forward-copy");
+    if (Gow3Stats::fault_stats) {
+        static std::atomic<u64> forwarded{0}, declined{0}, bytes{0}, us{0};
+        static std::atomic<s64> last_s{0};
+        ++(done ? forwarded : declined);
+        bytes += done ? size : 0;
+        const auto now = std::chrono::steady_clock::now();
+        us += static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(now - start).count());
+        const s64 second =
+            std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+        if (s64 last = last_s.load(); second - last >= 5 && last_s.compare_exchange_strong(last, second)) {
+            const u64 n = forwarded.exchange(0), m = declined.exchange(0);
+            std::printf("Forwarded guest copies (5 s): %llu made by the GPU (%.1f KB), %llu left to the "
+                        "guest; %.2f ms on average for the command thread\n",
+                        static_cast<unsigned long long>(n), bytes.exchange(0) / 1024.0,
+                        static_cast<unsigned long long>(m), n + m ? us.exchange(0) / 1e3 / (n + m) : 0.0);
+            std::fflush(stdout);
+        }
+    }
+    return done;
 }
 
 bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {

@@ -6,6 +6,14 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **In progress (23 Oct 2026): Uncharted 3 market CPU stalls.** The earlier benchmarks stood
+  at the save's gate, not in the meat market behind it. Readback handling now lets reads beside
+  GPU results proceed on the game thread, and forwards copies of pending GPU results to the
+  GPU in an opt-in experiment (`GOW3_FORWARD_COPIES=1`, off by default). Its initial 9–14% FPS
+  gain came from a prototype with a destination-read correctness gap, not a released fix.
+  Constant-snapshot caching and compute-specialization storage are also being optimized.
+  No long-session or other-game validation.
+
 - **Changed (23 Oct 2026): DLSS, Frame Generation and Reflex now go through NVIDIA Streamline.**
   Streamline is NVIDIA's own SDK for these features, and there is no setting for it. You still
   add `nvngx_dlss.dll` and `nvngx_dlssg.dll` yourself; Streamline's own files come with the port

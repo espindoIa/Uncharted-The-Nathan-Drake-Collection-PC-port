@@ -25,6 +25,7 @@ New entries go at the end, dated, measured numbers only.
 - RTSS / MSI Afterburner OSD flicker, present queue, dev NGX banner: `RivaTuner / MSI Afterburner OSD flicker: the present queue (22 Oct 2026)`
 - Streamline backend (DLSS, FG, Reflex through SL 2.14.16; FG needs the window focused; the only option since the same day, NGX as fallback): `NVIDIA Streamline backend (23 Oct 2026)`, `Streamline as the only option (23 Oct 2026, later)`
 - Measuring method (ab2.sh, abstats.py, PresentMon, profilers): see the Tools list in the U3 performance section above, and AGENTS.md "Measuring".
+- U3 market stutter and CPU work (earlier 23 Oct benchmarks stood at the save's gate): `Cartagena market: stutter and lower frame rate from readback faults (23 Oct 2026)`.
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
@@ -3894,3 +3895,56 @@ The player asked for Streamline as the only option, with NGX kept as a fallback.
 Tested: build.sh. One U3 session (1080p, DLSS K, FG and Reflex off) with no GOW3_NV_BACKEND: "Streamline: SDK 2.14.16 loaded", "DLSS: through Streamline", "Reflex: through Streamline", 93 real FPS. PresentMon showed SyncInterval 1 again, without tearing, so the morning's tearing note no longer applies.
 
 Not tested: the Abandon path (no non-NVIDIA GPU here), a PC without NVIDIA or without nvngx_dlss.dll, GOW3_NV_BACKEND=ngx after this change.
+
+## Cartagena market: stutter and lower frame rate from readback faults (23 Oct 2026)
+
+Report (player): walking back from the U3 chapter 2 save (the alley in front of the meat market's gate) through the market into the street, a stutter, then the frame rate settles lower. All of the day's earlier measurements stood still at the gate.
+
+Method: C:\dev\bench\mktquick.sh / mkab.sh / mkabhere.sh (bench save, route analysis/play/routes/mkt_back.txt = 15 s walking back, frame log GOW3_FRAME_LOG with perf_counter marks, mktana.py / mqstats.py), player's settings (4K DLAA M, FG + Reflex on, cap 120), RTX 5070. A/Bs alternate the toggle file in one session, 10 s windows, order flipped each round.
+
+Cause: guest threads' read faults on pages that pending readbacks read-protect (GOW3_ASYNC_READBACK=1, mode 1).
+- Street (current build): ~250-290 per 5 s, ~900-1000 ms per 5 s across the game's threads. Stall frames (40-57 ms) held 30-55 ms of fault-handler time. Same route with mode 2 (pages left readable; unsafe, 16 Oct Cartagena crash): walk + street 50.9 real FPS, p99 26.6 ms, no frame over 33 ms, against 40.6 FPS, p99 34.5 ms, 18 frames over 33 ms.
+- ~70% were false sharing: the guest reading its own bytes beside GPU bytes on the same page (guest 0xe3c753 in PrepareInstanceForRendering, fg-draw-mgr.cpp, ~130 per 5 s; 0xea640e). Each went through the GPU command thread (~1.3 ms), which then unwatched the page.
+- The rest read GPU bytes: all from one memcpy (guest 0xe3c6e7, found by unwinding the C runtime's memcpy in the fault statistics). PrepareInstanceForRendering copies the instance's bone matrices ([inst+0x110], numJoints x 48 bytes, written by the cloth solvers cs 1c957b01 / 809864d3) into a per-frame allocation, the skinning palette the GPU reads. 74-108 per 5 s, readback queued ~5.5 ms before the read, then ~8.5-9.5 ms waiting for the GPU (the GPU runs ~14 ms behind the command thread). The command thread waited in CompleteReadbacks meanwhile.
+- New diagnostics (GOW3_FAULT_STATS=1): "read faults by kind", library callers unwound to the guest, "Guest reads of GPU bytes on their way back", "Compute rings (5 s)" (~2,600 compute-ring submissions a second, waiting 2.3-3.3 ms on average for the command thread), "Forwarded guest copies".
+
+Changes (toggle file, second word; bit set = old behaviour):
+- GuestFalseSharing (1<<28): a read fault on a page whose watching readbacks' GPU bytes the read misses makes the page readable on the faulting thread (PageManager::OpenForReads, under the page lock, only while those readbacks are the page's only read watchers) and queues the usual unwatch for the command thread. BufferCache keeps an index of the watching readbacks' pieces per page (IndexWatched / UnindexWatched, its own mutex) for these lookups. 182 such faults cost 1.2 ms per 5 s.
+- GuestReadPrewait (1<<29): a read of GPU bytes waits for the readback's submission on the faulting thread first; the command thread then lands it without waiting. Command thread time on these faults 800-900 -> ~60 ms per 5 s; no frame rate change by itself (A/B in the street, two spots: 44.7/44.9 and 41.9/42.1 FPS on/off): the game thread still waited.
+- ForwardedCopies (1<<30): a guest memcpy of 256 bytes or more whose source overlaps GPU bytes of a watching readback is made by the GPU (Rasterizer::ForwardGuestCopy: on the command thread, ObtainBuffer + vkCmdCopyBuffer, in stream order after the solver), and the destination comes back with the submission's small-write readback. ~110 copies per 5 s (~0.8 MB), 0.03-0.06 ms each; read faults on GPU bytes: 0.
+
+Measured (all three bits, one session each, 3 rounds):
+- Street after the walk (~1,300 draws): 48.0 against 43.8 real FPS (+9.6%), each round higher (+3.5, +3.4, +5.8); p99 28.8-30.7 against 32.4-34.6 ms.
+- Crowded street (camera turned, ~2,500 draws): 51.4 against 45.0 (+14%), each round higher (+7.4, +5.9, +5.9); p99 27.9-30.6 against 30.2-32.9 ms; frames over 33 ms 3 against 6.
+- Screenshots: characters and their cloth look as before. 1080p (FG and Reflex off) after the change: 75-77 FPS in the crowded street, the GPU command thread fully busy (idle 0.3%): the next limit.
+
+The numbers above are from the initial forwarding prototype, not the subsequently hardened build. Source review found two correctness gaps: forwarding initially returned before the destination was read-protected, so an immediate CPU read could see old RAM; and a new readback could add a watcher to an early-opened page without restoring its protection (the watcher count was already nonzero). ForwardGuestCopy now queues an exact protected destination readback, submits it and establishes its watches before returning. PageManager tracks early-opened pages under the page lock and restores protection when a new read watch arrives. Forwarding refuses GPU-side callers, overlapping ranges, unaligned Vulkan copies and overflowing/oversized ranges.
+
+Further CPU work (not yet measured): RingAssociative (Disabled2 bit 31) uses 16,384 four-way sets for constant-ring snapshots instead of 4,096 direct-mapped slots. It retains the existing epoch, CPU/watch-token, GPU-write and ring-lifetime checks; no live guest pointers substitute for snapshots. ComputeSpecScratch (bit 32) reuses compute-specialization resource-vector storage, rebuilding every descriptor and runtime field on every dispatch. Profile st1: CollectRingBindings 31.6% inclusive, CopySparseMemory 13%, compute GetProgram 10.9% (specialization construction 6.1%).
+
+Rejected experiment: queued fault/cache commands on stage B instead of draining it (temporary bit 31, removed before RingAssociative). Street cs1 81.1/74.2 FPS on/off was invalid: draws varied from 488 to 2,816. Static gate cs2 94.2/95.8, no consistent gain. The code was removed, not left enabled.
+
+Not verified: performance of the hardened forwarding build; U1 and U2 (memcpy forwarding applies to any game, only when a source is under a readback watch); a long session; laptops. User requested fewer tests; no regression suite or stability soak run.
+
+Short hardened check `ringassoc1` (1080p gate, FG/Reflex off): 25.8 FPS with ring/spec optimizations off, 31.2 on; repeated "Stuck fault" readback landings at 0x103c561000, versus the earlier 94–96 FPS gate baseline. The user subsequently reported high external PC load during the tests: this comparison does NOT establish a regression or a useful ring-cache gain. Forwarding remains opt-in (`GOW3_FORWARD_COPIES=1`), preserving destination-read protection. The old 9–14% unsafe-prototype gain must not be claimed for the default build. `ringassoc2`, forwarding disabled: 82.1/88.2 FPS off/on in one six-to-ten-second comparison, external load unmeasured; preliminary only.
+
+Retest requested after the external-load report: C:\dev\bench\retest_cpu.py, one session, six-second windows, original-path baseline bracketing the changes. Records GetSystemTimes and per-process CPU deltas (external cores, total CPU and top external processes) for each window. No processes terminated except its own game. Gate windows compare constant-ring/spec changes and the opt-in stage-B command experiment; the backward market route then compares guest-read handling and protected forwarding. The stage-B path is restored as opt-in (`GOW3_COMMANDS_STAGE_B=1`, Disabled2 bit 34), with pending unknown task writes preventing stage-A snapshots ahead of the command. No repeated rounds or regression suite requested.
+
+`cpu_retest1` results (1080p DLAA K, FG/Reflex off, six-second windows; `C:\dev\bench\cpu_retest1.load.json` and `.boot.log`):
+
+| Location / enabled change | Real FPS | p99 ms | External CPU cores |
+|---|---:|---:|---:|
+| Gate, original path before | 88.4 | 15.5 | 2.05 |
+| Gate, snapshot cache + specialization scratch/direct variant checks | 97.3 | 15.9 | 1.47 |
+| Gate, stage-B commands only | 86.0 | 15.9 | 2.01 |
+| Gate, original path after | 81.3 | 18.6 | 2.45 |
+| Street, original path before | 77.0 | 17.3 | 1.73 |
+| Street, guest-read handling | 79.2 | 16.3 | 1.51 |
+| Street, forwarding enabled | 82.7 | 14.6 | 1.08 |
+| Street, original path after | 82.4 | 15.0 | 0.99 |
+
+Interpretation: the baseline itself moved materially with external load. Cache work is promising, not an isolated percentage gain. Stage-B commands have no demonstrated gain at comparable measured external load (86.0 vs 88.4). No "Forwarded guest copies" line occurred and GPU-byte fault counters stayed zero in this CPU-bound session: the forwarding window did not exercise forwarding and cannot validate its performance. A second short session at the player's 4K DLAA M + FG/Reflex settings is needed for that path; no extra CPU rounds. No stuck-fault/assert/device-loss lines in cpu_retest1. Toggle file restored to 0 0 and the test's game stopped.
+
+The direct compute-variant check (Disabled2 bit 33, ComputeVariantCheck) was added before this retest. Buffer-only compute variants validate all current descriptors, binding validity, stride/format/swizzle fields and RuntimeInfo against the previously used specialization; on any mismatch they run full construction. No resource addresses or contents are assumed immutable. It shares DescribeBuffer with the full constructor to avoid divergent field rules.
+
+`cpu_retest4k` (4K DLAA M, FG/Reflex on, backward route to the street, four six-second windows): original before 39.7 FPS (p99 32.8 ms, 1.17 external CPU cores); guest-read handling 43.6 (35.3 ms, 2.13 cores); protected forwarding 42.9 (32.7 ms, 1.55 cores); original after 44.1 (33.7 ms, 2.52 cores). Forwarding was exercised: 118 GPU copies / 5 s (~848 KB); GPU-byte read fault time fell to 151.7 ms in one reporting interval. However, this is NOT a valid FPS comparison: Streamline lost window focus during the guest-read/forwarding sequence (log: "game window does not have the focus", doubled fell from all frames to zero), and external CPU load also changed. Do not use these numbers as a gain/loss claim. The previous 25–31 FPS result was not reproduced, but its cause is not resolved. Eleven "Stuck fault" notices appeared across the whole run, including before the forwarding window; not attributable to forwarding alone. No assert/exception/device-loss report found. Game stopped and original toggle mask 0 0 restored. No further sessions started: user requested fewer tests.

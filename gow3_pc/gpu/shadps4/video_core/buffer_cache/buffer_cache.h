@@ -837,8 +837,35 @@ private:
     std::unordered_map<u64, std::chrono::steady_clock::time_point> noisy_pages;
     /// Stops read-protecting one page for every pending readback (a false-sharing read).
     void UnwatchPage(VAddr page);
+    /// gow3 23 Oct 2026: the pieces of watching readbacks on each read-protected page, for guest
+    /// threads' read faults (LookupWatchedRead), which cannot look at pending_readbacks. Kept by
+    /// the threads that own pending_readbacks; address 0 marks an owner's page.
+    struct WatchedPiece {
+        const PendingReadback* owner;
+        VAddr address;
+        u64 size;
+        u64 tick;
+        std::chrono::steady_clock::time_point queued;
+    };
+    mutable std::mutex watched_index_mutex;
+    std::unordered_map<u64, std::vector<WatchedPiece>> watched_index; ///< page number -> pieces
+    void IndexWatched(const PendingReadback& readback);
+    void UnindexWatched(const PendingReadback& readback, VAddr page, u64 size);
 
 public:
+    /// gow3 23 Oct 2026 (any thread): the watching readbacks on the page of [addr, addr + size):
+    /// how many, and the newest tick of those whose GPU bytes the range touches (0: none, a
+    /// false-sharing read).
+    struct WatchedRead {
+        u32 owners = 0;
+        u64 tick = 0;
+        std::chrono::steady_clock::time_point queued{}; ///< of the newest readback it touches
+    };
+    [[nodiscard]] WatchedRead LookupWatchedRead(VAddr addr, u64 size) const;
+    /// gow3 23 Oct 2026 (guest thread): a false-sharing read on the page holding `addr`: makes
+    /// it readable at once if only those `owners` watch it, and has the command thread unwatch it
+    /// (and keep it unprotected for 10 s) as its own false-sharing path does.
+    bool OpenFalseSharingPage(VAddr addr, u32 owners);
     /// gow3: lands the pending readbacks that read-protect `page`, waiting for the GPU if needed
     /// (GPU thread: a CPU access faulted on that page and would fault again).
     void LandReadbacksWatching(VAddr page);

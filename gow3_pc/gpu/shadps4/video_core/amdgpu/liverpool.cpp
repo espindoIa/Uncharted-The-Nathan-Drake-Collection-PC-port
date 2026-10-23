@@ -363,6 +363,27 @@ void Liverpool::ProcessCommands() {
     }
     // Process incoming commands with high priority
     while (num_commands) {
+        // 23 Oct 2026: repeat the stage-B experiment under measured external CPU load.
+        // Off by default. Flip commands keep their original path (presenter waits).
+        if (rasterizer && rasterizer->CommandsInOrder()) {
+            Common::UniqueFunction<void> callback{};
+            {
+                std::scoped_lock lk{submit_mutex};
+                auto& queue = !fault_queue.empty() ? fault_queue : command_queue;
+                if (std::string_view{queue.front().tag} != "flip") {
+                    callback = std::move(queue.front().func);
+                    queue.pop();
+                    if (&queue == &fault_queue) {
+                        --num_fault_commands;
+                    }
+                    --num_commands;
+                }
+            }
+            if (callback) {
+                rasterizer->RunCommandInOrder(std::move(callback));
+                continue;
+            }
+        }
         // gow3: commands touch the caches the draw recording thread uses: it runs dry first,
         // before every command. A drain only when num_commands was set on entry let a command
         // queued just after that check (a guest page fault's ReadMemory) run beside the
@@ -2580,6 +2601,38 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         if (rasterizer) {
             rasterizer->NewGuestEpoch();
         }
+        // gow3 23 Oct 2026 diagnostics (GOW3_FAULT_STATS): how long a compute-ring submission
+        // waited for this thread (the graphics task runs until it waits on something).
+        if (Gow3Stats::fault_stats) {
+            s64 submitted = 0;
+            {
+                auto& mapped = mapped_queues[vqid + 1];
+                std::scoped_lock lock{mapped.m_access};
+                if (!mapped.submit_ns.empty()) {
+                    submitted = mapped.submit_ns.front();
+                    mapped.submit_ns.pop();
+                }
+            }
+            static std::atomic<u64> count{0}, sum_ns{0}, max_ns{0};
+            static std::atomic<s64> last_ns{0};
+            const s64 now = SteadyNs();
+            if (submitted) {
+                const u64 waited = static_cast<u64>(now - submitted);
+                ++count;
+                sum_ns += waited;
+                for (u64 m = max_ns.load(); waited > m && !max_ns.compare_exchange_weak(m, waited);) {
+                }
+            }
+            if (s64 last = last_ns.load();
+                now - last >= 5'000'000'000 && last_ns.compare_exchange_strong(last, now)) {
+                const u64 n = count.exchange(0);
+                std::printf("Compute rings (5 s): %llu submissions, waited %.2f ms on average for the "
+                            "command thread, %.2f ms at most\n",
+                            static_cast<unsigned long long>(n), n ? sum_ns.exchange(0) / 1e6 / n : 0.0,
+                            max_ns.exchange(0) / 1e6);
+                std::fflush(stdout);
+            }
+        }
     }
 
     struct IndirectPatch {
@@ -3041,6 +3094,9 @@ void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
     {
         std::scoped_lock lock{queue.m_access};
         queue.submits.emplace(task.handle);
+        if (Gow3Stats::fault_stats) {
+            queue.submit_ns.push(SteadyNs());
+        }
     }
 
     std::scoped_lock lk{submit_mutex};

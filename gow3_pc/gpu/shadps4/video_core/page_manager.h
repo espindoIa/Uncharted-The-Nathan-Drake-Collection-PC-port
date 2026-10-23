@@ -50,6 +50,12 @@ public:
     /// Read without the page locks: a hint for fault handlers, which re-check where it matters.
     [[nodiscard]] bool IsReadWatched(VAddr addr) const;
 
+    /// gow3 23 Oct 2026: gives the page holding `addr` the access it will have once its read
+    /// watches go (writes still fault if write-watched) while 1 to `max_watchers` read watches
+    /// hold it; false otherwise. For guest reads beside a readback's GPU bytes
+    /// (BufferCache::OpenFalseSharingPage): the watcher counts stay as they are.
+    bool OpenForReads(VAddr addr, u32 max_watchers) const;
+
     /// Returns page aligned address.
     static constexpr VAddr GetPageAddr(VAddr addr) {
         return Common::AlignDown(addr, PM_PAGE_SIZE);
