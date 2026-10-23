@@ -206,6 +206,25 @@ class PipeStatsSessionTests(unittest.TestCase):
         self.assertNotIn(self.names[0], r.stdout)
         self.assertIn(self.names[1], r.stdout)
 
+    def test_latest_same_second_orders_pid_as_number(self):
+        # N1 (SENTINEL r2): same UTC second, pids of different widths; a text sort would put
+        # -99999 last and --latest would pick it.
+        d = Path(self.dir.name)
+        same = ["same.20261023T150000Z-99999.csv", "same.20261023T150000Z-100000.csv",
+                "same.20261023T150000Z-7.csv", "same.20261023T145959Z-1000000.csv"]
+        for seed, name in enumerate(same, start=1):
+            main, _, _, _ = simulate(frames=40 + seed, seed=seed)
+            (d / name).write_text(main)
+        found = [Path(p).name for p in pipe_stats.sessions(str(d / "same.csv"))]
+        self.assertEqual(found, ["same.20261023T145959Z-1000000.csv", "same.20261023T150000Z-7.csv",
+                                 "same.20261023T150000Z-99999.csv", "same.20261023T150000Z-100000.csv"])
+        r = subprocess.run([sys.executable, str(REPO / "tools" / "pipe_stats.py"), str(d / "same.csv"),
+                            "--skip-s", "0", "--latest"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("same.20261023T150000Z-100000.csv", r.stdout)
+        for name in same[:1] + same[2:]:
+            self.assertNotIn(name, r.stdout)
+
     def test_no_sessions_is_an_error(self):
         r = subprocess.run([sys.executable, str(REPO / "tools" / "pipe_stats.py"),
                             str(Path(self.dir.name) / "none.csv")], capture_output=True, text=True,

@@ -128,17 +128,27 @@ def load_gpu(path, problems=None):
     return records
 
 
-SESSION = re.compile(r"\.\d{8}T\d{6}Z-\d+\.csv$")
+SESSION = re.compile(r"\.(\d{8}T\d{6}Z)-(\d+)\.csv$")
+
+
+def session_key(name):
+    """Sort key of a session file name: (UTC start, pid as a number). The start has one-second
+    resolution, so two launches in the same second are ordered by pid, numerically (a text sort
+    would put -99999 after -100000). Within one second that is a tie-break, not proof of
+    which process started later (Windows reuses pids)."""
+    m = SESSION.search(name)
+    return (m.group(1), int(m.group(2))) if m else ("", -1)
 
 
 def sessions(path):
     """The files to report for `path`: itself if it exists, else the session files the game
-    wrote for GOW3_PIPE_STATS=<path>, oldest first (the name starts with the UTC start)."""
+    wrote for GOW3_PIPE_STATS=<path>, oldest first by (UTC start, pid); --latest takes the last."""
     if os.path.exists(path):
         return [path]
     stem = path[:-4] if path.endswith(".csv") else path
-    found = sorted(p for p in glob.glob(glob.escape(stem) + ".*.csv")
-                   if SESSION.match(p[len(stem):]))
+    found = sorted((p for p in glob.glob(glob.escape(stem) + ".*.csv")
+                    if SESSION.match(p[len(stem):])),
+                   key=lambda p: session_key(p[len(stem):]))
     if not found:
         sys.exit(f"{path}: no such file, and no {stem}.<UTC start>-<pid>.csv files")
     return found
