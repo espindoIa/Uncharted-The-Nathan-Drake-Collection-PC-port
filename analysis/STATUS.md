@@ -3630,3 +3630,25 @@ What would still cut the fence and fault-flush waits (not done):
 - Fault-flush commands (about 9% of stage A, 190 a second, about 480 us each) were not touched.
 
 Not verified: no 4K run, no soak run, no GOW3_READBACK_RACE run; U1 and U2; other U3 chapters (one scene measured); each number is from one run.
+
+## 23 October 2026: GOW3_PIPE_STATS, per-frame stage A / stage B counters (instrumentation only)
+
+Why: the stage numbers so far are 5 s windows (GOW3_FRAME_STATS, GOW3_WAIT_TRACE) or thread CPU time, and thread CPU time counts spin waits as busy (phase 0 above: "Busy% includes spin waits", GOW3_PIPE_SPIN_US=20 lowered stage B 96 -> 93%). None of them gives per-frame percentiles, how full the draw pipe is, or spin versus sleep per stage. This adds the measurement only; no wait, drain or submission changes.
+
+How to use: `GOW3_PIPE_STATS=<file>` (off by default) writes one CSV row per VideoOutDriver::Flip; `python tools/pipe_stats.py <file> [--split-toggles]` summarises it. Header line: `# gow3_pipe_stats schema=1 build=<git rev at cmake configure> toggles=<first>,<second> tsc_hz=... threads=... occ_sample=1/16`.
+- frame_id is counted in VideoOutDriver::Flip (DebugState's IncFlipFrameNum is a no-op, core/debug_state.h); t_flip_ns is steady_clock, taken right after the flip is handed to the swap thread, the same point as GOW3_FRAME_TIMES intervals.
+- a_* (GPU command thread): idle split into the deferred-signal poll loop and the submit_cv sleep; drain wait split into the 4096-pause phase and the yield phase, and by reason (PM4 opcode, commands, submission end, other); full-ring waits in WaitForSpace; packets, bytes, wakes of stage B; bytes in flight at 1 in 16 commits (9 log buckets).
+- b_* (gow3:DrawRec): packets, handler time, the empty-ring wait split into spin and wake.wait sleep, sleeps, longest packet of the frame.
+- rec_* / sub_* columns are reserved and written empty (recorder and submission, not instrumented here).
+- Disabled2 bit 16777216 (PipeStats) pauses collection live: rows go on with stats_paused=1 and zero counters, so the instrumentation's own cost can be A/B'd in one run. (8388608 is left out: the dropped FencePositionWait used it.)
+
+Design: every counter has a single writer (its stage) and is a std::atomic updated with store(load + n) relaxed, so no locked instruction on the hot path; clocks are read only in wait paths and once per stage B packet, where __rdtsc was already read. The flip copies the counters into a preallocated 1024-row ring (no lock, no allocation; a full ring or a second flipping thread drops the row and counts it). A low-priority thread gow3:PipeStats writes the rows every 100 ms and flushes every second; atexit joins it and closes the file; its state is never freed, so a flip racing the exit touches live memory only. With GOW3_PIPE_STATS unset each hook is one branch on a flag read once at start; building with -DGOW3_PIPE_STATS_BUILD=0 removes them.
+
+Tested (Linux g++ 14.2, outside the game):
+- pipe-stats-test (tests/test_pipe_stats.cpp): variable stage load with flips every 0-2 ms and a second flip thread, a paused stretch, 500 ms idle (process CPU 0.2-0.7 ms: the writer sleeps), 200,000 flips with no pause (ring full: 198,976 dropped, 13-16 ns a flip in the plain build), shutdown racing a flipping thread. The CSV sums equal what the stage threads counted. Passes plain and under TSan, ASan and UBSan with no reports.
+- The real vk_draw_pipe.h with stub platform headers (saturation, idle, bursts, wrap, three shutdown cases, drain wait), stats off and on, plain and under the three sanitizers: all pass, no reports; with stats on the drain, yield, full-ring and sleep counters are non-zero.
+- With -DGOW3_PIPE_STATS_BUILD=0 the DrawPipe code at -O2 is the same instructions as before the change (only an ASSERT line number differs).
+- Model benchmark, stage A alone committing 200,000 8-byte packets (21 runs, 3 rounds, medians): build without hooks 7.4-7.9 ns a packet, hooks off 7.0-9.4, collection on 8.3-9.3, paused 7.5-7.7. Model only: no in-game number.
+- liverpool.cpp and driver.cpp: g++ -fsyntax-only with the headers available here gives the same single environment error as before the change (a Windows-only call and an older Vulkan header).
+
+Not tested: the Windows build (build.sh), the game, the in-game overhead (A/B the PipeStats bit with ab2 at the player's settings before trusting rows), U1, U2.
