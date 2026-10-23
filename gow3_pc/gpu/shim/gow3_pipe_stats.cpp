@@ -4,6 +4,7 @@
 
 #if GOW3_PIPE_STATS_BUILD
 #include <chrono>
+#include <cerrno>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -302,7 +303,10 @@ bool Start() {
         s->file = std::fopen(s->path.c_str(), "w");
     }
     if (!s->file) {
-        std::fprintf(stderr, "gow3: GOW3_PIPE_STATS: cannot open '%s'\n", s->path.c_str());
+        // Once: Start runs on the first flip only.
+        const int error = errno;
+        std::fprintf(stderr, "gow3: GOW3_PIPE_STATS: cannot open '%s' (%s); pipe stats off\n",
+                     s->path.c_str(), std::strerror(error));
         delete s;
         return false;
     }
@@ -341,6 +345,9 @@ void OnFlip(u64 a_frame_id, u64 a_seq) noexcept {
             started = Start();
         } catch (...) {
             started = false;
+        }
+        if (!started) {
+            output_failed.store(true, std::memory_order_relaxed); // the hooks stop counting
         }
         phase.store(started ? 1 : 2, std::memory_order_release);
         current = started ? 1 : 2;

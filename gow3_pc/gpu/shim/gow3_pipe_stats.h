@@ -88,16 +88,22 @@ inline std::atomic<u64> frame_epoch{0};
 /// GOW3_PIPE_STATS=<file> was set (read once).
 bool Requested() noexcept;
 inline const bool enabled = Requested();
+/// The file could not be opened (first flip): collection is off for the rest of the process.
+/// Written once by the flip thread; read only after `enabled`, so with stats off it is never
+/// read.
+inline std::atomic<bool> output_failed{false};
 #else
 inline constexpr bool enabled = false;
 #endif
 
-/// Collection on: requested and not paused by the toggle.
+/// Collection on: requested, the file open (or not tried yet) and not paused by the toggle.
 inline bool Active() noexcept {
-    if constexpr (!GOW3_PIPE_STATS_BUILD) {
-        return false;
-    }
-    return enabled && !Gow3Toggle::Disabled2(Gow3Toggle::PipeStats);
+#if GOW3_PIPE_STATS_BUILD
+    return enabled && !output_failed.load(std::memory_order_relaxed) &&
+           !Gow3Toggle::Disabled2(Gow3Toggle::PipeStats);
+#else
+    return false;
+#endif
 }
 
 inline u64 Cycles() noexcept {
@@ -151,9 +157,15 @@ inline constexpr u64 NoSeq = ~0ull;
 /// a_seq: the frame that flip ends. Work stage A queues after it belongs to frame a_seq + 1.
 /// Docs: docs/team/PIPE_STATS_SCHEMA_v1.md (join key for the recorder, submit and GPU files).
 inline u64 NoteFlipPacket() noexcept {
+#if GOW3_PIPE_STATS_BUILD
+    if (!enabled || output_failed.load(std::memory_order_relaxed)) {
+        return 0;
+    }
+#else
     if (!enabled) {
         return 0;
     }
+#endif
     const u64 seq = stage_a.seq.Load() + 1;
     stage_a.seq.value.store(seq, std::memory_order_relaxed);
     return seq;

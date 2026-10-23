@@ -8,7 +8,8 @@
 // Then the ways the game ends (child processes): std::_Exit with no flush in the middle of a
 // burst of rows and during steady flips (only the rows queued since the writer's last pass may
 // be lost, at most the last line is cut), and FlushForExit then std::_Exit (nothing queued
-// before the call is lost).
+// before the call is lost); two launches with the same GOW3_PIPE_STATS (two files); a file
+// that cannot be opened (one warning, collection off).
 // Build: ninja -C out/gpu pipe-stats-test (or the g++ line in docs; run under TSan/ASan/UBSan).
 #include <atomic>
 #include <cassert>
@@ -666,10 +667,36 @@ static void TestExits(const char* self) {
     }
 }
 
+/// Child, GOW3_PIPE_STATS in a directory that does not exist (B8): one warning, then every
+/// hook sees collection off; nothing is written or counted.
+static int RunOpenFails() {
+    const std::string err = std::string(test_dir) + "/open-fails.err";
+    if (!std::freopen(err.c_str(), "w", stderr)) {
+        return 2;
+    }
+    assert(PS::enabled && PS::Active());
+    for (int i = 0; i < 5; ++i) {
+        PS::OnFlip(0);
+        if (PS::Active()) { // as the hooks in vk_draw_pipe.h and liverpool.cpp do
+            PS::stage_a.packets.Add(1);
+        }
+    }
+    assert(!PS::Active() && PS::output_failed.load());
+    assert(PS::stage_a.packets.Load() == 0 && PS::NoteFlipPacket() == 0);
+    assert(PS::OutputPath() == nullptr && PS::RowsWritten() == 0);
+    PS::FlushForExit(); // returns at once
+    PS::Shutdown();
+    std::fflush(stderr);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const std::string mode = argc > 1 ? argv[1] : "";
     if (mode == "main") {
         return RunMain();
+    }
+    if (mode == "open-fails") {
+        return RunOpenFails();
     }
     if (mode.rfind("exit-", 0) == 0) {
         return RunExit(mode);
@@ -693,6 +720,22 @@ int main(int argc, char** argv) {
             assert(CheckRows(p) > 100 && p.cut == 0);
         }
         std::printf("two launches: %s, %s\n", first.c_str(), second.c_str());
+    }
+    { // B8: the file cannot be opened: one warning, collection off, the child ends normally.
+        const std::string missing = std::string(test_dir) + "/missing/run.csv";
+        assert(Spawn(argv[0], "open-fails", missing) == 0);
+        std::FILE* file = std::fopen((std::string(test_dir) + "/open-fails.err").c_str(), "r");
+        assert(file);
+        int warnings = 0;
+        char line[1024];
+        while (std::fgets(line, sizeof(line), file)) {
+            if (std::strstr(line, "GOW3_PIPE_STATS: cannot open") && std::strstr(line, "off")) {
+                ++warnings;
+                std::printf("open fails: %s", line);
+            }
+        }
+        std::fclose(file);
+        assert(warnings == 1 && !std::filesystem::exists(std::string(test_dir) + "/missing"));
     }
     if (!std::getenv("GOW3_PIPE_STATS_KEEP")) {
         std::filesystem::remove_all(test_dir);
