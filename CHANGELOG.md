@@ -6,6 +6,76 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Added (24 Oct 2026): the launcher can be used with a controller.** The D-pad or the left stick
+  move through the games, the sections, the settings and the buttons; A presses a button, flips a
+  switch or opens a list, left and right change a choice, B goes back to the section list (and
+  then to the games), LB and RB switch the section, and Start plays (or stops). In a message
+  window A presses the highlighted button, B closes it and left and right pick a button. It works
+  only while the launcher window has the focus and no game runs.
+
+- **Added (24 Oct 2026): the launcher can be used with the keyboard.** Tab and Shift+Tab move
+  through the games, the sections, the settings and the buttons, with an orange outline on the one
+  that has the focus; Space or Enter presses a button or flips a switch, Left and Right change a
+  choice (Home and End pick the first and the last), and Down or Enter opens a list. In
+  Controls, Enter on a slot waits for the next key like a click, and Delete clears it. Shortcuts:
+  Ctrl+1, Ctrl+2, Ctrl+3 pick the game, Ctrl+Tab and Ctrl+Shift+Tab the next and previous section,
+  Ctrl+Enter plays (or stops). The launcher opens with the focus on PLAY.
+
+- **Added (24 Oct 2026): "Apply to all games" and a note when a setting waits for the next start.**
+  Display and Performance have an Apply to all games button at the top right: it copies the
+  selected game's graphics and performance settings (resolution, aspect ratio, anti-aliasing,
+  frame rate and the rest) to the other two games; their controls stay as they are. It asks
+  first and is not available while a game runs. Changing the resolution, aspect ratio,
+  multithreading or graphics card while a game runs now says it applies the next time the game
+  starts (the settings in the in-game menu, opened with Insert, change live).
+
+- **Changed (24 Oct 2026): options that do nothing are greyed out and say what they need.** Under
+  Display, Upscaling mode is greyed out unless Anti-aliasing is FSR or DLSS, DLSS model unless it
+  is DLSS, and DLSS Frame Generation when Anti-aliasing is Off or NVIDIA's `nvngx_dlssg.dll` is
+  missing; a short orange line under each says what it needs. Nothing is reset: your choices are
+  kept and the options wake up again as soon as you pick a matching anti-aliasing mode, in the
+  launcher or in the in-game menu.
+
+- **Changed (24 Oct 2026): settings show one line and a ? with the details.** Each setting now has
+  a short one-line hint; the full explanation (the numbers, what to do if a game misbehaves) is
+  behind the round ? next to its name: hover it, click it (it stays open until you click elsewhere
+  or press Esc) or press Space or Enter on it. Settings that apply to all three games (language,
+  speakers, the unlocks, the cheats, the performance log, update checks, idle game threads) carry
+  an ALL GAMES label; the others are kept separately for each game.
+
+- **Changed (24 Oct 2026): launcher messages and questions match the launcher's look.** They are
+  dark windows in the launcher's colours instead of the grey Windows message boxes: Enter
+  answers the highlighted button, Esc cancels, and long details (an error's text) have a Copy
+  button. Short confirmations (shortcut created, shader cache cleared, update installed, NVIDIA
+  DLSS ready) are a small note in the corner that goes away after a few seconds. When a game stops
+  with an error, the message now has Open log folder and Copy report buttons; the report holds
+  the error, the game and its version, your graphics card and the main settings, ready to paste
+  into a GitHub issue. This also works for the desktop game shortcuts (`--play`).
+
+- **New (24 Oct 2026): Home checks that you are ready to play.** A "Ready to play" list at the top
+  of Home checks the game files, update 1.02 (and whether its files are intact), the NVIDIA DLSS
+  and Frame Generation files, the drive speed and whether a new launcher version is out. Each
+  line that needs attention has the buttons to fix it (choose or install the game and the update,
+  get or add the NVIDIA files, install the launcher update); on a first start it reads as the
+  steps to follow. The NVIDIA file buttons moved here from Display. Adding an NVIDIA file no
+  longer needs a restart: DLSS shows up under Anti-aliasing and the 144-240 FPS limits under
+  Performance (with Frame Generation) at once.
+
+- **Changed (24 Oct 2026): launcher layout.** The games and the settings sections are now in a
+  sidebar on the left, with the selected game's name in a smaller banner and PLAY always at the
+  bottom right. The sections were renamed: Quick Setup is now Home, Cheats is now Gameplay and
+  Advanced is now System (the launcher opens the section you used last). The window fits a
+  1280x720 screen (1080p at 150% scaling); on a short screen the settings scroll and PLAY stays in
+  view. Long hints wrap to the window's width, and choices with many options (the frame rate
+  limit) are a menu.
+
+- **Fixed (24 Oct 2026): launcher.** The mouse wheel no longer stops scrolling the pages after you
+  rebind a control. Reset (now "Reset this game's settings" under System) also puts the
+  keyboard, mouse and controller controls back to the defaults; before, they came back the next
+  time the launcher started or you switched game. The launcher no longer freezes for seconds
+  while it checks an NVIDIA DLL you add, creates shortcuts, stops the game or looks for graphics
+  cards (the Graphics card row on Display now appears a moment after the launcher opens).
+
 - **24 Oct 2026: Uncharted 3's Cartagena market street (chapter 2) runs about 10-12% faster.**
   The street's crowd made the port prepare about 1,500 tiny skinning jobs a frame one by one,
   which kept the processor, not the graphics card, as the limit. They now go to the graphics card

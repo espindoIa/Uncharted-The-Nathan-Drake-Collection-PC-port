@@ -321,13 +321,13 @@ RUN_GROUP_PATCH = ("particle run grouping: loop bounds from registers, not below
     ]),
 ])
 
-# Everything unlocked (launcher -> Advanced -> Unlock all chapters, UNCHARTED_UNLOCK=1): the three
+# Everything unlocked (launcher -> System -> Unlock all chapters, UNCHARTED_UNLOCK=1): the three
 # games keep Bluepoint's tweak flags "Unlock Chapter Select by default" and "Unlock Brutal
 # difficulty by default" (debug menu; +2/+1 after the Crushing flag, which the Collection already
 # sets). At start the game fills the first and the chapter one from the *bp-ucctweaks* table
 # (Crushing on, chapters off); Brutal starts off. The chapter flag is now set where the table is
 # read, Brutal where it is cleared (1.02; U1 has two copies of that constructor).
-# Cheats (launcher -> Advanced -> Cheats, UNCHARTED_CHEATS=invincible,ammo,noreload,grenades,onehit):
+# Cheats (launcher -> Gameplay, UNCHARTED_CHEATS=invincible,ammo,noreload,grenades,onehit):
 # the games keep Naughty Dog's debug-menu switches ("Invincible Player", "Infinite Ammo", "No
 # Reload", "Infinite Grenades", "One Hit Kills"; the menu itself is unreachable), each a byte the
 # menu item points at. The runtime keeps the chosen ones set (GOW3_POKE). Update 1.02 addresses
@@ -348,7 +348,7 @@ def _ammo_reader(pattern, jne_at):
     return (pattern, jne_at, b"\x75", b"\xeb")
 
 
-# Unlock all rewards (launcher -> Advanced, UNCHARTED_UNLOCK_REWARDS=1): Naughty Dog's debug menu
+# Unlock all rewards (launcher -> System, UNCHARTED_UNLOCK_REWARDS=1): Naughty Dog's debug menu
 # switches "Give all Store Items" and "Give All Movies" (the menu itself is unreachable), kept set
 # like the cheats (GOW3_POKE): the games' unlock checks treat every reward (skins, weapons, render
 # modes, art galleries, tweaks) and every story cutscene as unlocked while they are set. Nothing
@@ -405,7 +405,7 @@ REWARD_PATCHES = {
 
 
 def cheat_names(executable):
-    """The cheats asked for (UNCHARTED_CHEATS, launcher -> Cheats)."""
+    """The cheats asked for (UNCHARTED_CHEATS, launcher -> Gameplay)."""
     return [name for name in os.environ.get("UNCHARTED_CHEATS", "").replace(" ", "").split(",") if name]
 
 
@@ -1145,7 +1145,7 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         limit = ini_value(Path(env["GOW3_CONFIG"]), "fps_limit", "60")
         if limit.isdigit() and (int(limit) == 0 or int(limit) > 60):
             env["GOW3_VBLANK_HZ"] = "0"
-    # Save profiles (launcher Advanced, GitHub #66, 24 Oct 2026): profile N plays as PS4 user N,
+    # Save profiles (launcher System, GitHub #66, 24 Oct 2026): profile N plays as PS4 user N,
     # whose saves are in analysis\uncharted-user\savedata\N (profile 1: the folder of every earlier
     # version). GOW3_USER_ID set outside the launcher (tests) wins.
     profile = os.environ.get(f"UNCHARTED_SAVE_PROFILE_{game_key.upper()}", "1")
@@ -1162,7 +1162,7 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     if multithreaded is not None:
         env["GOW3_DRAW_PIPE"] = multithreaded
         env["GOW3_VK_RECORD_THREAD"] = multithreaded
-    # Keyboard and mouse (launcher Controls tab, per game; explicit GOW3_* values win).
+    # Keyboard and mouse (launcher Controls section, per game; explicit GOW3_* values win).
     for launcher_key, runtime_key in (("KEY_MAP", "GOW3_KEY_MAP"), ("MOUSE_MAP", "GOW3_MOUSE_MAP"),
                                       ("MOUSE", "GOW3_MOUSE"), ("MOUSE_SENS", "GOW3_MOUSE_SENS"),
                                       ("MOUSE_INVERT", "GOW3_MOUSE_INVERT"), ("PROMPTS", "GOW3_PROMPTS"),
@@ -1208,12 +1208,12 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     # bloom mips are lost the same way): to be turned on for them after a test there.
     if executable == "big3-ps4_Shipping.elf":
         env.setdefault("GOW3_MIP_TARGETS", "1")
-    # The PS4's system language (launcher -> Advanced -> Language; runtime_services.c): each game's
+    # The PS4's system language (launcher -> System -> Language; runtime_services.c): each game's
     # main menu offers it next to English (Square). 1 = English (US).
     language = os.environ.get("UNCHARTED_LANGUAGE", "").strip()
     if language.isdigit():
         env.setdefault("GOW3_LANGUAGE", language)
-    # Speakers (launcher -> Advanced): the layout the games mix their sound for (runtime_audio.c);
+    # Speakers (launcher -> System): the layout the games mix their sound for (runtime_audio.c);
     # auto = the Windows output device's (stereo, 5.1 or 7.1), or 2, 6, 8.
     speakers = os.environ.get("UNCHARTED_SPEAKERS", "").strip().lower()
     if speakers in ("auto", "2", "6", "8"):

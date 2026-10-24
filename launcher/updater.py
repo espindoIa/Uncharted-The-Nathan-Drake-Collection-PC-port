@@ -33,7 +33,7 @@ API = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=20"
 ASSET = "Uncharted-windows.zip"
 # What a package must hold to be installed over this one.
 REQUIRED = ("Uncharted Launcher.exe", "VERSION", "python/pythonw.exe", "launcher/uncharted_launcher.pyw",
-            "launcher/updater.py", "tools/apply_update.py", "tools/probe_uncharted.py",
+            "launcher/updater.py", "launcher/widgets.py", "tools/apply_update.py", "tools/probe_uncharted.py",
             "gow3_pc/out/gow3-probe.exe")
 
 
