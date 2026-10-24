@@ -3654,3 +3654,22 @@ Mechanism: commit e1df90a replaced `ASSERT(das == 0)` with a skip of every DMA_D
 Fix: file-local `DmaDstIsRegister(d)` in liverpool.cpp returns `das != 0 && dst_sel in {Memory, MemoryUsingL2}`. RunDmaData and the compute case skip on it; the graphics caller's guard is `!DmaDstIsRegister(...)`. The once-only log now prints dst_sel too. Packets with dst_sel Gds run as before e1df90a. No other behaviour change.
 
 Not verified: no game run; no Uncharted scene known to send das=1.
+
+## 24 October 2026: compute DMA_DATA waits for host copies
+
+Mechanism: the graphics RunDmaData and the compute WriteData call `WaitHostCopies()` and `WaitDeferredSignals()` before they write guest memory. The compute-queue `case PM4ItOpcode::DmaData:` (Liverpool::ProcessCompute) did not: after the DmaDstIsRegister skip it ran the FillBuffer/CopyBuffer CPU paths on stage A at once. (a) An earlier dispatch's deferred guest->staging upload copy (recorder thread) could run after this DMA wrote the range, so that dispatch uploaded the post-DMA bytes. (b) A pipelined RELEASE_MEM label deferred to the recorder could be overtaken by this guest-visible write.
+
+Fix: `WaitHostCopies(); WaitDeferredSignals();` before the three branches that write guest memory with a Memory/MemoryUsingL2 destination: Data -> Memory, Gds -> Memory, and the non-patch CopyBuffer of Memory -> Memory. Not added: the Gds-destination branches (no guest write), the `indirect_patches.emplace_back` path (no guest write; a wait there would stall every dispatch), NoteOvertake (graphics-only helper). No other behaviour change.
+
+Not verified: no game run; not known how often U3 sends compute DMA_DATA to memory; never observed (found by static review).
+
+Reviewed, not changed (24 Oct 2026). Each needs a game run (GOW3_UPSCALER_TRACE / boot.log) or a shader-cache version bump before changing:
+1. FMask T# makes the resource list depend on the T# (resource_patching_pass.cpp:294-341, `descriptors.Add` skipped).
+2. The effect-family garbage rule nulls unbounded raw V#s (resource.h:116-134).
+3. BufferSpecialization lacks add_tid_enable.
+4. access_extent comes from permutation 0.
+5. Baked stride for a null-filtered slot.
+6. DumpConstRam memcpy without WaitHostCopies (liverpool.cpp:1418).
+7. Ring copies vs pending GDS stores / compute labels (vk_rasterizer.cpp:2051).
+8. No history reset after movie/load frames without a frame start, no camera-cut detection (vk_camera_motion.cpp:442).
+9. World-space single-quad draws get no jitter (vk_rasterizer.cpp:3445).

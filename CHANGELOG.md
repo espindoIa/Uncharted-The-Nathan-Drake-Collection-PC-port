@@ -6,6 +6,9 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Uncharted: GPU memory copies issued from the compute queue now wait for earlier queued uploads
+  like the graphics queue's do, so a compute dispatch cannot read data from after the copy.** Found
+  by code review, not seen in game, not tested in game.
 - **Uncharted: a GPU copy into the shader-engine scratch memory (GDS) that carried a register flag
   is no longer dropped.** Found by code review, no known scene sends it, not tested in game.
 - **Uncharted: after a file read replaced a page that held GPU data, a later GPU write to the same

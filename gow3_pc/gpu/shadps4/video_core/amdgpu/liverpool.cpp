@@ -2700,11 +2700,18 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             } else if (dma_data->src_sel == DmaDataSrc::Data &&
                        (dma_data->dst_sel == DmaDataDst::Memory ||
                         dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
+                // 24 Oct 2026, static review: the writes to guest memory below wait like RunDmaData
+                // and WriteData do. Else an earlier dispatch's deferred upload copy reads the bytes
+                // after this write, and a deferred RELEASE_MEM label can be overtaken by it.
+                rasterizer->WaitHostCopies();
+                rasterizer->WaitDeferredSignals();
                 rasterizer->FillBuffer(dma_data->DstAddress<VAddr>(), dma_data->NumBytes(),
                                        dma_data->data, false);
             } else if (dma_data->src_sel == DmaDataSrc::Gds &&
                        (dma_data->dst_sel == DmaDataDst::Memory ||
                         dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
+                rasterizer->WaitHostCopies();
+                rasterizer->WaitDeferredSignals();
                 rasterizer->CopyBuffer(dma_data->DstAddress<VAddr>(), dma_data->src_addr_lo,
                                        dma_data->NumBytes(), false, true);
             } else if ((dma_data->src_sel == DmaDataSrc::Memory ||
@@ -2721,6 +2728,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                     header->type == 3 && header->type3.opcode == PM4ItOpcode::DispatchDirect) {
                     indirect_patches.emplace_back(header, src_addr);
                 } else {
+                    rasterizer->WaitHostCopies();
+                    rasterizer->WaitDeferredSignals();
                     rasterizer->CopyBuffer(dst_addr, src_addr, num_bytes, false, false);
                 }
             } else {
