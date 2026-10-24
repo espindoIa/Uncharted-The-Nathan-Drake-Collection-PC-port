@@ -6,6 +6,14 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Added (24 Oct 2026): "Apply to all games" and a note when a setting waits for the next start.**
+  Display and Performance have an Apply to all games button at the top right: it copies the
+  selected game's graphics and performance settings (resolution, aspect ratio, anti-aliasing,
+  frame rate and the rest) to the other two games; their controls stay as they are. It asks
+  first and is not available while a game runs. Changing the resolution, aspect ratio,
+  multithreading or graphics card while a game runs now says it applies the next time the game
+  starts (the settings in the in-game menu, opened with Insert, change live).
+
 - **Changed (24 Oct 2026): options that do nothing are greyed out and say what they need.** Under
   Display, Upscaling mode is greyed out unless Anti-aliasing is FSR or DLSS, DLSS model unless it
   is DLSS, and DLSS Frame Generation when Anti-aliasing is Off or NVIDIA's `nvngx_dlssg.dll` is

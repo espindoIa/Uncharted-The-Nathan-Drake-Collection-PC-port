@@ -1320,6 +1320,7 @@ class Launcher:
                 write_ini(key, controls_to_ini(self.config["games"][key]))
         self.reload_ini()
         self.process = None
+        self.next_start_noted = False  # the "applies at the next start" toast shows once per run
         self.output = queue.Queue()
         self.last_output = 0.0
         self.game_started = False
@@ -1763,8 +1764,12 @@ class Launcher:
         body, which scrolls, never the footer)."""
         outer = tk.Frame(self.main, bg=BG)
         outer.pack(side="top", fill="both", expand=True, padx=self.px(28))
-        self.section_title = tk.Label(outer, text="", font=self.f_heading, bg=BG, fg=TEXT, anchor="w")
-        self.section_title.pack(side="top", fill="x", pady=(0, self.px(6)))
+        header = tk.Frame(outer, bg=BG)
+        header.pack(side="top", fill="x", pady=(0, self.px(6)))
+        self.section_title = tk.Label(header, text="", font=self.f_heading, bg=BG, fg=TEXT, anchor="w")
+        self.section_title.pack(side="left", fill="x", expand=True)
+        # Shown on Display and Performance only (show_tab).
+        self.apply_all_button = self.flat_button(header, "Apply to all games", self.apply_to_all_games)
         tk.Frame(outer, bg=LINE, height=1).pack(side="top", fill="x")
         # The smallest body the window keeps (minsize): wide enough for the Controls columns.
         self.body = tk.Frame(outer, bg=BG, width=self.px(940), height=self.px(220))
@@ -1800,6 +1805,10 @@ class Launcher:
         for tab in self.tab_buttons:
             self.draw_section(tab)
         self.section_title.config(text=dict(SECTIONS)[name])
+        if name in ("display", "performance"):
+            self.apply_all_button.pack(side="right")
+        else:
+            self.apply_all_button.pack_forget()
         for tab, page in self.pages.items():
             holder = getattr(page, "holder", page)
             if tab == name:
@@ -2909,7 +2918,41 @@ class Launcher:
 
     # -- settings changes -------------------------------------------------------------------
 
+    def note_next_start(self):
+        """24 Oct 2026: a setting the in-game menu cannot change is read at the start: say so once per run."""
+        if self.process and not self.next_start_noted:
+            self.next_start_noted = True
+            self.toast("Applies the next time the game starts. Insert opens the in-game menu for live changes.",
+                       "info")
+
+    def apply_to_all_games(self):
+        """Copies the selected game's Display and Performance settings (its ini keys, resolution, aspect
+        ratio, multithreading and quality preset) to the other two games; controls stay as they are."""
+        if self.process:
+            self.warn("Close the game first: the Collection may be running any of the three games.")
+            return
+        name = self.current_game()["name"]
+        if not self.ask_yesno(f"Copy {name}'s Display and Performance settings (resolution, aspect ratio, "
+                              "anti-aliasing, frame rate and the rest) to the other two games? Their "
+                              "controls stay as they are."):
+            return
+        source = self.config["game"]
+        shared = {k: self.ini.get(k, v) for k, v in INI_DEFAULTS.items()}
+        mine = self.game_settings()
+        for other in GAME_KEYS:
+            if other == source:
+                continue
+            write_ini(other, shared)
+            settings = self.config["games"][other]
+            for key in ("resolution", "aspect", "multithreaded", "preset"):
+                if key in mine:
+                    settings[key] = mine[key]
+        write_config(self.config)
+        self.toast("Settings copied to the other games.", "ok")
+
     def change(self, key, value):
+        if key == "gpu_id":
+            self.note_next_start()
         self.ini[key] = value
         self.save_ini({key: value})
         if self.game_settings().get("preset") != "custom":
@@ -2922,6 +2965,7 @@ class Launcher:
             self.refresh_dependencies()
 
     def change_resolution(self, value):
+        self.note_next_start()
         self.game_settings()["resolution"] = value
         self.game_settings()["preset"] = "custom"
         write_config(self.config)
@@ -2943,6 +2987,8 @@ class Launcher:
             self.render_size_note.config(text=f"Render size: {width} × {height}")
 
     def change_game_setting(self, key, value):
+        if key in ("aspect", "multithreaded"):
+            self.note_next_start()
         self.game_settings()[key] = value
         if key in ("mouse", "mouse_sens", "mouse_invert", "prompts", "mouse_aim_sens", "mouse_vertical",
                    "mouse_invert_x"):
@@ -3179,6 +3225,7 @@ class Launcher:
 
     def finished(self, code):
         self.process = None
+        self.next_start_noted = False
         self.draw_play()
         reason = self.crash_reason()
         # A freeze is reported however the game was closed (STOP, or Task Manager).

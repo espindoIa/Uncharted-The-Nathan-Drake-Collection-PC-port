@@ -197,6 +197,27 @@ class LauncherUiTest(unittest.TestCase):
         self.assertEqual(uncharted_launcher.read_ini(game)["vsync"], "0")
         self.assertTrue(uncharted_launcher.ini_file(game).is_file())
 
+    def test_apply_to_all_games_copies_display_settings_but_not_controls(self):
+        launcher, mod = self.launcher, uncharted_launcher
+        launcher.ask_yesno = lambda *args, **kwargs: True
+        launcher.select_game("u1")
+        others = [k for k in mod.GAME_KEYS if k != "u1"]
+        mod.write_ini("u2", {"key_map": "cross=Q"})
+        launcher.change("fps_limit", "90")
+        launcher.change_resolution("2560x1440")
+        launcher.toast = lambda *args, **kwargs: None
+        launcher.process = object()  # a game runs: nothing is copied
+        launcher.warn = lambda *args, **kwargs: None
+        launcher.apply_to_all_games()
+        self.assertEqual(mod.read_ini("u2")["fps_limit"], mod.INI_DEFAULTS["fps_limit"])
+        launcher.process = None
+        launcher.apply_to_all_games()
+        for key in others:
+            self.assertEqual(mod.read_ini(key)["fps_limit"], "90")
+            self.assertEqual(launcher.config["games"][key]["resolution"], "2560x1440")
+            self.assertEqual(launcher.config["games"][key]["aspect"], launcher.config["games"]["u1"]["aspect"])
+        self.assertEqual(mod.read_ini("u2")["key_map"], "cross=Q")
+
     def test_wheel_binding_survives_a_capture(self):
         launcher, root = self.launcher, self.root
         self.assertIn("on_wheel", root.bind_all("<MouseWheel>"))
