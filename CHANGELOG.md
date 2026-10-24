@@ -6,6 +6,15 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Changed (24 Oct 2026): launcher messages and questions match the launcher's look.** They are
+  dark windows in the launcher's colours instead of the grey Windows message boxes: Enter
+  answers the highlighted button, Esc cancels, and long details (an error's text) have a Copy
+  button. Short confirmations (shortcut created, shader cache cleared, update installed, NVIDIA
+  DLSS ready) are a small note in the corner that goes away after a few seconds. When a game stops
+  with an error, the message now has Open log folder and Copy report buttons; the report holds
+  the error, the game and its version, your graphics card and the main settings, ready to paste
+  into a GitHub issue. This also works for the desktop game shortcuts (`--play`).
+
 - **New (24 Oct 2026): Home checks that you are ready to play.** A "Ready to play" list at the top
   of Home checks the game files, update 1.02 (and whether its files are intact), the NVIDIA DLSS
   and Frame Generation files, the drive speed and whether a new launcher version is out. Each

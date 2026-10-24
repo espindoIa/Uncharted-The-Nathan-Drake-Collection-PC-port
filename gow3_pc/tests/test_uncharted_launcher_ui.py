@@ -199,8 +199,8 @@ class LauncherUiTest(unittest.TestCase):
         launcher.set_pad_binding("cross", "b")
         values = uncharted_launcher.read_ini(game)
         self.assertIn("cross=X", values["key_map"])
-        with mock.patch.object(uncharted_launcher.messagebox, "askyesno", return_value=True):
-            launcher.reset()
+        launcher.ask_yesno = lambda *args, **kwargs: True
+        launcher.reset()
         settings = {}
         self.assertTrue(uncharted_launcher.controls_from_ini(uncharted_launcher.read_ini(game), settings))
         self.assertEqual(settings["controls"]["cross"], ["key:Space"])
@@ -218,6 +218,105 @@ class LauncherUiTest(unittest.TestCase):
             self.assertTrue(self.pump(lambda: bool(called)))
         self.assertEqual(called[0][:2], ["taskkill", "/PID"])
         self.assertIn("4242", called[0])
+
+    def test_crash_report_and_dialog_buttons(self):
+        launcher = self.launcher
+        reason = "Fault: access violation\nhost #0 foo\n\nPlease attach boot.log."
+        report = launcher.crash_report(reason)
+        for part in (reason, launcher.current_game()["name"], "upscaler:", "fps_limit:", "Graphics card:", "Log:"):
+            self.assertIn(part, report)
+        seen = {}
+
+        def fake_ask(root, title, message, buttons, **kwargs):
+            seen.update(title=title, message=message, labels=[b[0] for b in buttons], detail=kwargs["detail"])
+            return "report"
+        with mock.patch.object(uncharted_launcher.Dialog, "ask", fake_ask), \
+                mock.patch.object(launcher, "toast") as toast:
+            launcher.show_crash(reason)
+        self.assertEqual(seen["title"], "The game stopped")
+        self.assertEqual(seen["message"], "Fault: access violation")
+        self.assertEqual(seen["labels"], ["Open log folder", "Copy report", "Close"])
+        self.assertEqual(seen["detail"], "host #0 foo\n\nPlease attach boot.log.")
+        self.assertEqual(self.root.clipboard_get(), report)
+        toast.assert_called_once_with("Report copied", "ok")
+
+    def test_launcher_uses_no_native_message_box(self):
+        text = (LAUNCHER / "uncharted_launcher.pyw").read_text(encoding="utf-8")
+        self.assertNotIn("messagebox.", text.split('if __name__ == "__main__"')[0])
+
+
+@unittest.skipIf(uncharted_launcher is None, f"launcher needs tkinter and Pillow: {IMPORT_ERROR}")
+class DialogTest(unittest.TestCase):
+    def setUp(self):
+        try:
+            self.root = tk.Tk()
+        except tk.TclError as error:
+            self.skipTest(f"no Tk display: {error}")
+        self.addCleanup(self.root.destroy)
+        self.addCleanup(lambda: [self.root.after_cancel(i) for i in self.root.tk.splitlist(self.root.tk.call("after", "info"))])
+        self.root.withdraw()  # --play direct mode: the root is never shown
+        self.widgets = sys.modules["widgets"]
+
+    def dialog(self):
+        return next(w for w in self.root.winfo_children() if isinstance(w, self.widgets.Dialog))
+
+    def test_clicked_button_returns_its_value(self):
+        Dialog = self.widgets.Dialog
+        buttons = [("A", "a", "primary"), ("B", "b"), ("C", "c", "danger")]
+        self.root.after(100, lambda: self.dialog().buttons[1].invoke())
+        self.assertEqual(Dialog.ask(self.root, "t", "message", buttons, default=0, cancel="x"), "b")
+
+    def test_enter_is_the_default_and_escape_is_cancel(self):
+        Dialog = self.widgets.Dialog
+        buttons = [("A", "a", "primary"), ("B", "b")]
+        self.root.after(100, lambda: self.dialog().event_generate("<Return>"))
+        self.assertEqual(Dialog.ask(self.root, "t", "m", buttons, default=1), "b")
+        self.root.after(100, lambda: self.dialog().event_generate("<Escape>"))
+        self.assertEqual(Dialog.ask(self.root, "t", "m", buttons, cancel="x"), "x")
+        self.root.after(100, lambda: self.dialog().event_generate("<Escape>"))
+        self.assertIsNone(Dialog.ask(self.root, "t", "m", buttons))
+
+    def test_yesno_okcancel_and_single_ok(self):
+        Dialog = self.widgets.Dialog
+        self.root.after(100, lambda: self.dialog().buttons[0].invoke())
+        self.assertIs(Dialog.yesno(self.root, "t", "q"), True)
+        self.root.after(100, lambda: self.dialog().buttons[1].invoke())
+        self.assertIs(Dialog.yesno(self.root, "t", "q"), False)
+        self.root.after(100, lambda: self.dialog().event_generate("<Escape>"))
+        self.assertIs(Dialog.okcancel(self.root, "t", "q"), False)
+        self.root.after(100, lambda: self.dialog().event_generate("<Return>"))
+        self.assertIs(Dialog.okcancel(self.root, "t", "q"), True)
+        self.root.after(100, lambda: self.dialog().event_generate("<Return>"))
+        self.assertIsNone(Dialog.error(self.root, "t", "boom", detail="line\n" * 30))
+
+    def test_copy_button_puts_the_detail_on_the_clipboard(self):
+        Dialog = self.widgets.Dialog
+
+        def copy():
+            self.dialog().copy_button.invoke()
+            self.dialog().finish(None)
+        self.root.after(100, copy)
+        Dialog.error(self.root, "t", "m", detail="C:\\some\\path\nsecond line")
+        self.assertEqual(self.root.clipboard_get(), "C:\\some\\path\nsecond line")
+
+    def test_toast_shows_stacks_and_goes_away(self):
+        Toast = self.widgets.Toast
+        self.assertIsNone(Toast.show(self.root, "hidden root", "ok"))  # direct mode: nothing
+        self.root.deiconify()
+        self.root.update()
+        if not self.root.winfo_viewable():
+            self.skipTest("the root cannot be shown here")
+        with mock.patch.object(Toast, "DELAY", 150):
+            first = Toast.show(self.root, "one", "ok")
+            for text in ("two", "three", "four"):
+                Toast.show(self.root, text, "error")
+            self.assertEqual(len(Toast.stack(self.root)), Toast.MAX)  # the oldest made room
+            self.assertFalse(first.winfo_exists())
+            end = time.monotonic() + 3
+            while Toast.stack(self.root) and time.monotonic() < end:
+                self.root.update()
+                time.sleep(0.01)
+        self.assertEqual(Toast.stack(self.root), [])
 
 
 if __name__ == "__main__":

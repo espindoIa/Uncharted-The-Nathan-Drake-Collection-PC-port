@@ -27,7 +27,7 @@ from tkinter import font as tkfont, messagebox
 from PIL import Image, ImageDraw, ImageOps, ImageTk
 
 import updater  # launcher/updater.py: updates from the GitHub releases
-from widgets import (ACCENT, ACCENT_HI, BG, DIM, GOOD, HERO_DARK, HERO_GRID, HERO_LIGHT, HOVER_LINE, INK, LINE, MUTED, PANEL, PANEL_HI, STOP_RED, TEXT, Dropdown, ScrollBar, Segmented, Toggle, round_rect)  # launcher/widgets.py
+from widgets import (ACCENT, ACCENT_HI, BG, DIM, GOOD, HERO_DARK, HERO_GRID, HERO_LIGHT, HOVER_LINE, INK, LINE, MUTED, PANEL, PANEL_HI, STOP_RED, TEXT, Dialog, Dropdown, ScrollBar, Segmented, Toast, Toggle, copy_text, round_rect)  # launcher/widgets.py
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "launcher" / "assets"
@@ -1677,8 +1677,8 @@ class Launcher:
         if not folder:
             return False
         if not is_game_dir(folder):
-            messagebox.showerror(APP_TITLE, "That folder has no eboot.bin and sce_sys/param.sfo.\n\n"
-                                            "Choose the game's root folder (CUSA02320 or CUSA02344).")
+            self.error("That folder has no eboot.bin and sce_sys/param.sfo.\n\n"
+                       "Choose the game's root folder (CUSA02320 or CUSA02344).")
             return False
         self.config["game_dir"] = folder
         if WINE:
@@ -2158,7 +2158,7 @@ class Launcher:
             return
         source = Path(source)
         if source.name.lower() != dll:
-            messagebox.showerror(APP_TITLE, f"Choose the file named {dll}.")
+            self.error(f"Choose the file named {dll}.")
             return
         # 24 Oct 2026: the PowerShell signature check (up to 60 s) runs off the Tk thread.
         self.set_status("Checking NVIDIA's signature...", "")
@@ -2167,22 +2167,22 @@ class Launcher:
             if not self.process:
                 self.set_status(f"Ready to play {self.current_game()['name']}.")
             if not signed:
-                messagebox.showerror(APP_TITLE, f"{source.name} has no valid NVIDIA signature. Download it again "
-                                                "from NVIDIA's DLSS page.")
+                self.error(f"{source.name} has no valid NVIDIA signature. Download it again "
+                           "from NVIDIA's DLSS page.")
                 return
             try:
                 shutil.copy2(source, ROOT / "gow3_pc" / "out" / dll)
             except OSError as error:
-                messagebox.showerror(APP_TITLE, f"Could not copy {dll}: {error}")
+                self.error(f"Could not copy {dll}: {error}")
                 return
             # 24 Oct 2026: the lists that gain entries (DLSS, the 144-240 FPS limits) are built again
             # in place; before, the launcher had to be reopened.
             self.rebuild_sections()
             self.refresh_home()
             if dll == NGX_FG_DLL:
-                messagebox.showinfo(APP_TITLE, "NVIDIA DLSS Frame Generation is ready. Switch it on under Display.")
+                self.toast("NVIDIA DLSS Frame Generation is ready. Switch it on under Display.", "ok")
                 return
-            messagebox.showinfo(APP_TITLE, "NVIDIA DLSS is ready. DLSS is now listed under Anti-aliasing (Display).")
+            self.toast("NVIDIA DLSS is ready. DLSS is now listed under Anti-aliasing (Display).", "ok")
         self.in_background(lambda: ngx_signature_ok(source), done)
 
     def rebuild_sections(self):
@@ -2545,7 +2545,7 @@ class Launcher:
 
     def reset_controls(self):
         name = self.current_game()["name"]
-        if not messagebox.askyesno(APP_TITLE, f"Reset {name}'s keyboard, mouse and controller controls?"):
+        if not self.ask_yesno(f"Reset {name}'s keyboard, mouse and controller controls?"):
             return
         settings = self.game_settings()
         settings.update({"controls": None, "mouse": True, "mouse_sens": "1.0", "mouse_invert": False,
@@ -2708,13 +2708,33 @@ class Launcher:
         if detail is not None:
             self.substatus.config(text=detail)
 
+    # -- messages (24 Oct 2026: themed Dialog/Toast in place of the native message boxes) ----
+
+    def info(self, text, detail=None):
+        Dialog.info(self.root, APP_TITLE, text, detail, scale=self.s)
+
+    def error(self, text, detail=None):
+        Dialog.error(self.root, APP_TITLE, text, detail, scale=self.s)
+
+    def warn(self, text):
+        Dialog.warning(self.root, APP_TITLE, text, scale=self.s)
+
+    def ask_yesno(self, text):
+        return Dialog.yesno(self.root, APP_TITLE, text, scale=self.s)
+
+    def ask_okcancel(self, text):
+        return Dialog.okcancel(self.root, APP_TITLE, text, scale=self.s)
+
+    def toast(self, text, kind="info"):
+        Toast.show(self.root, text, kind, self.s)
+
     # -- updates (launcher/updater.py) ------------------------------------------------------
 
     def check_updates(self, manual=False):
         current = updater.installed_version(ROOT)
         if current is None:
             if manual:
-                messagebox.showinfo(APP_TITLE, "This copy runs from the source tree: update it with git.")
+                self.info("This copy runs from the source tree: update it with git.")
             return
         if self.update_busy:
             return
@@ -2758,13 +2778,13 @@ class Launcher:
         if not release or self.update_busy:
             return
         if self.process:
-            messagebox.showinfo(APP_TITLE, "Close the game first: the update replaces the game's runtime.")
+            self.info("Close the game first: the update replaces the game's runtime.")
             return
         version = updater.version_text(release["version"])
-        if not messagebox.askyesno(APP_TITLE, f"Install version {version} ({release['size'] / 1e6:.0f} MB "
-                                   "download)?\n\nSaves, settings and the shader cache are kept. The "
-                                   "launcher closes, installs the update and starts again.\n\n"
-                                   f"What's new: {release['page']}"):
+        if not self.ask_yesno(f"Install version {version} ({release['size'] / 1e6:.0f} MB "
+                              "download)?\n\nSaves, settings and the shader cache are kept. The "
+                              "launcher closes, installs the update and starts again.\n\n"
+                              f"What's new: {release['page']}"):
             return
         self.update_busy = True
         self.update_progress = (0, release["size"])
@@ -2787,7 +2807,7 @@ class Launcher:
         if self.update_error:
             self.update_busy = False
             self.set_status("The update failed.", "The installed version is unchanged.")
-            messagebox.showerror(APP_TITLE, f"The update could not be installed:\n\n{self.update_error}")
+            self.error("The update could not be installed:", self.update_error)
             return
         if self.update_staged:
             self.set_status("Installing the update...", "The launcher starts again in a moment.")
@@ -2795,7 +2815,7 @@ class Launcher:
                 updater.start_apply(ROOT, self.update_staged)
             except OSError as error:
                 self.update_busy = False
-                messagebox.showerror(APP_TITLE, f"The update could not be started:\n\n{error}")
+                self.error("The update could not be started:", str(error))
                 return
             self.config["window_xy"] = [self.root.winfo_x(), self.root.winfo_y()]
             write_config(self.config)
@@ -2867,11 +2887,11 @@ class Launcher:
 
     def play(self):
         if not RUN_SCRIPT.exists():
-            messagebox.showerror(APP_TITLE, f"Start script missing:\n{RUN_SCRIPT}")
+            self.error(f"Start script missing:\n{RUN_SCRIPT}")
             return
         if not is_game_dir(self.game_dir()):
-            messagebox.showinfo(APP_TITLE, "Select your Uncharted: The Nathan Drake Collection game folder "
-                                           "(CUSA02320 or CUSA02344, the folder with eboot.bin and sce_sys).")
+            self.info("Select your Uncharted: The Nathan Drake Collection game folder "
+                      "(CUSA02320 or CUSA02344, the folder with eboot.bin and sce_sys).")
             if not self.choose_game_dir():
                 return
         if not self.confirm_without_update() or not self.confirm_update_files() or \
@@ -2918,7 +2938,7 @@ class Launcher:
                                             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                             creationflags=NO_WINDOW, text=True, encoding="utf-8", errors="replace")
         except OSError as error:
-            messagebox.showerror(APP_TITLE, f"Could not start the game:\n{error}")
+            self.error("Could not start the game:", str(error))
             self.process = None
             return
         self.started_at = time.time()
@@ -3019,8 +3039,8 @@ class Launcher:
             return True
         if not problems:
             return True
-        return messagebox.askokcancel(
-            APP_TITLE, "Your game update folder has missing or damaged files:\n\n" + "\n".join(problems[:6]) +
+        return self.ask_okcancel(
+            "Your game update folder has missing or damaged files:\n\n" + "\n".join(problems[:6]) +
             f"\n\n{update}\n\nThe games will probably stop at start. Extract the update again (or use Install "
             "from .pkg under System -> GAME UPDATE). Play anyway?")
 
@@ -3033,8 +3053,8 @@ class Launcher:
                 self.config.get("warned_no_update") == str(folder):
             return True
         title = folder.parent if folder.name.lower() == "uroot" else folder
-        if not messagebox.askokcancel(
-                APP_TITLE, f"Your game is version {version.lstrip('0')}, without update 1.02.\n\n"
+        if not self.ask_okcancel(
+                f"Your game is version {version.lstrip('0')}, without update 1.02.\n\n"
                 "Most of this port's fixes, crash fixes among them, are written for update 1.02, so "
                 "without it the games crash more often.\n\nDump update 1.02 from your PS4 and extract it "
                 f"next to the game folder as {title.name}-patch (the System section then shows it).\n\n"
@@ -3058,8 +3078,8 @@ class Launcher:
         key = f"{ROOT}|{self.game_dir()}"
         if not places or self.config.get("warned_slow_drive") == key:
             return True
-        if not messagebox.askokcancel(
-                APP_TITLE, "\n".join(places) + "\n\nOn such drives the games freeze for up to a second, "
+        if not self.ask_okcancel(
+                "\n".join(places) + "\n\nOn such drives the games freeze for up to a second, "
                 "again and again, while the port writes its shader cache, logs and saves (Windows writes "
                 "to them without a cache).\n\nFor smooth play, copy this port folder and the game folder "
                 "to an internal drive (an SSD such as C:) and start the launcher from there.\n\n"
@@ -3089,10 +3109,39 @@ class Launcher:
                             "A report was saved; see the log folder." if froze
                             else f"Exit code {code}. See the log for details.")
             if reason:
-                if messagebox.askyesno(APP_TITLE, f"The game stopped with an error:\n\n{reason}\n\nOpen the log folder?"):
-                    self.open_logs()
+                self.show_crash(reason)
         if self.direct:
             self.root.after(200, self.root.destroy)
+
+    def show_crash(self, reason):
+        """The crash_reason in a themed error: its first line, then the rest in the detail box
+        (copyable), with buttons for the log folder and a report to paste into a GitHub issue."""
+        first, _, rest = reason.partition("\n")
+        choice = Dialog.ask(
+            self.root, "The game stopped", first,
+            [("Open log folder", "logs", "primary"), ("Copy report", "report"), ("Close", None)],
+            detail=rest.strip() or None, cancel=None, scale=self.s, icon="error")
+        if choice == "logs":
+            self.open_logs()
+        elif choice == "report":
+            copy_text(self.root, self.crash_report(reason))
+            self.toast("Report copied", "ok")
+
+    def crash_report(self, reason):
+        game = self.current_game()
+        ini = read_ini(game["key"])
+        version = updater.installed_version(ROOT)
+        log = self.latest_log()
+        lines = [reason, "",
+                 f"Game: {game['name']} ({game['exe']})",
+                 f"Game version: {app_version(self.game_dir()) or '?'}",
+                 f"Graphics card: {self.gpu_name or '?'}",
+                 f"Resolution: {self.game_settings().get('resolution', '?')}"]
+        lines += [f"{key}: {ini.get(key, INI_DEFAULTS.get(key, '?'))}"
+                  for key in ("upscaler", "preset", "fps_limit", "display_mode")]
+        lines += [f"Launcher: {updater.version_text(version) if version else 'source tree'} ({EDITION})",
+                  f"Log: {log or '?'}"]
+        return "\n".join(lines)
 
     def stop(self):
         if not self.process:
@@ -3119,16 +3168,16 @@ class Launcher:
     def clear_cache(self):
         cache = USER_DIR / "cache"
         if not cache.exists():
-            messagebox.showinfo(APP_TITLE, "There is no shader cache yet.")
+            self.info("There is no shader cache yet.")
             return
         if self.process:
-            messagebox.showwarning(APP_TITLE, "Close the game first.")
+            self.warn("Close the game first.")
             return
-        if not messagebox.askyesno(APP_TITLE, "Delete the shader cache?\n\nShaders are compiled again the next "
-                                              "time you play, which brings back stutters for a while."):
+        if not self.ask_yesno("Delete the shader cache?\n\nShaders are compiled again the next "
+                              "time you play, which brings back stutters for a while."):
             return
         shutil.rmtree(cache, ignore_errors=True)
-        messagebox.showinfo(APP_TITLE, "Shader cache cleared.")
+        self.toast("Shader cache cleared.", "ok")
 
     def make_shortcut(self, name, description, play=None):
         """A desktop shortcut to the launcher, or with `play` (u1/u2/u3) to that game directly."""
@@ -3163,11 +3212,11 @@ class Launcher:
         """An update the player already extracted, anywhere: checked and remembered (nothing is
         copied); the games get it as UNCHARTED_UPDATE."""
         if self.process:
-            messagebox.showwarning(APP_TITLE, "Close the game first.")
+            self.warn("Close the game first.")
             return
         game = self.game_dir()
         if not is_game_dir(game):
-            messagebox.showwarning(APP_TITLE, "Choose the game folder first (Change game folder).")
+            self.warn("Choose the game folder first (Change game folder).")
             return
         from tkinter import filedialog
         folder = filedialog.askdirectory(title="Choose the extracted update 1.02 folder", parent=self.root,
@@ -3178,23 +3227,23 @@ class Launcher:
         try:
             update = installer.check_folder(folder, game)
         except installer.UpdateError as error:
-            messagebox.showerror(APP_TITLE, f"This folder can't be used:\n{error}")
+            self.error("This folder can't be used:", str(error))
             return
         self.config["update_dir"] = str(update)
         write_config(self.config)
         self.update_label.config(text=self.update_text())
         self.refresh_home()
-        messagebox.showinfo(APP_TITLE, f"Game update {app_version(update) or '?'} is used from now on:\n{update}")
+        self.toast(f"Game update {app_version(update) or '?'} is used from now on:\n{update}", "ok")
 
     def install_game_update(self):
         """The player's own update PKG unpacked next to the game folder (tools/install_update.py;
         the port ships no game files)."""
         if self.process:
-            messagebox.showwarning(APP_TITLE, "Close the game first.")
+            self.warn("Close the game first.")
             return
         game = self.game_dir()
         if not is_game_dir(game):
-            messagebox.showwarning(APP_TITLE, "Choose the game folder first (Change game folder).")
+            self.warn("Choose the game folder first (Change game folder).")
             return
         from tkinter import filedialog
         pkg = filedialog.askopenfilename(title="Choose the game update (.pkg)", parent=self.root,
@@ -3203,8 +3252,8 @@ class Launcher:
             return
         installer = self.update_installer()
         existing = installer.existing_update(game)
-        if existing and not messagebox.askyesno(
-                APP_TITLE, f"There is an update folder already:\n{existing}\n\nReplace it with this update?"):
+        if existing and not self.ask_yesno(
+                f"There is an update folder already:\n{existing}\n\nReplace it with this update?"):
             return
         state = {"step": "Checking the update..."}
 
@@ -3230,10 +3279,9 @@ class Launcher:
             self.update_label.config(text=self.update_text())
             self.refresh_home()
             if "error" in state:
-                messagebox.showerror(APP_TITLE, f"The update was not installed:\n{state['error']}")
+                self.error("The update was not installed:", state["error"])
             else:
-                messagebox.showinfo(APP_TITLE, f"Update installed:\n{state['path']}\n\nThe games use it from "
-                                               "their next start.")
+                self.toast(f"Update installed:\n{state['path']}\n\nThe games use it from their next start.", "ok")
         poll()
 
     def install_game_pkg(self):
@@ -3241,7 +3289,7 @@ class Launcher:
         they choose, with the metadata the launcher needs (tools/install_update.py install_game;
         the port ships no game files). That folder becomes the game folder."""
         if self.process:
-            messagebox.showwarning(APP_TITLE, "Close the game first.")
+            self.warn("Close the game first.")
             return
         from tkinter import filedialog
         pkg = filedialog.askopenfilename(title="Choose the game (.pkg), not the update", parent=self.root,
@@ -3281,10 +3329,10 @@ class Launcher:
             self.update_label.config(text=self.update_text())
             self.refresh_home()
             if "error" in state:
-                messagebox.showerror(APP_TITLE, f"The game was not installed:\n{state['error']}")
+                self.error("The game was not installed:", state["error"])
             else:
-                messagebox.showinfo(APP_TITLE, f"Game installed:\n{state['path']}\n\nIt is the game folder now. "
-                                               "Next, install update 1.02: System -> GAME UPDATE -> Install from .pkg.")
+                self.info(f"Game installed:\n{state['path']}\n\nIt is the game folder now. "
+                          "Next, install update 1.02: System -> GAME UPDATE -> Install from .pkg.")
         poll()
 
     def in_background(self, work, done):
@@ -3312,9 +3360,9 @@ class Launcher:
         def done(made):
             link, result = made
             if result.returncode == 0:
-                messagebox.showinfo(APP_TITLE, f"Shortcut created:\n{link}")
+                self.toast(f"Shortcut created:\n{link}", "ok")
             else:
-                messagebox.showerror(APP_TITLE, f"Could not create the shortcut:\n{result.stderr.strip()}")
+                self.error("Could not create the shortcut:", result.stderr.strip())
         self.in_background(lambda: self.make_shortcut("Uncharted", APP_TITLE), done)
 
     def game_shortcuts(self):
@@ -3331,16 +3379,16 @@ class Launcher:
         def done(outcome):
             made, failed = outcome
             if failed:
-                messagebox.showerror(APP_TITLE, "Could not create the shortcuts:\n" + "\n".join(failed))
-            else:
-                messagebox.showinfo(APP_TITLE, "Shortcuts created on the desktop:\n" + "\n".join(made) +
-                                    "\n\nEach starts its game directly with the launcher's settings. From a command "
-                                    "prompt: \"Uncharted Launcher.exe\" --play u1 (or u2, u3).")
+                self.error("Could not create the shortcuts:", "\n".join(failed))
+            else:  # a Dialog, not a Toast: it explains --play
+                self.info("Shortcuts created on the desktop:\n" + "\n".join(made) +
+                          "\n\nEach starts its game directly with the launcher's settings. From a command "
+                          "prompt: \"Uncharted Launcher.exe\" --play u1 (or u2, u3).")
         self.in_background(work, done)
 
     def reset(self):
         name = self.current_game()["name"]
-        if not messagebox.askyesno(APP_TITLE, f"Reset {name}'s settings to the Medium preset?"):
+        if not self.ask_yesno(f"Reset {name}'s settings to the Medium preset?"):
             return
         self.game_settings().update(GAME_SETTING_DEFAULTS)
         self.game_settings()["pad_controls"] = None
@@ -3352,8 +3400,8 @@ class Launcher:
         self.apply_preset("medium")
 
     def close(self):
-        if self.process and not messagebox.askyesno(
-                APP_TITLE, "The game is still running. Close the launcher anyway? (The game keeps running.)"):
+        if self.process and not self.ask_yesno(
+                "The game is still running. Close the launcher anyway? (The game keeps running.)"):
             return
         self.config["window_xy"] = [self.root.winfo_x(), self.root.winfo_y()]
         write_config(self.config)
