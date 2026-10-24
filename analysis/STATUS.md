@@ -28,6 +28,7 @@ New entries go at the end, dated, measured numbers only.
 - U3 market stutter and CPU work (earlier 23 Oct benchmarks stood at the save's gate): `Cartagena market: stutter and lower frame rate from readback faults (23 Oct 2026)`.
 - Structural crowd experiments and exact rollback: `Structural crowd snapshots and output grouping (23 Oct 2026)`.
 - Market frame rate = Reflex sleep, pacer replaces it: `Reflex pacer: market frame rate (24 Oct 2026)`
+- Launcher overhaul (sidebar, Home checklist, keyboard/controller, dialogs): `24 October 2026: launcher overhaul`
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
@@ -4205,3 +4206,90 @@ into u32 halves are checked per half.
 
 Not verified: U1/U2, other U3 scenes, performance A/B of the extra compare/select per LDS access,
 AMD GPUs.
+
+## 24 October 2026: launcher overhaul
+
+The launcher was rebuilt around a sidebar (launcher/uncharted_launcher.pyw; the palette and the
+drawing/widget helpers moved to launcher/widgets.py). The CHANGELOG's Unreleased entries dated
+24 Oct 2026 carry the player-facing wording; this is the technical record.
+
+What changed:
+
+- Layout: the games and the settings sections sit in a sidebar on the left; the launcher opens the
+  section used last. Sections renamed (SECTIONS/OLD_SECTIONS): Quick Setup -> Home (page_setup),
+  Cheats -> Gameplay (page_cheats), Advanced -> System (page_advanced). The window fits a 1280x720
+  screen (1080p at 150% scaling); pages scroll on a short screen and PLAY stays at the bottom
+  right. Long hints wrap at the window's width; a choice list with more than 9 options (the frame
+  rate limit) is a menu instead of a segmented control.
+- Home: a "Ready to play" checklist above the presets (readiness(), kept a plain function for
+  tests) checks the game files, update 1.02 and whether its files are intact
+  (install_update.py check_update), the NVIDIA DLSS / Frame Generation DLLs, the drive's speed
+  (slow_drive_reason) and a new launcher release; each line that needs attention carries the
+  buttons that fix it. The NVIDIA file buttons moved here from Display; adding one no longer needs
+  a restart (rebuild_sections() rebuilds the Display and Performance pages in place, since their
+  option lists depend on the DLLs). The slow checks (update archive, drive) run one at a time in
+  the background (refresh_home) and are re-asked if the state changed meanwhile.
+- ? hints: every setting row has a one-line `short` hint; the full text sits behind a round ?
+  (InfoTip, hover/click/Space). Settings shared by the three games (language, speakers, the
+  unlocks, the cheats, the performance log, update checks, idle game threads) carry an ALL GAMES
+  badge; per-game settings stay in the game's own ini.
+- Greyed options: the dependent Display choices (DEPENDENT_OPTIONS = preset/dlss_model/frame_gen)
+  are disabled with an orange note line under them (refresh_dependencies) while their condition is
+  missing; nothing is reset, values survive and the rows wake up when a matching anti-aliasing is
+  chosen, in the launcher or in the in-game menu.
+- Apply to all games: a button at the top right of Display and Performance copies the selected
+  game's graphics and performance settings to the other two (controls untouched); it asks first
+  and is disabled while a game runs. Changing the resolution, aspect ratio, multithreading or
+  graphics card while a game runs now notes it applies at the next game start.
+- Themed dialogs: Dialog/Toast (widgets.py) replace the native message boxes - dark windows in the
+  launcher's colours, Enter answers the highlighted button, Esc cancels, long details get a Copy
+  button, short confirmations are corner toasts. The game-crash dialog offers Open log folder and
+  Copy report (the error, the game and its version, the GPU, the main settings); it also covers
+  the desktop game shortcuts (`--play`).
+- Keyboard: Tab/Shift+Tab with an orange focus ring, Space/Enter press, Left/Right change choices,
+  Down/Enter open a list; shortcuts Ctrl+1/2/3 (game), Ctrl+Tab / Ctrl+Shift+Tab (section),
+  Ctrl+Enter (play or stop). In Controls, Enter on a slot starts the key capture and Delete clears
+  the binding.
+- Controller: the SDL gamepad (Gamepads, already used for pad bindings) drives the whole launcher -
+  D-pad/left stick move, A presses, left/right change choices, B goes back, LB/RB switch the
+  section, Start plays or stops; in dialogs A presses the highlighted button. It only polls while
+  the launcher window has the focus and no game runs.
+
+Fixed along the way:
+
+- The mouse wheel stopped scrolling the pages after rebinding a key: the key capture bound the
+  wheel/keys sequences with bind_all and unbound them afterwards, which took the page scrolling
+  with it until the launcher restarted. <MouseWheel>, <KeyPress> and <ButtonPress> are bound once
+  for the whole session now (test_wheel_binding_survives_a_capture).
+- Reset (System -> TROUBLESHOOTING -> "Reset this game's settings") wrote the setting defaults but
+  left the controls as they were: reload_ini (at start, game switch) restores key_map/mouse_map/
+  pad_map from the game's ini, so the old bindings came back. Reset calls save_controls() now, as
+  Reset controls under Controls always did (test_reset_puts_the_default_controls_in_the_ini).
+- The launcher froze for seconds on blocking calls: the NVIDIA DLL signature check (up to 60 s of
+  PowerShell), shortcut creation, stopping the game (taskkill) and the Vulkan device list (a child
+  process, up to 10 s) moved into background work off the Tk thread; the Graphics card row joins
+  Display when the device list arrives.
+
+Contracts kept:
+
+- The per-game settings file (probe.ini, shared with the in-game menu) and all its keys are
+  unchanged; probe_uncharted.py turns them into the same GOW3_*/UNCHARTED_* variables.
+- launcher.json stays version 8 (no migration runs; version 7/8 already turned multithreading on
+  once and a later "off" stays off). The stored last-tab key is mapped through OLD_SECTIONS
+  (setup->home, cheats->gameplay, advanced->system; unknown -> home, test_old_tab_names_map_to_
+  sections), so an in-place update opens the section the player used last.
+- `--play u1|u2|u3` (desktop game shortcuts, GitHub #25) still starts the game directly with the
+  saved settings and no launcher window; the crash dialog also covers those starts.
+
+Tested: gow3_pc/tests/test_uncharted_launcher_ui.py (Tk, emulated input: readiness cases, every
+section builds, old tab mapping, apply-to-all, wheel during capture, reset, stop in a thread,
+dialog buttons, hint/badge coverage, greyed options, keyboard, controller steps).
+
+Not verified: real controller input (a controller in hand; the gamepad nav was checked with
+synthetic events only); real Tab traversal and the focus ring on screen (emulated); Ctrl+Tab on
+Windows with real key events (Tk's Control-Tab binding quirk; emulated only); 150% DPI on a real
+screen (the scale was emulated); Wine/Proton; a real game-crash dialog from a game that actually
+crashed (driven with a fake error); the Open log folder button; the FSR 4 / DLSS greyed rows seen
+on screen; the packaged zip carrying launcher/widgets.py (package_windows.sh copies it, the zip
+itself not built); an in-place launcher update from an older version (the updater path was not run
+after the change); the option search that was in the plan was dropped and not built.
