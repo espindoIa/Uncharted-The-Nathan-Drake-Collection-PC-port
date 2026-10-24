@@ -4267,3 +4267,14 @@ Merge of upstream v0.6.0 (7b04bac) into claude/merge-upstream-0.6.0 (base a77e0c
 Toggle bits: upstream 0.6.0 adds none (no Disabled/Disabled2 use in its diff); the fork's Disabled2 bits up to 1ull<<41 are unchanged. Fork pieces checked present after the merge: DispatchRun* / StageDispatchRun (vk_rasterizer.cpp), liverpool.cpp cut hooks and RunComputeReleaseMem (liverpool.cpp not touched by upstream), static mesh snapshots, gow3_reflex.cpp, Streamline backend, LDS bounds pass (none touched by upstream), launcher Reflex / FG / Streamline options.
 
 Not verified: any game run (boots are the user's); the save profile, vibration and overlay rows in the launcher GUI; direct mouse aim with the fork's aim patches; GOW3_MIP_TARGETS with the fork's scene-resolution and upscaler paths in U3; dispatch-run counts with upstream's null-V# rule; carry_over on a real update.
+
+## 24 October 2026 (night): U1 treasure models, synchronous shaders again
+
+- Symptom (user report): since 0.3.0 (U1 back to async shader compilation) the treasure models (Treasures screen, pickup) do not appear.
+- Static trace: the viewer scene update (0x2061e8) and render (0x206b58) run every frame, so only a compile that never completes or fails can hide the model.
+- In 0.3.0, PublishGraphics leaves a failed async pipeline in pending_graphics forever. On main, failed pipelines/shaders go to failed_graphics / compilation_failed / failed_permutations and the async branch never queues them again (vk_pipeline_cache.cpp GetGraphicsPipeline, GetProgram). Compute is never compiled async (compile_async excludes Compute). Either way the draw is skipped for good.
+- None of the 86 U1 logs has a "compilation failed" / "capture failed" line, but none ever opened a non-default treasure, so this is not ruled out.
+- Fix: U1 compiles synchronously by default (0.2.3 behaviour). Cost: the 1-2.4 s new-area stalls on laptops (18 Oct). UNCHARTED_U1_SYNC_SHADERS=0 restores async_shaders.
+- If a log shows "compilation failed" lines, the root fix is: a failed async graphics pipeline / program falls back to a synchronous compile.
+- Other candidates left (not tested): GOW3_COMPUTE_PRECOMPILE=0, GOW3_READBACK_GUARD=0.
+- Not tested: no in-game run (user asked for none).

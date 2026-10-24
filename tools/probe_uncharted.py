@@ -1372,8 +1372,11 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     # so U1 compiled everything synchronously. Since 15 Oct the pipeline cache compiles draws to
     # small targets (<= 256x256, SmallTargetDraw) synchronously in every game, which covers it;
     # synchronous U1 froze for 1-2.4 s per new area on a Ryzen laptop (18 Oct). Back to the
-    # async_shaders setting; UNCHARTED_U1_SYNC_SHADERS=1 restores synchronous compilation.
-    if executable == "eboot.bin" and os.environ.get("UNCHARTED_U1_SYNC_SHADERS") == "1":
+    # async_shaders setting in 0.3.0; synchronous again by default on 24 Oct 2026 because the U1
+    # treasure models (Treasures screen, pickup) have not appeared since 0.3.0 and a draw whose
+    # async compile fails or stays pending is skipped for good. UNCHARTED_U1_SYNC_SHADERS=0 uses
+    # the async_shaders setting again.
+    if executable == "eboot.bin" and os.environ.get("UNCHARTED_U1_SYNC_SHADERS", "1") != "0":
         env.setdefault("GOW3_ASYNC_SHADERS", "0")
     # Frame drops in the temple (45-57 FPS): GPU thread waits in DownloadMemory for CPU read faults
     # on GPU-modified pages. Every 5 s: fault counts/time, hottest guest instructions and windows.
