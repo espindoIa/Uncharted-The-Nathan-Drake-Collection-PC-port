@@ -70,7 +70,7 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   limit) are a menu.
 
 - **Fixed (24 Oct 2026): launcher.** The mouse wheel no longer stops scrolling the pages after you
-  rebind a control. Reset (now "Reset this game's settings" under Advanced) also puts the
+  rebind a control. Reset (now "Reset this game's settings" under System) also puts the
   keyboard, mouse and controller controls back to the defaults; before, they came back the next
   time the launcher started or you switched game. The launcher no longer freezes for seconds
   while it checks an NVIDIA DLL you add, creates shortcuts, stops the game or looks for graphics
