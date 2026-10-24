@@ -4267,3 +4267,21 @@ Merge of upstream v0.6.0 (7b04bac) into claude/merge-upstream-0.6.0 (base a77e0c
 Toggle bits: upstream 0.6.0 adds none (no Disabled/Disabled2 use in its diff); the fork's Disabled2 bits up to 1ull<<41 are unchanged. Fork pieces checked present after the merge: DispatchRun* / StageDispatchRun (vk_rasterizer.cpp), liverpool.cpp cut hooks and RunComputeReleaseMem (liverpool.cpp not touched by upstream), static mesh snapshots, gow3_reflex.cpp, Streamline backend, LDS bounds pass (none touched by upstream), launcher Reflex / FG / Streamline options.
 
 Not verified: any game run (boots are the user's); the save profile, vibration and overlay rows in the launcher GUI; direct mouse aim with the fork's aim patches; GOW3_MIP_TARGETS with the fork's scene-resolution and upscaler paths in U3; dispatch-run counts with upstream's null-V# rule; carry_over on a real update.
+
+## 24 October 2026 (night): U1 treasure models, mesh snapshots U3 only
+
+Symptom (user report): Uncharted 1's treasure models in the Treasures screen do not load; cause NOT
+verified in game. Static trace: viewer scene 0x2061e8 -> RegisterToFgDrawMgr 0x205a88, and the drawn
+model is skinned by cs 8f067540, the same shader as U3's crowd, which TryStaticMeshSnapshot
+(vk_rasterizer.cpp, pgm_hash 0x8f067540, slots < 5) hooks since b6bf51f. That commit (24 Oct) made
+GOW3_DISPATCH_RUNS=1 and GOW3_STATIC_MESH_SNAPSHOTS=1 defaults for all three games; it was measured
+on U3 chapter 2 only, and U1/U2 only showed no new error lines (their runs are inactive there, so the
+snapshots path was not exercised). tools/probe_uncharted.py now sets both only for
+big3-ps4_Shipping.elf, the earlier U1/U2 default (off). Other suspects left open: the garbage-V# filter
+for 8f067540 (IsGarbageEffectBuffer in shader_recompiler/resource.h, ClassifyGarbageSharp in
+vk_rasterizer.cpp) and package load.
+
+To settle it live: GOW3_FILE_TRACE=treasure; Disabled2 bit 35 (34359738368) then bit 1024;
+GOW3_EFFECT_SHARP_FILTER=0; GOW3_DISPATCH_TRACE=8f067540.
+
+Not tested: no in-game run (user asked for none).
