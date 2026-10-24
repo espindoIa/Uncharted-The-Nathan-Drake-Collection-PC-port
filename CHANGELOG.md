@@ -6,6 +6,13 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Added (24 Oct 2026): the launcher can be used with a controller.** The D-pad or the left stick
+  move through the games, the sections, the settings and the buttons; A presses a button, flips a
+  switch or opens a list, left and right change a choice, B goes back to the section list (and
+  then to the games), LB and RB switch the section, and Start plays (or stops). In a message
+  window A presses the highlighted button, B closes it and left and right pick a button. It works
+  only while the launcher window has the focus and no game runs.
+
 - **Added (24 Oct 2026): the launcher can be used with the keyboard.** Tab and Shift+Tab move
   through the games, the sections, the settings and the buttons, with an orange outline on the one
   that has the focus; Space or Enter presses a button or flips a switch, Left and Right change a

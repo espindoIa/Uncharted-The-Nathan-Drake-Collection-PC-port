@@ -415,8 +415,11 @@ class DialogButton(tk.Label):
 
     def __init__(self, parent, text, command, style, font, scale):
         bg, self.hover, fg = self.STYLES[style]
+        # 24 Oct 2026: a 2 px focus ring for the controller (D-pad left/right between buttons); the
+        # padding is 2 px less so the button keeps its size. Invisible until focused.
         super().__init__(parent, text=text, font=font, bg=bg, fg=fg, cursor="hand2",
-                         padx=int(16 * scale), pady=int(7 * scale))
+                         padx=int(16 * scale) - 2, pady=int(7 * scale) - 2, highlightthickness=2,
+                         highlightbackground=parent["bg"], highlightcolor=TEXT)
         self.normal, self.command = bg, command
         self.bind("<Button-1>", lambda e: self.invoke())
         self.bind("<Enter>", lambda e: self.config(bg=self.hover))
@@ -433,11 +436,12 @@ class Dialog(tk.Toplevel):
     ICONS = {"info": ("ℹ", HERO_LIGHT), "warning": ("⚠", ACCENT), "error": ("✕", STOP_RED),
              "question": ("?", ACCENT)}
     WIDTH = 460
+    current = None  # the dialog on screen (the controller navigation in the launcher sends its buttons here)
 
     def __init__(self, root, title, message, buttons, detail=None, default=0, cancel=None, scale=1.0, icon=None):
         super().__init__(root, bg=PANEL, highlightthickness=1, highlightbackground=LINE)
         self.withdraw()
-        self.root, self.result, self.buttons = root, cancel, []
+        self.root, self.result, self.buttons, self.cancel_value = root, cancel, [], cancel
         px = lambda v: int(v * scale)  # noqa: E731
         width, pad = px(self.WIDTH), px(20)
         self.title(title)
@@ -496,6 +500,23 @@ class Dialog(tk.Toplevel):
         self.result = value
         self.destroy()
 
+    def press_default(self):
+        """The controller's A: the same as Enter."""
+        if self.default_button:
+            self.default_button.invoke()
+
+    def press_cancel(self):
+        """The controller's B: the same as Escape."""
+        self.finish(self.cancel_value)
+
+    def step_button(self, by):
+        """The controller's D-pad left/right: the next or previous button becomes the default (and
+        shows the focus ring), so A and Enter press it."""
+        if self.default_button in self.buttons:
+            index = min(max(self.buttons.index(self.default_button) + by, 0), len(self.buttons) - 1)
+            self.default_button = self.buttons[index]
+            self.default_button.focus_set()
+
     def grab(self, retry=True):
         try:
             self.grab_set()
@@ -523,10 +544,12 @@ class Dialog(tk.Toplevel):
         self.update()  # mapped now: the grab below needs a viewable window (wait_visibility could hang)
         self.grab()
         self.focus_force()
+        previous, Dialog.current = Dialog.current, self
         try:
             self.wait_window()
         except tk.TclError:  # the root was destroyed under the dialog
             pass
+        Dialog.current = previous
         return self.result
 
     @classmethod

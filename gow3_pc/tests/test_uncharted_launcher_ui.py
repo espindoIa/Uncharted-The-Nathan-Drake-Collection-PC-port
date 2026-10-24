@@ -409,6 +409,46 @@ class LauncherUiTest(unittest.TestCase):
         launcher.capturing, launcher.capture_armed = None, False
         self.assertIsNone(launcher.on_key(SimpleNamespace(keysym="Tab")))  # not capturing: Tk moves the focus
 
+    def test_controller_nav_ignores_held_buttons_then_moves_and_steps(self):
+        launcher = self.launcher
+        pads = SimpleNamespace(sdl=True, down={"dpdown"}, held=lambda: set(pads.down),
+                               axes=lambda: {"lx": 0.0, "ly": 0.0})
+        launcher.gamepads = pads
+        nav = uncharted_launcher.PadNav(launcher)
+        nav.stop()
+        target = mock.Mock()
+        focus = SimpleNamespace(winfo_toplevel=lambda: self.root, tk_focusNext=lambda: target,
+                                tk_focusPrev=lambda: None)
+        with mock.patch.object(nav, "window_focused", return_value=True), \
+                mock.patch.object(self.root, "focus_get", return_value=focus), \
+                mock.patch.object(launcher, "step_section") as step_section, \
+                mock.patch.object(launcher, "play_or_stop") as play:
+            nav.step(0.0)  # Down was held when the nav woke up: ignored
+            nav.step(0.1)
+            target.focus_set.assert_not_called()
+            pads.down = set()
+            nav.step(0.2)
+            pads.down = {"dpdown"}
+            nav.step(0.3)
+            self.assertEqual(target.focus_set.call_count, 1)
+            nav.step(0.4)  # held: no repeat before 400 ms
+            self.assertEqual(target.focus_set.call_count, 1)
+            nav.step(0.8)
+            self.assertEqual(target.focus_set.call_count, 2)
+            pads.down = {"rightshoulder", "start"}
+            nav.step(1.0)
+            step_section.assert_called_once_with(1)
+            play.assert_called_once_with()
+            launcher.process = object()  # a game runs: the pad is the game's
+            pads.down = set()
+            nav.step(1.1)
+            pads.down = {"start", "rightshoulder", "dpdown"}
+            nav.step(1.2)
+            launcher.process = None
+        step_section.assert_called_once_with(1)
+        play.assert_called_once_with()
+        self.assertEqual(target.focus_set.call_count, 2)
+
     def test_launcher_uses_no_native_message_box(self):
         text = (LAUNCHER / "uncharted_launcher.pyw").read_text(encoding="utf-8")
         self.assertNotIn("messagebox.", text.split('if __name__ == "__main__"')[0])
@@ -457,6 +497,20 @@ class DialogTest(unittest.TestCase):
         self.assertIs(Dialog.okcancel(self.root, "t", "q"), True)
         self.root.after(100, lambda: self.dialog().event_generate("<Return>"))
         self.assertIsNone(Dialog.error(self.root, "t", "boom", detail="line\n" * 30))
+
+    def test_current_dialog_takes_the_controller_buttons(self):
+        Dialog = self.widgets.Dialog
+        seen = []
+
+        def cancel():
+            seen.append(Dialog.current is self.dialog())
+            self.dialog().step_button(1)
+            seen.append(self.dialog().default_button is self.dialog().buttons[1])
+            self.dialog().press_cancel()
+        self.root.after(100, cancel)
+        self.assertEqual(Dialog.ask(self.root, "t", "m", [("A", "a"), ("B", "b")], cancel="x"), "x")
+        self.assertEqual(seen, [True, True])
+        self.assertIsNone(Dialog.current)
 
     def test_copy_button_puts_the_detail_on_the_clipboard(self):
         Dialog = self.widgets.Dialog

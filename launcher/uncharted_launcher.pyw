@@ -566,6 +566,136 @@ class Gamepads:
             return "playstation" if self.sdl.SDL_GetGamepadType(pad) in self.PLAYSTATION_TYPES else "xbox"
         return None
 
+    def axes(self):
+        """The first pad's left stick, -1..1 (up and left are negative). The pads are those of the
+        last refresh(), i.e. of held(); no deadzone here."""
+        for pad in self.pads.values():
+            return {"lx": max(-1.0, self.sdl.SDL_GetGamepadAxis(pad, 0) / 32767),
+                    "ly": max(-1.0, self.sdl.SDL_GetGamepadAxis(pad, 1) / 32767)}
+        return {"lx": 0.0, "ly": 0.0}
+
+
+class PadNav:
+    """24 Oct 2026: the launcher with a controller (Steam Deck, couch). D-pad or left stick move the
+    focus, A presses, B goes back, LB/RB change the section, Start plays. Only while the launcher
+    window has the focus (SDL reads pads in the background) and no game runs (the game owns the
+    pad then). Buttons still held when the nav becomes active (Start as the game exits) are
+    ignored until released."""
+    DIRECTIONS = {"dpup": "up", "dpdown": "down", "dpleft": "left", "dpright": "right"}
+    STICK = 0.5
+    FIRST_REPEAT, REPEAT = 0.4, 0.12
+
+    def __init__(self, launcher):
+        self.launcher, self.root = launcher, launcher.root
+        self.armed, self.ignored, self.seen, self.due = False, set(), set(), {}
+        self.job = None
+
+    @property
+    def gamepads(self):
+        if not hasattr(self.launcher, "gamepads"):  # page_controls makes it too; one object
+            self.launcher.gamepads = Gamepads()
+        return self.launcher.gamepads
+
+    def start(self):
+        self.job = self.root.after(33, self.tick)
+
+    def stop(self):
+        if self.job is not None:
+            self.root.after_cancel(self.job)
+            self.job = None
+
+    def tick(self):
+        try:
+            self.job = self.root.after(33, self.tick)  # first: a dialog opened below keeps ticking
+            self.step(time.monotonic())
+        except tk.TclError:  # the root is gone
+            self.job = None
+
+    def window_focused(self):
+        return self.root.focus_displayof() is not None and bool(self.root.winfo_viewable())
+
+    def active(self):
+        launcher = self.launcher
+        return (launcher.process is None and getattr(launcher, "capturing", None) is None
+                and getattr(launcher, "pad_capture", None) is None and self.window_focused())
+
+    def step(self, now):
+        if not self.active():
+            self.armed = False
+            return
+        pads = self.gamepads  # made here, on first use
+        if not pads.sdl:
+            self.armed = False
+            return self.stop()  # no SDL3.dll: nothing to poll, ever
+        down = {self.DIRECTIONS.get(name, name) for name in pads.held()}
+        axes = pads.axes()
+        for name, hit in (("up", axes["ly"] < -self.STICK), ("down", axes["ly"] > self.STICK),
+                          ("left", axes["lx"] < -self.STICK), ("right", axes["lx"] > self.STICK)):
+            if hit:
+                down.add(name)
+        if not self.armed:
+            self.armed, self.ignored = True, set(down)
+        self.ignored &= down
+        live = down - self.ignored
+        fire = []
+        for name in sorted(live):
+            if name not in self.seen:
+                fire.append(name)
+                if name in self.DIRECTIONS.values():
+                    self.due[name] = now + self.FIRST_REPEAT
+            elif name in self.due and now >= self.due[name]:
+                fire.append(name)
+                self.due[name] = now + self.REPEAT
+        self.seen = live
+        self.due = {name: when for name, when in self.due.items() if name in live}
+        for name in fire:  # last: a press can open a dialog (a nested loop)
+            self.press(name)
+
+    def press(self, name):
+        launcher = self.launcher
+        dialog = Dialog.current
+        if dialog is not None:
+            if name == "a":
+                dialog.press_default()
+            elif name == "b":
+                dialog.press_cancel()
+            elif name in ("left", "right"):
+                dialog.step_button(-1 if name == "left" else 1)
+            return
+        if name in ("leftshoulder", "rightshoulder"):
+            return launcher.step_section(-1 if name == "leftshoulder" else 1)
+        if name == "start":
+            return launcher.play_or_stop()
+        try:
+            focus = self.root.focus_get()
+        except (KeyError, tk.TclError):  # a menu's popup
+            return
+        if focus is None or focus.winfo_toplevel() is not self.root:
+            if name in ("up", "down", "a"):
+                launcher.play_button.focus_set()
+            return
+        if name == "a":
+            focus.event_generate("<Return>")  # the same path as the keyboard
+        elif name == "b":
+            target = launcher.tab_buttons[launcher.section][0]
+            if focus is target:
+                target = launcher.cards[launcher.config["game"]][0]
+            target.focus_set()
+        elif name in ("up", "down", "left", "right"):
+            horizontal = name in ("left", "right")
+            step = -1 if name in ("up", "left") else 1
+            if horizontal and isinstance(focus, Segmented):
+                focus.move(step)
+            elif horizontal and isinstance(focus, Toggle):
+                if focus.enabled and focus.value != (step > 0):
+                    focus.set(step > 0, notify=True)
+            elif horizontal and isinstance(focus, Dropdown):
+                pass
+            else:
+                target = focus.tk_focusNext() if step > 0 else focus.tk_focusPrev()
+                if target is not None:
+                    target.focus_set()
+
 
 STICK_ACTIONS = {"ls_up", "ls_down", "ls_left", "ls_right", "rs_up", "rs_down", "rs_left", "rs_right"}
 DEFAULT_CONTROLS = {
@@ -1359,6 +1489,9 @@ class Launcher:
         if direct:
             self.select_game(direct, save=False)
             root.after(100, self.play_direct)
+        else:
+            self.pad_nav = PadNav(self)
+            self.pad_nav.start()
 
     def restore_window_position(self):
         """The window opens where it was last closed, if that spot is still on a screen."""
