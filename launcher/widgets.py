@@ -38,9 +38,13 @@ class Toggle(tk.Canvas):
         self.s = scale
         w, h = int(46 * scale), int(24 * scale)
         super().__init__(parent, width=w, height=h, bg=parent["bg"], highlightthickness=0, cursor="hand2")
-        self.w, self.h, self.value, self.command = w, h, bool(value), command
-        self.bind("<Button-1>", lambda e: self.set(not self.value, notify=True))
+        self.w, self.h, self.value, self.command, self.enabled = w, h, bool(value), command, True
+        self.bind("<Button-1>", lambda e: self.click())
         self.draw()
+
+    def click(self):
+        if self.enabled:
+            self.set(not self.value, notify=True)
 
     def set(self, value, notify=False):
         self.value = bool(value)
@@ -48,14 +52,21 @@ class Toggle(tk.Canvas):
         if notify:
             self.command(self.value)
 
+    def set_enabled(self, enabled):
+        """Greyed out (a setting that does nothing now): shows its value, ignores clicks."""
+        self.enabled = bool(enabled)
+        self.config(cursor="hand2" if self.enabled else "arrow")
+        self.draw()
+
     def draw(self):
         self.delete("all")
         pad = max(1, int(2 * self.s))
-        track = ACCENT if self.value else LINE
+        track = (ACCENT if self.value else LINE) if self.enabled else (DIM if self.value else LINE)
         round_rect(self, 1, 1, self.w - 1, self.h - 1, self.h // 2, fill=track, outline=track)
         d = self.h - 2 * pad - 2
         x = self.w - pad - d - 1 if self.value else pad + 1
-        self.create_oval(x, pad + 1, x + d, pad + 1 + d, fill=INK if self.value else MUTED, outline="")
+        knob = (INK if self.value else MUTED) if self.enabled else (PANEL if self.value else DIM)
+        self.create_oval(x, pad + 1, x + d, pad + 1 + d, fill=knob, outline="")
 
 
 class Segmented(tk.Frame):
@@ -64,11 +75,12 @@ class Segmented(tk.Frame):
     def __init__(self, parent, options, value, command, font, recommended=None):
         super().__init__(parent, bg=LINE, padx=1, pady=1)
         self.command, self.labels, self.value, self.recommended = command, {}, value, recommended
+        self.enabled = True
         for i, (option, label) in enumerate(options):
             item = tk.Label(self, text=self.text(option, label), font=font, padx=12, pady=5, cursor="hand2", bd=0)
             item.grid(row=0, column=i, padx=(0 if i == 0 else 1, 0))
-            item.bind("<Button-1>", lambda e, v=option: self.set(v, notify=True))
-            item.bind("<Enter>", lambda e, w=item, v=option: v != self.value and w.config(bg=PANEL_HI))
+            item.bind("<Button-1>", lambda e, v=option: self.click(v))
+            item.bind("<Enter>", lambda e, w=item, v=option: self.enabled and v != self.value and w.config(bg=PANEL_HI))
             item.bind("<Leave>", lambda e: self.restyle())
             self.labels[option] = item
         self.restyle()
@@ -89,10 +101,22 @@ class Segmented(tk.Frame):
         if notify:
             self.command(value)
 
+    def click(self, option):
+        if self.enabled:
+            self.set(option, notify=True)
+
+    def set_enabled(self, enabled):
+        """Greyed out (a setting that does nothing now): shows its value, ignores clicks."""
+        self.enabled = bool(enabled)
+        self.restyle()
+
     def restyle(self):
         for option, item in self.labels.items():
             selected = option == self.value
-            item.config(bg=ACCENT if selected else PANEL, fg=INK if selected else TEXT)
+            if self.enabled:
+                item.config(bg=ACCENT if selected else PANEL, fg=INK if selected else TEXT, cursor="hand2")
+            else:  # the selected one stays readable, but is not orange
+                item.config(bg=LINE if selected else PANEL, fg=MUTED if selected else DIM, cursor="arrow")
 
 
 class Dropdown(tk.Label):
@@ -101,11 +125,16 @@ class Dropdown(tk.Label):
     def __init__(self, parent, options, value, command, font):
         super().__init__(parent, font=font, bg=PANEL, fg=TEXT, padx=12, pady=5, cursor="hand2", anchor="w",
                          highlightthickness=1, highlightbackground=LINE)
-        self.options, self.command, self.font = options, command, font
+        self.options, self.command, self.font, self.enabled = options, command, font, True
         self.set(value)
         self.bind("<Button-1>", lambda e: self.open())
-        self.bind("<Enter>", lambda e: self.config(bg=PANEL_HI))
+        self.bind("<Enter>", lambda e: self.enabled and self.config(bg=PANEL_HI))
         self.bind("<Leave>", lambda e: self.config(bg=PANEL))
+
+    def set_enabled(self, enabled):
+        """Greyed out (a setting that does nothing now): shows its value, does not open."""
+        self.enabled = bool(enabled)
+        self.config(fg=TEXT if self.enabled else DIM, bg=PANEL, cursor="hand2" if self.enabled else "arrow")
 
     def set(self, value, notify=False):
         self.value = value
@@ -115,6 +144,8 @@ class Dropdown(tk.Label):
             self.command(value)
 
     def open(self):
+        if not self.enabled:
+            return
         menu = tk.Menu(self, tearoff=0, bg=PANEL, fg=TEXT, activebackground=ACCENT, activeforeground=INK,
                        font=self.font, bd=0)
         for option, label in self.options:

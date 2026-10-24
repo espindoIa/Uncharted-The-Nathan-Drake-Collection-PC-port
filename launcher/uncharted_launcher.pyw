@@ -224,6 +224,25 @@ def frame_gen_available():
     return dlss_available() and (ROOT / "gow3_pc" / "out" / NGX_FG_DLL).is_file()
 
 
+DEPENDENT_OPTIONS = ("preset", "dlss_model", "frame_gen")
+
+
+def option_availability(ini, frame_gen_ok):
+    """24 Oct 2026: which options do something with the chosen anti-aliasing: key -> (enabled, reason
+    or None). Only a display state: the stored values are never touched, so they are back as they
+    were when the setting they depend on changes again."""
+    upscaler = ini.get("upscaler", INI_DEFAULTS["upscaler"])
+    result = {"preset": (upscaler in ("fsr3", "fsr4", "dlss"), "Needs FSR or DLSS under Anti-aliasing."),
+              "dlss_model": (upscaler == "dlss", "Needs DLSS under Anti-aliasing.")}
+    if upscaler == "off":
+        result["frame_gen"] = (False, "Needs an anti-aliasing mode (TAA, FSR or DLSS).")
+    elif not frame_gen_ok:
+        result["frame_gen"] = (False, "Needs NVIDIA's nvngx_dlssg.dll: add it under Ready to play on Home.")
+    else:
+        result["frame_gen"] = (True, None)
+    return {key: (enabled, None if enabled else reason) for key, (enabled, reason) in result.items()}
+
+
 def fps_limits():
     return FPS_LIMITS + FG_FPS_LIMITS if frame_gen_available() else FPS_LIMITS
 
@@ -1426,6 +1445,7 @@ class Launcher:
         self.build_tabs()
         self.select_game(self.config.get("game", "u1"), save=False)
         self.show_tab(self.config.get("tab"), save=False)
+        self.refresh_dependencies()
 
     def build_sidebar(self):
         bar = tk.Frame(self.root, bg=PANEL)
@@ -1660,6 +1680,23 @@ class Launcher:
         self.update_fps_note()
         if hasattr(self, "ini_label"):
             self.ini_label.config(text=f"Settings: {ini_file(self.config['game'])}")
+        self.refresh_dependencies()
+
+    def refresh_dependencies(self):
+        """Greys out the options that do nothing with the anti-aliasing now chosen and says what they
+        need. Display only: the ini and the game's settings are not touched, so the values come back
+        when the upscaler changes (here, or in the in-game menu through follow_ini)."""
+        for key, (enabled, reason) in option_availability(self.ini, frame_gen_available()).items():
+            widget, note = self.widgets.get(key), getattr(self, "row_notes", {}).get(key)
+            if widget is not None and widget.winfo_exists():
+                widget.set_enabled(enabled)
+            if note is not None and note.winfo_exists():
+                if enabled:
+                    note.pack_forget()
+                else:
+                    note.config(text=reason)
+                    if not note.winfo_manager():
+                        note.pack(side="top", fill="x")
 
     def game_dir(self):
         folder = self.config.get("game_dir") or ""
@@ -1736,6 +1773,7 @@ class Launcher:
         # Pages taller than the body scroll (Display, Performance, System, Controls).
         self.scroll_canvases = set()
         self.rows = []  # every settings row built (title, hint, short, badge), for the tests
+        self.row_notes = {}  # key -> the hidden "Needs ..." line of a row (see refresh_dependencies)
         # 24 Oct 2026: bound once for the whole session. Capturing a key used to bind_all and then
         # unbind_all these sequences, which also removed the page scrolling until the launcher restarted.
         self.capturing, self.capture_armed = None, False
@@ -1846,12 +1884,14 @@ class Launcher:
         self.on_resize(label, lambda width: label.config(wraplength=max(1, width - self.px(4))))
         return label
 
-    def row(self, page, title, hint, control_factory, short=None, badge=None):
+    def row(self, page, title, hint, control_factory, short=None, badge=None, note_key=None):
         """A setting: title and hint, the control right of them, or under them when it would take
         more than 45% of the row (long choice lists, graphics card names); decided again whenever
         the row's width changes. 24 Oct 2026: with `short`, the row shows that one line and a ?
         (InfoTip) after the title opens the full `hint`; a hint over HINT_MAX without a `short` is
-        a bug (test_every_long_hint_has_a_short_line). `badge` ("ALL GAMES") sits after the title."""
+        a bug (test_every_long_hint_has_a_short_line). `badge` ("ALL GAMES") sits after the title.
+        With `note_key`, the row gets a hidden note line (self.row_notes[note_key]) that
+        refresh_dependencies shows, under the hint, while the setting does nothing."""
         self.rows.append({"title": title, "hint": hint, "short": short, "badge": badge})
         row = tk.Frame(page, bg=BG)
         row.pack(side="top", fill="x", pady=(0, self.px(10)))
@@ -1866,6 +1906,9 @@ class Launcher:
         if short or hint:
             self.wrap(tk.Label(text, text=short or hint, font=self.f_small, bg=BG, fg=MUTED, anchor="w",
                                justify="left", wraplength=self.px(560))).pack(side="top", fill="x")
+        if note_key:
+            self.row_notes[note_key] = self.wrap(tk.Label(text, text="", font=self.f_small, bg=BG, fg=ACCENT,
+                                                          anchor="w", justify="left", wraplength=self.px(560)))
         control = control_factory(row)
         state = {"below": None}
 
@@ -1901,7 +1944,8 @@ class Launcher:
                 return Dropdown(parent, [(o, f"{label}  ★" if o == recommended else label) for o, label in options],
                                 value, command, self.f_small)
             return Segmented(parent, options, value, command, self.f_small, recommended)
-        self.widgets[key] = self.row(page, title, hint, factory, **row_args)
+        self.widgets[key] = self.row(page, title, hint, factory, note_key=key if key in DEPENDENT_OPTIONS else None,
+                                     **row_args)
 
     def page_setup(self):
         page = self.page()
@@ -2082,6 +2126,7 @@ class Launcher:
             elif isinstance(widget, (Segmented, Dropdown)):
                 widget.set(value)
         self.sync_sharpening()
+        self.refresh_dependencies()  # a preset can change the upscaler
         settings["preset"] = name
         write_config(self.config)
         self.save_ini({k: self.ini[k] for k in INI_DEFAULTS})
@@ -2873,6 +2918,8 @@ class Launcher:
             self.redraw_presets()
         if key == "fps_limit":
             self.update_fps_note()
+        if key == "upscaler":
+            self.refresh_dependencies()
 
     def change_resolution(self, value):
         self.game_settings()["resolution"] = value

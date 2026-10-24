@@ -6,6 +6,13 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Changed (24 Oct 2026): options that do nothing are greyed out and say what they need.** Under
+  Display, Upscaling mode is greyed out unless Anti-aliasing is FSR or DLSS, DLSS model unless it
+  is DLSS, and DLSS Frame Generation when Anti-aliasing is Off or NVIDIA's `nvngx_dlssg.dll` is
+  missing; a short orange line under each says what it needs. Nothing is reset: your choices are
+  kept and the options wake up again as soon as you pick a matching anti-aliasing mode, in the
+  launcher or in the in-game menu.
+
 - **Changed (24 Oct 2026): settings show one line and a ? with the details.** Each setting now has
   a short one-line hint; the full explanation (the numbers, what to do if a game misbehaves) is
   behind the round ? next to its name: hover it, click it (it stays open until you click elsewhere

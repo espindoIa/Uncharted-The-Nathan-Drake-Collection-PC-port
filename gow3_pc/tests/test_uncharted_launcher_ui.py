@@ -4,6 +4,7 @@ Run: py -m unittest test_uncharted_launcher_ui  (from gow3_pc/tests; needs Tk an
 """
 import importlib.machinery
 import importlib.util
+import os
 import sys
 import tempfile
 import time
@@ -83,6 +84,30 @@ class ReadinessTest(unittest.TestCase):
         self.assertIn("SSD", items[2]["detail"])
         self.assertIn("0.6.0", items[3]["title"])
         self.assertEqual(items[3]["actions"], [("Install", "install_update")])
+
+
+@unittest.skipIf(uncharted_launcher is None, f"launcher needs tkinter and Pillow: {IMPORT_ERROR}")
+class OptionAvailabilityTest(unittest.TestCase):
+    def test_rules_per_upscaler(self):
+        enabled = lambda upscaler, ok: {k: v[0] for k, v in  # noqa: E731
+                                        uncharted_launcher.option_availability({"upscaler": upscaler}, ok).items()}
+        for ok in (True, False):
+            self.assertEqual(enabled("off", ok), {"preset": False, "dlss_model": False, "frame_gen": False})
+            self.assertEqual(enabled("taa", ok), {"preset": False, "dlss_model": False, "frame_gen": ok})
+            for fsr in ("fsr3", "fsr4"):
+                self.assertEqual(enabled(fsr, ok), {"preset": True, "dlss_model": False, "frame_gen": ok})
+            self.assertEqual(enabled("dlss", ok), {"preset": True, "dlss_model": True, "frame_gen": ok})
+
+    def test_reasons_only_while_disabled(self):
+        result = uncharted_launcher.option_availability({"upscaler": "off"}, False)
+        self.assertEqual(result["preset"][1], "Needs FSR or DLSS under Anti-aliasing.")
+        self.assertEqual(result["dlss_model"][1], "Needs DLSS under Anti-aliasing.")
+        self.assertEqual(result["frame_gen"][1], "Needs an anti-aliasing mode (TAA, FSR or DLSS).")
+        result = uncharted_launcher.option_availability({"upscaler": "taa"}, False)
+        self.assertEqual(result["frame_gen"][1], "Needs NVIDIA's nvngx_dlssg.dll: add it under Ready to play on Home.")
+        self.assertEqual(uncharted_launcher.option_availability({"upscaler": "dlss"}, True),
+                         {k: (True, None) for k in ("preset", "dlss_model", "frame_gen")})
+        self.assertFalse(uncharted_launcher.option_availability({}, True)["preset"][0])  # the default is off
 
 
 @unittest.skipIf(uncharted_launcher is None, f"launcher needs tkinter and Pillow: {IMPORT_ERROR}")
@@ -256,6 +281,71 @@ class LauncherUiTest(unittest.TestCase):
                 self.assertLess(len(row["short"]), len(row["hint"]), title)
             self.assertEqual(row["badge"], "ALL GAMES" if title in glob else None, title)
         self.assertTrue(glob <= {row["title"] for row in launcher.rows}, "a global row was not built")
+
+    def test_options_that_do_nothing_are_greyed_out_and_wake_up_without_losing_values(self):
+        launcher, mod = self.launcher, uncharted_launcher
+        game = launcher.config["game"]
+        with mock.patch.object(mod, "frame_gen_available", lambda: True):
+            launcher.change("preset", "3")
+            launcher.change("dlss_model", "m")
+            launcher.change("upscaler", "off")
+            launcher.refresh_controls()  # the widgets show the ini
+            self.root.update()
+            preset, model, frame_gen = (launcher.widgets[k] for k in ("preset", "dlss_model", "frame_gen"))
+            self.assertEqual([preset.enabled, model.enabled, frame_gen.enabled], [False, False, False])
+            self.assertEqual(launcher.row_notes["preset"].winfo_manager(), "pack")
+            self.assertIn("FSR or DLSS", launcher.row_notes["preset"].cget("text"))
+            # A click on a greyed-out choice neither calls the command nor reaches the ini.
+            preset.click("1")  # what a click on the "Quality" item calls
+            self.assertEqual((preset.value, mod.read_ini(game)["preset"]), ("3", "3"))
+            self.assertNotEqual(preset.labels["3"].cget("bg"), mod.ACCENT)  # the selected one is not orange now
+            launcher.change("upscaler", "dlss")
+            self.root.update()
+            self.assertEqual([preset.enabled, model.enabled, frame_gen.enabled], [True, True, True])
+            self.assertEqual(launcher.row_notes["preset"].winfo_manager(), "")
+            self.assertEqual((launcher.ini["preset"], launcher.ini["dlss_model"]), ("3", "m"))
+            self.assertEqual((preset.value, model.value), ("3", "m"))
+            self.assertNotEqual(launcher.game_settings().get("preset"), "3")  # the Home preset name, untouched
+            preset.click("1")
+            self.assertEqual(mod.read_ini(game)["preset"], "1")  # enabled again: the click goes through
+
+    def test_missing_frame_generation_dll_is_the_reason_once_an_upscaler_is_on(self):
+        launcher, mod = self.launcher, uncharted_launcher
+        with mock.patch.object(mod, "frame_gen_available", lambda: False):
+            launcher.change("upscaler", "taa")
+            self.assertFalse(launcher.widgets["frame_gen"].enabled)
+            self.assertIn("nvngx_dlssg.dll", launcher.row_notes["frame_gen"].cget("text"))
+            launcher.change("upscaler", "off")
+            self.assertIn("anti-aliasing mode", launcher.row_notes["frame_gen"].cget("text"))
+
+    def test_following_the_in_game_menu_wakes_the_options(self):
+        launcher, mod = self.launcher, uncharted_launcher
+        game = launcher.config["game"]
+        launcher.change("upscaler", "off")
+        self.assertFalse(launcher.widgets["preset"].enabled)
+        mod.write_ini(game, {"upscaler": "fsr3"})  # what the in-game menu does
+        stamp = mod.ini_file(game).stat().st_mtime_ns + 1_000_000
+        os.utime(mod.ini_file(game), ns=(stamp, stamp))
+        launcher.follow_ini()
+        self.assertEqual(launcher.widgets["upscaler"].value, "fsr3")
+        self.assertTrue(launcher.widgets["preset"].enabled)
+        self.assertFalse(launcher.widgets["dlss_model"].enabled)
+
+    def test_toggle_and_dropdown_ignore_clicks_while_disabled(self):
+        calls = []
+        toggle = uncharted_launcher.Toggle(self.root, 1.0, False, calls.append)
+        toggle.set_enabled(False)
+        toggle.click()
+        dropdown = uncharted_launcher.Dropdown(self.root, [("a", "A"), ("b", "B")], "a", calls.append, ("Segoe UI", 9))
+        dropdown.set_enabled(False)
+        with mock.patch.object(tk.Menu, "tk_popup", lambda *a: calls.append("menu")):
+            dropdown.open()
+        dropdown.set("b")  # programmatic updates still render
+        self.assertIn("B", dropdown.cget("text"))
+        self.assertEqual(calls, [])
+        toggle.set_enabled(True)
+        toggle.click()
+        self.assertEqual(calls, [True])
 
     def test_launcher_uses_no_native_message_box(self):
         text = (LAUNCHER / "uncharted_launcher.pyw").read_text(encoding="utf-8")
