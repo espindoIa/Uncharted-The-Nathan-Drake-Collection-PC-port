@@ -147,22 +147,32 @@ APP_TITLE = "Uncharted: The Nathan Drake Collection"
 # The fork's name in the window title and the hero.
 EDITION = "Expedition Edition"
 FORK_URL = "https://github.com/espindoIa/Uncharted-The-Nathan-Drake-Collection-PC-port"
-# Credits shown on the Advanced page: the port this fork builds on and the anti-aliasing technologies.
+# Credits shown in the System section: the port this fork builds on and the anti-aliasing technologies.
 CREDITS = ("Credits: based on BilalReloaded's Uncharted PC port (github.com/bc160201983), GPL. DLSS and DLAA "
            "use NVIDIA DLSS technology. NVIDIA, RTX and DLSS are trademarks of NVIDIA Corporation. AMD "
            "FidelityFX Super Resolution (FSR 3.1, FSR 4) by AMD. Uncharted camera motion for anti-aliasing "
            "after SuperMedo's Uncharted port.")
-# Links in the launcher header: label, address, color, hover color.
+# Links at the bottom of the sidebar: label, address, color, hover color.
 LINKS = (("GitHub", FORK_URL, "#18262f", "#22343f"),)
 
 GAMES = [
-    {"key": "u1", "number": "1", "title": "DRAKE'S FORTUNE", "name": "Uncharted: Drake's Fortune", "subtitle": "Uncharted 1  •  double-click to play",
+    {"key": "u1", "number": "1", "title": "DRAKE'S FORTUNE", "name": "Uncharted: Drake's Fortune", "subtitle": "Uncharted 1",
      "exe": "eboot.bin", "log": "uncharted"},
-    {"key": "u2", "number": "2", "title": "AMONG THIEVES", "name": "Uncharted 2: Among Thieves", "subtitle": "Uncharted 2  •  double-click to play",
+    {"key": "u2", "number": "2", "title": "AMONG THIEVES", "name": "Uncharted 2: Among Thieves", "subtitle": "Uncharted 2",
      "exe": "big2-ps4_Shipping.elf", "log": "big2-ps4_Shipping"},
-    {"key": "u3", "number": "3", "title": "DRAKE'S DECEPTION", "name": "Uncharted 3: Drake's Deception", "subtitle": "Uncharted 3  •  double-click to play",
+    {"key": "u3", "number": "3", "title": "DRAKE'S DECEPTION", "name": "Uncharted 3: Drake's Deception", "subtitle": "Uncharted 3",
      "exe": "big3-ps4_Shipping.elf", "log": "big3-ps4_Shipping"},
 ]
+# The sidebar's sections (internal name, label). launcher.json's "tab" keeps the name; names of
+# launchers before 24 Oct 2026 map to their section (OLD_SECTIONS), anything unknown opens Home.
+SECTIONS = (("home", "Home"), ("display", "Display"), ("performance", "Performance"), ("controls", "Controls"),
+            ("gameplay", "Gameplay"), ("system", "System"))
+OLD_SECTIONS = {"setup": "home", "cheats": "gameplay", "advanced": "system"}
+
+
+def section_name(name):
+    name = OLD_SECTIONS.get(name, name)
+    return name if name in dict(SECTIONS) else "home"
 
 # At most 120: faster, the game's movement timing breaks (Drake's Fortune at 140-160 FPS: running
 # slows, Nate fell through the world). The runtime caps older, faster settings at 120 too.
@@ -234,7 +244,7 @@ def ngx_signature_ok(path):
     return result.returncode == 0
 
 
-# Cheats (Advanced page): name, title, hint. tools/probe_uncharted.py turns on the games' own
+# Cheats (Gameplay section): name, title, hint. tools/probe_uncharted.py turns on the games' own
 # switches for them (CHEATS there).
 CHEATS = (("invincible", "Invincible", "Nate takes no damage. All three games."),
           ("ammo", "Infinite ammo", "Ammo never runs out. All three games."),
@@ -908,6 +918,17 @@ def screen_size():
         return 1920, 1080
 
 
+def work_area(root):
+    """The primary screen without the taskbar (x, y, width, height), in Tk's pixels."""
+    try:
+        rect = (ctypes.c_long * 4)()
+        if ctypes.windll.user32.SystemParametersInfoW(0x30, 0, rect, 0):  # SPI_GETWORKAREA
+            return rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1]
+    except (AttributeError, OSError):
+        pass
+    return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
+
+
 def fsr1_for(resolution):
     """FSR 1 when the game's image is smaller than the screen (it upscales; else no effect)."""
     width, height = (int(v) for v in resolution.split("x"))
@@ -966,7 +987,7 @@ def vulkan_gpus():
 
 
 def gpu_tier(name):
-    """The Quick Setup preset for a graphics card, from its model name; None when not known.
+    """The Home preset for a graphics card, from its model name; None when not known.
     Rough classes: Low = integrated and older entry cards, Medium = 1080p cards (GTX 1060-1660,
     RTX x060, RX 580-7600), High = 1440p cards, Ultra = 4K cards (RTX x080/x090,
     RTX 4070 Ti and up, RX 6800 XT/7900/9070). High and Ultra laptop chips count one class lower."""
@@ -1178,6 +1199,7 @@ def read_config():
     for name in GAME_SETTING_DEFAULTS:
         config.pop(name, None)
     config["version"] = 8
+    config["tab"] = section_name(config.get("tab"))  # the old tab names (24 Oct 2026 sidebar)
     # Under Wine the game folder is also kept as a Linux path: another prefix can show the same
     # folder under another drive letter (Launcher.game_dir).
     folder = config.get("game_dir")
@@ -1228,22 +1250,19 @@ class Launcher:
         self.last_output = 0.0
         self.game_started = False
         self.widgets = {}
-        self.images = []
-        # The graphics card (as last detected; detect_gpu checks again) for the Quick Setup advice.
+        # The graphics card (as last detected; detect_gpu checks again) for the Home preset advice.
         self.gpu_name = self.config.get("gpu")
         self.recommended = gpu_tier(self.gpu_name)
         self.fonts()
         root.title(f"{APP_TITLE} - {EDITION}")
         root.configure(bg=BG)
         root.resizable(True, True)
-        self.width = self.px(1180)
         try:
             root.iconbitmap(default=str(ASSETS / "uncharted.ico"))
         except tk.TclError:
             pass
         self.build()
         root.update_idletasks()
-        root.minsize(root.winfo_reqwidth(), root.winfo_reqheight())
         self.fit_to_screen()
         self.restore_window_position()
         write_config(self.config)  # keeps one-time updates (read_config) even without a change
@@ -1273,20 +1292,27 @@ class Launcher:
         self.root.update_idletasks()
         screen_w, screen_h = self.root.winfo_vrootwidth(), self.root.winfo_vrootheight()
         if -50 <= x <= max(0, screen_w - 200) and 0 <= y <= max(0, screen_h - 200):
-            # All of the window on the screen (fit_to_screen may have made it taller than it was).
-            y = min(y, max(0, self.root.winfo_screenheight() - self.root.winfo_reqheight() - self.px(70)))
+            # All of the window on the screen (the title bar and the taskbar included).
+            y = min(y, max(0, self.root.winfo_screenheight() - self.window_size[1] - self.px(70)))
             self.root.geometry(f"+{x}+{y}")
 
     def fit_to_screen(self):
-        """More room for the settings when the screen is tall enough (fewer pages need to scroll)."""
-        spare = self.root.winfo_screenheight() - self.px(110) - self.root.winfo_reqheight()
-        if spare > 0:
-            self.body.config(height=self.body.winfo_reqheight() + min(spare, self.px(240)))
-            self.root.update_idletasks()
+        """About 1240x760, never more than the screen's work area: the section body flexes and
+        scrolls, so the footer with PLAY stays in view (1280x720 at 150%, the Steam Deck's 1280x800)."""
+        x, y, area_w, area_h = work_area(self.root)
+        title_bar = self.px(40)
+        min_w = min(self.root.winfo_reqwidth(), area_w - self.px(60))
+        min_h = min(self.root.winfo_reqheight(), area_h - self.px(60))
+        self.root.minsize(min_w, min_h)
+        width = min(max(self.px(1240), min_w), area_w)
+        height = min(max(self.px(760), min_h), area_h - title_bar)
+        self.window_size = (width, height)
+        self.root.geometry(f"{width}x{height}+{x + max(0, (area_w - width) // 2)}"
+                           f"+{y + max(0, (area_h - height - title_bar) // 2)}")
 
     def detect_gpu(self):
         """Finds the graphics card in the background (Windows' list takes a moment) and marks the
-        Quick Setup preset that suits it."""
+        Home preset that suits it."""
         found = []
         threading.Thread(target=lambda: found.append(gpu_names()), daemon=True).start()
 
@@ -1315,11 +1341,15 @@ class Launcher:
         # signs); Segoe UI where it is missing (Wine/Proton without it).
         families = set(tkfont.families(self.root))
         head = "Bahnschrift SemiBold" if "Bahnschrift SemiBold" in families else "Segoe UI Semibold"
-        self.f_title = (head, 40)
-        self.f_subtitle = ("Segoe UI Semibold", 11)
-        self.f_edition = (head, 9)
-        self.f_card_number = (head, 30)
+        self.f_wordmark = (head, 22)
+        self.f_subtitle = ("Segoe UI Semibold", 7)
+        self.f_edition = (head, 8)
+        self.f_caption = ("Segoe UI Semibold", 8)
+        self.f_banner = (head, 20)
+        self.f_heading = (head, 15)
+        self.f_card_number = (head, 20)
         self.f_card_title = (head, 14)
+        self.f_entry_title = (head, 11)
         self.f_body = ("Segoe UI", 10)
         self.f_body_bold = ("Segoe UI Semibold", 10)
         self.f_small = ("Segoe UI", 9)
@@ -1329,26 +1359,110 @@ class Launcher:
     # -- layout -----------------------------------------------------------------------------
 
     def build(self):
+        # 24 Oct 2026: a sidebar (games, sections) beside a column with the banner, the section and
+        # the footer. The old stack (hero, game cards, tabs) left 330 px for the settings and did
+        # not fit 1280x720 (1080p at 150%).
+        self.build_sidebar()
+        tk.Frame(self.root, bg=LINE, width=1).pack(side="left", fill="y")
+        self.main = tk.Frame(self.root, bg=BG)
+        self.main.pack(side="left", fill="both", expand=True)
         self.build_hero()
-        self.build_cards()
         self.build_footer()
         self.build_tabs()
         self.select_game(self.config.get("game", "u1"), save=False)
-        self.show_tab(self.config.get("tab", "setup") if self.config.get("tab") in self.pages else "setup",
-                      save=False)
+        self.show_tab(self.config.get("tab"), save=False)
+
+    def build_sidebar(self):
+        bar = tk.Frame(self.root, bg=PANEL)
+        bar.pack(side="left", fill="y")
+        w, pad = self.px(240), self.px(20)
+        brand = tk.Frame(bar, bg=PANEL)
+        brand.pack(side="top", fill="x", padx=pad, pady=(self.px(18), self.px(10)))
+        tk.Label(brand, text="UNCHARTED", font=self.f_wordmark, bg=PANEL, fg=TEXT, anchor="w", bd=0).pack(
+            side="top", anchor="w")
+        tk.Label(brand, text="THE NATHAN DRAKE COLLECTION", font=self.f_subtitle, bg=PANEL, fg=MUTED,
+                 anchor="w", bd=0).pack(side="top", anchor="w", padx=(self.px(2), 0))
+        # The fork's edition as a flare-orange tag under the subtitle.
+        tk.Label(brand, text=EDITION.upper(), font=self.f_edition, bg=ACCENT, fg=INK, padx=self.px(8),
+                 pady=self.px(1)).pack(side="top", anchor="w", padx=(self.px(2), 0), pady=(self.px(8), 0))
+        # Bottom first: when the window is short, the section list gives way, not these.
+        version = updater.installed_version(ROOT)
+        tk.Label(bar, text=f"Version {updater.version_text(version)}" if version else "Source tree (updates with git)",
+                 font=self.f_small, bg=PANEL, fg=DIM, anchor="w").pack(side="bottom", fill="x", padx=pad,
+                                                                       pady=(0, self.px(14)))
+        links = tk.Canvas(bar, width=w, height=self.px(40), bg=PANEL, highlightthickness=0)
+        links.pack(side="bottom")
+        self.draw_links(links, w)
+
+        def caption(text):
+            tk.Label(bar, text=text, font=self.f_caption, bg=PANEL, fg=DIM, anchor="w").pack(
+                side="top", fill="x", padx=pad, pady=(self.px(10), self.px(4)))
+        caption("GAMES  ·  DOUBLE-CLICK TO PLAY")
+        self.cards = {}
+        for game in GAMES:
+            h = self.px(48)
+            canvas = tk.Canvas(bar, width=w, height=h, bg=PANEL, highlightthickness=0, cursor="hand2")
+            canvas.pack(side="top")
+            canvas.bind("<Button-1>", lambda e, k=game["key"]: self.select_game(k))
+            canvas.bind("<Double-Button-1>", lambda e, k=game["key"]: self.play_game(k))
+            canvas.bind("<Enter>", lambda e, k=game["key"]: self.draw_card(k, hover=True))
+            canvas.bind("<Leave>", lambda e, k=game["key"]: self.draw_card(k))
+            self.cards[game["key"]] = (canvas, game, w, h)
+        caption("SECTIONS")
+        self.section = None
+        self.tab_buttons = {}
+        for name, label in SECTIONS:
+            canvas = tk.Canvas(bar, width=w, height=self.px(34), bg=PANEL, highlightthickness=0, cursor="hand2")
+            canvas.pack(side="top")
+            canvas.bind("<Button-1>", lambda e, n=name: self.show_tab(n))
+            canvas.bind("<Enter>", lambda e, n=name: self.draw_section(n, hover=True))
+            canvas.bind("<Leave>", lambda e, n=name: self.draw_section(n))
+            self.tab_buttons[name] = (canvas, label)
+
+    def draw_section(self, name, hover=False):
+        canvas, label = self.tab_buttons[name]
+        w, h = int(canvas["width"]), int(canvas["height"])
+        selected = name == self.section
+        canvas.delete("all")
+        canvas.create_rectangle(0, 0, w, h, fill=PANEL_HI if selected or hover else PANEL, outline="")
+        if selected:
+            canvas.create_rectangle(0, 0, self.px(4), h, fill=ACCENT, outline="")
+        canvas.create_text(self.px(22), h // 2, text=label, font=self.f_tab, anchor="w",
+                           fill=TEXT if selected or hover else MUTED)
 
     def build_hero(self):
-        w, h = self.width, self.px(170)
-        art = None
+        """The banner over the section: the Collection's art (as the old hero drew it) with the
+        selected game's name. Drawn again when the column gets wider or narrower."""
+        self.banner_art = None
         for name in ("pic1.png", "pic0.png"):
             if (self.game_dir() / "sce_sys" / name).exists():
-                art = Image.open(self.game_dir() / "sce_sys" / name).convert("RGB")
+                self.banner_art = Image.open(self.game_dir() / "sce_sys" / name).convert("RGB")
                 break
-        if art is None:
-            art = Image.new("RGB", (1920, 1080), HERO_LIGHT)
+        self.banner = tk.Canvas(self.main, width=self.px(400), height=self.px(110), bg=BG, highlightthickness=0)
+        self.banner.pack(side="top", fill="x")
+        x = self.px(28)
+        self.banner.create_text(x, self.px(44), text="", font=self.f_banner, fill=TEXT, anchor="w", tags="game")
+        self.banner.create_text(x + self.px(1), self.px(74), text="Settings for this game are kept separately",
+                                font=self.f_body, fill=MUTED, anchor="w")
+        self.banner_job = None
+        self.draw_banner(self.px(1000))  # direct mode never maps the window
+
+        def resized(event):
+            if abs(event.width - self.banner_width) >= self.px(40):
+                if self.banner_job:
+                    self.root.after_cancel(self.banner_job)
+                self.banner_job = self.root.after(120, lambda: self.draw_banner(event.width))
+        self.banner.bind("<Configure>", resized)
+
+    def draw_banner(self, width):
+        self.banner_job = None
+        self.banner_width = width
+        # A little wider than the column: a window widened by less than 40 px shows no gap.
+        w, h = width + self.px(40), self.px(110)
+        art = self.banner_art or Image.new("RGB", (1920, 1080), HERO_LIGHT)
         # Fill the width; keep Drake (right) in view.
         scale = w / art.width
-        art = art.resize((w, int(art.height * scale)), Image.LANCZOS)
+        art = art.resize((w, max(h, int(art.height * scale))), Image.LANCZOS)
         top = int(art.height * 0.02)
         art = art.crop((0, top, w, top + h))
         # The art in two tones, night blue to a faded teal: the game's picture as a chart at night.
@@ -1369,41 +1483,21 @@ class Launcher:
         for y in range(start, h):
             fade_draw.line([(0, y), (w, y)], fill=int(255 * ((y - start) / (h - start)) ** 1.4))
         art = Image.composite(Image.new("RGB", (w, h), BG), art, fade)
-        photo = ImageTk.PhotoImage(art)
-        self.images.append(photo)
-        canvas = tk.Canvas(self.root, width=w, height=h, bg=BG, highlightthickness=0)
-        canvas.pack(side="top")
-        canvas.create_image(0, 0, image=photo, anchor="nw")
-        x, y = self.px(48), self.px(50)
-        # A route marked across the chart: dashes from the title towards an X.
-        route = [x + self.px(360), y + self.px(70), x + self.px(430), y + self.px(40), x + self.px(500),
-                 y + self.px(62), x + self.px(560), y + self.px(22)]
-        canvas.create_line(*route, fill=ACCENT, width=2, dash=(6, 5), smooth=True)
-        cx, cy, r = route[-2], route[-1], self.px(7)
-        canvas.create_line(cx - r, cy - r, cx + r, cy + r, fill=ACCENT, width=3)
-        canvas.create_line(cx - r, cy + r, cx + r, cy - r, fill=ACCENT, width=3)
-        canvas.create_text(x, y, text="UNCHARTED", font=self.f_title, fill=TEXT, anchor="w")
-        canvas.create_text(x + self.px(3), y + self.px(42), text="T H E   N A T H A N   D R A K E   C O L L E C T I O N",
-                           font=self.f_subtitle, fill=MUTED, anchor="w")
-        # The fork's edition as a flare-orange tag under the subtitle.
-        tag = canvas.create_text(0, 0, text=EDITION.upper(), font=self.f_edition, fill=INK, anchor="w")
-        x1, y1, x2, y2 = canvas.bbox(tag)
-        left, top_y = x + self.px(3), y + self.px(62)
-        canvas.coords(tag, left + self.px(10), top_y + self.px(11))
-        badge = round_rect(canvas, left, top_y, left + (x2 - x1) + self.px(20), top_y + self.px(22), self.px(4),
-                           fill=ACCENT, outline=ACCENT)
-        canvas.tag_lower(badge, tag)
-        self.draw_links(canvas, w)
+        self.banner_photo = ImageTk.PhotoImage(art)  # the last one only: the old image goes
+        self.banner.delete("art")
+        self.banner.create_image(0, 0, image=self.banner_photo, anchor="nw", tags="art")
+        self.banner.tag_lower("art")
 
     def draw_links(self, canvas, width):
-        """The fork's GitHub as a badge in the top right of the hero."""
-        right, top, height = width - self.px(22), self.px(18), self.px(30)
-        for label, url, color, hover in reversed(LINKS):
+        """The fork's GitHub as a badge at the bottom of the sidebar, from the left (`width` unused
+        since the badges moved there from the hero's top right)."""
+        left, top, height = self.px(20), self.px(5), self.px(30)
+        for label, url, color, hover in LINKS:
             tag = f"link-{label}"
             text = canvas.create_text(0, 0, text=label, font=self.f_body_bold, fill=TEXT, anchor="w", tags=tag)
             x1, _, x2, _ = canvas.bbox(text)
             badge_w = (x2 - x1) + self.px(46)
-            left = right - badge_w
+            right = left + badge_w
             mid = top + height // 2
             canvas.coords(text, left + self.px(34), mid)
             badge = round_rect(canvas, left, top, right, top + height, height // 2, fill=color, outline=HOVER_LINE,
@@ -1417,40 +1511,22 @@ class Launcher:
                                                                        canvas.config(cursor="hand2")))
             canvas.tag_bind(tag, "<Leave>", lambda e, b=badge, c=color: (canvas.itemconfig(b, fill=c, outline=HOVER_LINE),
                                                                        canvas.config(cursor="")))
-            right = left - self.px(10)
-
-    def build_cards(self):
-        frame = tk.Frame(self.root, bg=BG)
-        frame.pack(side="top", fill="x", padx=self.px(40), pady=(0, self.px(12)))
-        self.cards = {}
-        gap = self.px(16)
-        card_w = (self.width - 2 * self.px(40) - 2 * gap) // 3
-        card_h = self.px(72)
-        for i, game in enumerate(GAMES):
-            canvas = tk.Canvas(frame, width=card_w, height=card_h, bg=BG, highlightthickness=0, cursor="hand2")
-            canvas.grid(row=0, column=i, padx=(0 if i == 0 else gap, 0))
-            canvas.bind("<Button-1>", lambda e, k=game["key"]: self.select_game(k))
-            canvas.bind("<Double-Button-1>", lambda e, k=game["key"]: self.play_game(k))
-            canvas.bind("<Enter>", lambda e, k=game["key"]: self.draw_card(k, hover=True))
-            canvas.bind("<Leave>", lambda e, k=game["key"]: self.draw_card(k))
-            self.cards[game["key"]] = (canvas, game, card_w, card_h)
+            left = right + self.px(10)
 
     def draw_card(self, key, hover=False):
+        """A game in the sidebar: selected = the orange bar and the lighter panel."""
         canvas, game, w, h = self.cards[key]
         selected = key == self.config.get("game")
         canvas.delete("all")
-        fill = PANEL_HI if selected or hover else PANEL
-        outline = ACCENT if selected else (HOVER_LINE if hover else LINE)
-        round_rect(canvas, 2, 2, w - 2, h - 2, self.px(10), fill=fill, outline=outline, width=2 if selected else 1)
+        canvas.create_rectangle(0, 0, w, h, fill=PANEL_HI if selected or hover else PANEL, outline="")
+        if selected:
+            canvas.create_rectangle(0, 0, self.px(4), h, fill=ACCENT, outline="")
         canvas.create_text(self.px(22), h // 2, text=game["number"], font=self.f_card_number,
                            fill=ACCENT if selected else DIM, anchor="w")
-        canvas.create_text(self.px(66), h // 2 - self.px(10), text=game["title"], font=self.f_card_title,
-                           fill=TEXT, anchor="w")
-        canvas.create_text(self.px(67), h // 2 + self.px(13), text=game["subtitle"], font=self.f_small,
-                           fill=MUTED, anchor="w")
-        if selected:
-            canvas.create_text(w - self.px(18), self.px(16), text="SELECTED", font=("Segoe UI Semibold", 7),
-                               fill=ACCENT, anchor="e")
+        canvas.create_text(self.px(50), h // 2 - self.px(8), text=game["title"], font=self.f_entry_title,
+                           fill=TEXT if selected or hover else MUTED, anchor="w")
+        canvas.create_text(self.px(51), h // 2 + self.px(10), text=game["subtitle"], font=self.f_small,
+                           fill=MUTED if selected else DIM, anchor="w")
 
     def select_game(self, key, save=True):
         if key not in self.cards:
@@ -1459,6 +1535,7 @@ class Launcher:
         self.config["game"] = key
         for k in self.cards:
             self.draw_card(k)
+        self.banner.itemconfig("game", text=self.current_game()["name"])
         if save:
             write_config(self.config)
         if changed:
@@ -1500,7 +1577,7 @@ class Launcher:
             widget = self.widgets.get(key)
             if isinstance(widget, Toggle):
                 widget.set(self.ini.get(key, INI_DEFAULTS[key]) == "1")
-            elif isinstance(widget, Segmented):
+            elif isinstance(widget, (Segmented, Dropdown)):
                 widget.set(self.ini.get(key, INI_DEFAULTS[key]))
         settings = self.game_settings()
         if isinstance(self.widgets.get("resolution"), Segmented):
@@ -1560,7 +1637,7 @@ class Launcher:
         return True
 
     def chosen_update(self):
-        """The update folder chosen in Advanced (Choose update folder), if it is still there."""
+        """The update folder chosen in System (Choose update folder), if it is still there."""
         folder = self.config.get("update_dir") or ""
         if folder:
             for candidate in (Path(folder), Path(folder) / "uroot"):
@@ -1588,27 +1665,18 @@ class Launcher:
         return next(g for g in GAMES if g["key"] == self.config.get("game"))
 
     def build_tabs(self):
-        outer = tk.Frame(self.root, bg=BG)
-        outer.pack(side="top", fill="both", expand=True, padx=self.px(40))
-        strip = tk.Frame(outer, bg=BG)
-        strip.pack(side="top", fill="x")
-        self.tab_buttons = {}
-        for name, label in (("setup", "QUICK SETUP"), ("display", "DISPLAY"), ("performance", "PERFORMANCE"),
-                            ("controls", "CONTROLS"), ("cheats", "CHEATS"), ("advanced", "ADVANCED")):
-            cell = tk.Frame(strip, bg=BG)
-            cell.pack(side="left", padx=(0, self.px(26)))
-            text = tk.Label(cell, text=label, font=self.f_tab, bg=BG, fg=MUTED, cursor="hand2")
-            text.pack(side="top", pady=(0, self.px(6)))
-            bar = tk.Frame(cell, bg=BG, height=max(2, self.px(2)))
-            bar.pack(side="top", fill="x")
-            for widget in (cell, text):
-                widget.bind("<Button-1>", lambda e, n=name: self.show_tab(n))
-            self.tab_buttons[name] = (text, bar)
+        """The section's title and its body (packed after the footer: a short window shrinks the
+        body, which scrolls, never the footer)."""
+        outer = tk.Frame(self.main, bg=BG)
+        outer.pack(side="top", fill="both", expand=True, padx=self.px(28))
+        self.section_title = tk.Label(outer, text="", font=self.f_heading, bg=BG, fg=TEXT, anchor="w")
+        self.section_title.pack(side="top", fill="x", pady=(0, self.px(6)))
         tk.Frame(outer, bg=LINE, height=1).pack(side="top", fill="x")
-        self.body = tk.Frame(outer, bg=BG, height=self.px(330))
-        self.body.pack(side="top", fill="both", expand=True, pady=(self.px(14), 0))
+        # The smallest body the window keeps (minsize): wide enough for the Controls columns.
+        self.body = tk.Frame(outer, bg=BG, width=self.px(940), height=self.px(220))
+        self.body.pack(side="top", fill="both", expand=True, pady=(self.px(12), self.px(10)))
         self.body.pack_propagate(False)
-        # Pages taller than the space under the tabs scroll (Display, Performance, Advanced, Controls).
+        # Pages taller than the body scroll (Display, Performance, System, Controls).
         self.scroll_canvases = set()
         # 24 Oct 2026: bound once for the whole session. Capturing a key used to bind_all and then
         # unbind_all these sequences, which also removed the page scrolling until the launcher restarted.
@@ -1617,21 +1685,24 @@ class Launcher:
         self.root.bind_all("<KeyPress>", self.on_key)
         self.root.bind_all("<ButtonPress>", self.on_button)
         self.pages = {
-            "setup": self.page_setup(),
+            "home": self.page_setup(),
             "display": self.page_display(),
             "performance": self.page_performance(),
             "controls": self.page_controls(),
-            "cheats": self.page_cheats(),
-            "advanced": self.page_advanced(),
+            "gameplay": self.page_cheats(),
+            "system": self.page_advanced(),
         }
 
     def show_tab(self, name, save=True):
+        """Shows a section (old tab names map to theirs: section_name)."""
+        name = section_name(name)
         if save and self.config.get("tab") != name:
             self.config["tab"] = name
             write_config(self.config)
-        for tab, (text, bar) in self.tab_buttons.items():
-            text.config(fg=TEXT if tab == name else MUTED)
-            bar.config(bg=ACCENT if tab == name else BG)
+        self.section = name
+        for tab in self.tab_buttons:
+            self.draw_section(tab)
+        self.section_title.config(text=dict(SECTIONS)[name])
         for tab, page in self.pages.items():
             holder = getattr(page, "holder", page)
             if tab == name:
@@ -1671,8 +1742,8 @@ class Launcher:
     # -- pages ------------------------------------------------------------------------------
 
     def page(self, scroll=True):
-        """A tab's page: the frame its rows go in. With `scroll`, it scrolls (with a scrollbar)
-        when the rows are taller than the space under the tabs; show_tab packs its holder."""
+        """A section's page: the frame its rows go in. With `scroll`, it scrolls (with a scrollbar)
+        when the rows are taller than the body; show_tab packs its holder."""
         if not scroll:
             return tk.Frame(self.body, bg=BG)
         holder = tk.Frame(self.body, bg=BG)
@@ -1700,17 +1771,51 @@ class Launcher:
         inner.holder = holder
         return inner
 
+    def on_resize(self, widget, handler):
+        """handler(width) when the shown widget gets another width. Not while hidden: a page not
+        shown takes the width its rows ask for, so a handler that changes that would loop."""
+        def run(event=None):
+            if widget.winfo_viewable():  # winfo_ismapped is also true inside a page not shown
+                handler(widget.winfo_width())
+        widget.bind("<Configure>", run, add="+")
+        widget.bind("<Map>", run, add="+")
+
+    def wrap(self, label):
+        """The label's text wraps at the label's own width, which follows the window's."""
+        self.on_resize(label, lambda width: label.config(wraplength=max(1, width - self.px(4))))
+        return label
+
     def row(self, page, title, hint, control_factory):
+        """A setting: title and hint, the control right of them, or under them when it would take
+        more than 45% of the row (long choice lists, graphics card names); decided again whenever
+        the row's width changes."""
         row = tk.Frame(page, bg=BG)
         row.pack(side="top", fill="x", pady=(0, self.px(10)))
         text = tk.Frame(row, bg=BG)
-        text.pack(side="left", fill="x", expand=True)
         tk.Label(text, text=title, font=self.f_body_bold, bg=BG, fg=TEXT, anchor="w").pack(side="top", fill="x")
         if hint:
-            tk.Label(text, text=hint, font=self.f_small, bg=BG, fg=MUTED, anchor="w", justify="left",
-                     wraplength=self.px(560)).pack(side="top", fill="x")
+            self.wrap(tk.Label(text, text=hint, font=self.f_small, bg=BG, fg=MUTED, anchor="w", justify="left",
+                               wraplength=self.px(560))).pack(side="top", fill="x")
         control = control_factory(row)
-        control.pack(side="right", padx=(self.px(20), 0))
+        state = {"below": None}
+
+        def place(below):
+            state["below"] = below
+            text.pack_forget()
+            control.pack_forget()
+            if below:
+                text.pack(side="top", fill="x")
+                control.pack(side="top", anchor="w", pady=(self.px(6), 0))
+            else:  # the control first: the text takes what is left and wraps in it
+                control.pack(side="right", padx=(self.px(20), 0))
+                text.pack(side="left", fill="x", expand=True)
+
+        def resized(width):
+            below = control.winfo_reqwidth() > 0.45 * width
+            if below != state["below"]:
+                place(below)
+        place(False)
+        self.on_resize(row, resized)
         return control
 
     def ini_toggle(self, page, key, title, hint):
@@ -1721,27 +1826,40 @@ class Launcher:
 
     def ini_choice(self, page, key, title, hint, options, recommended=None):
         def factory(parent):
-            return Segmented(parent, options, self.ini.get(key, INI_DEFAULTS.get(key)), lambda v, k=key: self.change(k, v),
-                             self.f_small, recommended)
+            value, command = self.ini.get(key, INI_DEFAULTS.get(key)), lambda v, k=key: self.change(k, v)
+            if len(options) > 9:  # a menu for long lists (frame rate limits: 10, with Frame Generation 16)
+                return Dropdown(parent, [(o, f"{label}  ★" if o == recommended else label) for o, label in options],
+                                value, command, self.f_small)
+            return Segmented(parent, options, value, command, self.f_small, recommended)
         self.widgets[key] = self.row(page, title, hint, factory)
 
     def page_setup(self):
         page = self.page()
-        self.setup_intro = tk.Label(page, text="", font=self.f_body, bg=BG, fg=MUTED, anchor="w")
+        self.setup_intro = self.wrap(tk.Label(page, text="", font=self.f_body, bg=BG, fg=MUTED, anchor="w",
+                                              justify="left"))
         self.setup_intro.pack(side="top", fill="x", pady=(0, self.px(12)))
         grid = tk.Frame(page, bg=BG)
         grid.pack(side="top", fill="x")
         self.preset_cards = {}
-        gap = self.px(16)
-        card_w = (self.width - 2 * self.px(40) - 3 * gap) // 4
         card_h = self.px(150)
+
+        def resized(name, width):
+            canvas, w, h = self.preset_cards[name]
+            if width != w:
+                self.preset_cards[name] = (canvas, width, h)
+                self.draw_preset(name)
+        # Four cards that share the column's width (spacer columns between them).
         for i, name in enumerate(PRESET_ORDER):
-            canvas = tk.Canvas(grid, width=card_w, height=card_h, bg=BG, highlightthickness=0, cursor="hand2")
-            canvas.grid(row=0, column=i, padx=(0 if i == 0 else gap, 0))
+            canvas = tk.Canvas(grid, width=self.px(150), height=card_h, bg=BG, highlightthickness=0, cursor="hand2")
+            canvas.grid(row=0, column=2 * i, sticky="ew")
+            grid.columnconfigure(2 * i, weight=1, uniform="preset")
+            if i:
+                grid.columnconfigure(2 * i - 1, minsize=self.px(16))
             canvas.bind("<Button-1>", lambda e, n=name: self.apply_preset(n))
             canvas.bind("<Enter>", lambda e, n=name: self.draw_preset(n, hover=True))
             canvas.bind("<Leave>", lambda e, n=name: self.draw_preset(n))
-            self.preset_cards[name] = (canvas, card_w, card_h)
+            canvas.bind("<Configure>", lambda e, n=name: resized(n, e.width))
+            self.preset_cards[name] = (canvas, self.px(150), card_h)
         self.custom_note = tk.Label(page, text="", font=self.f_small, bg=BG, fg=MUTED, anchor="w")
         self.custom_note.pack(side="top", fill="x", pady=(self.px(10), 0))
         self.root.after_idle(self.redraw_presets)
@@ -1794,7 +1912,7 @@ class Launcher:
             widget = self.widgets.get(key)
             if isinstance(widget, Toggle):
                 widget.set(value == "1")
-            elif isinstance(widget, Segmented):
+            elif isinstance(widget, (Segmented, Dropdown)):
                 widget.set(value)
         self.sync_sharpening()
         settings["preset"] = name
@@ -2050,11 +2168,11 @@ class Launcher:
         tk.Label(icons, text="Auto follows the device you play with (a controller's own buttons).",
                  font=self.f_small, bg=BG,
                  fg=MUTED).pack(side="left")
-        self.controls_hint = tk.Label(
+        self.controls_hint = self.wrap(tk.Label(
             page, text="Click a slot, then press a key or a mouse button (right-click a slot to clear it). "
                        "In game the mouse is captured; Alt+Tab or Insert (menu) frees it. A controller "
                        "always works too.", font=self.f_small, bg=BG, fg=MUTED, anchor="w", justify="left",
-            wraplength=self.px(1080))
+            wraplength=self.px(800)))
         self.controls_hint.pack(side="top", fill="x", pady=(self.px(6), self.px(4)))
         holder = tk.Frame(page, bg=BG)
         holder.pack(side="top", fill="both", expand=True)
@@ -2379,8 +2497,8 @@ class Launcher:
         self.game_dir_label = tk.Label(page, text=f"Game files: {self.game_dir()}", font=self.f_small,
                                        bg=BG, fg=DIM, anchor="w")
         self.game_dir_label.pack(side="top", fill="x", pady=(self.px(6), 0))
-        self.update_label = tk.Label(page, text=self.update_text(), font=self.f_small, bg=BG, fg=DIM,
-                                     anchor="w", justify="left")
+        self.update_label = self.wrap(tk.Label(page, text=self.update_text(), font=self.f_small, bg=BG, fg=DIM,
+                                               anchor="w", justify="left", wraplength=self.px(800)))
         self.update_label.pack(side="top", fill="x")
         self.ini_label = tk.Label(page, text=f"Settings: {ini_file(self.config['game'])}", font=self.f_small,
                                   bg=BG, fg=DIM, anchor="w")
@@ -2391,9 +2509,8 @@ class Launcher:
         section("TROUBLESHOOTING", (("Check for updates", lambda: self.check_updates(manual=True)),
                                     ("Clear shader cache", self.clear_cache), ("Reset this game's settings", self.reset)))
         # Credits for the anti-aliasing technologies (NVIDIA's DLSS license asks for its attribution).
-        tk.Label(page, text=CREDITS, font=self.f_small, bg=BG, fg=DIM, anchor="w", justify="left",
-                 wraplength=self.width - 2 * self.px(40) - self.px(30)).pack(side="top", fill="x",
-                                                                              pady=(self.px(10), 0))
+        self.wrap(tk.Label(page, text=CREDITS, font=self.f_small, bg=BG, fg=DIM, anchor="w", justify="left",
+                           wraplength=self.px(800))).pack(side="top", fill="x", pady=(self.px(10), 0))
         return page
 
     def flat_button(self, parent, label, action):
@@ -2407,13 +2524,12 @@ class Launcher:
     # -- footer -----------------------------------------------------------------------------
 
     def build_footer(self):
-        footer = tk.Frame(self.root, bg=PANEL)
+        footer = tk.Frame(self.main, bg=PANEL)
         footer.pack(side="bottom", fill="x")
-        tk.Frame(self.root, bg=LINE, height=1).pack(side="bottom", fill="x")
+        tk.Frame(self.main, bg=LINE, height=1).pack(side="bottom", fill="x")
         inner = tk.Frame(footer, bg=PANEL)
-        inner.pack(fill="x", padx=self.px(40), pady=self.px(14))
+        inner.pack(fill="x", padx=self.px(28), pady=self.px(12))
         left = tk.Frame(inner, bg=PANEL)
-        left.pack(side="left", fill="x", expand=True)
         self.status = tk.Label(left, text="", font=self.f_body_bold, bg=PANEL, fg=TEXT, anchor="w")
         self.status.pack(side="top", fill="x")
         self.substatus = tk.Label(left, text="Insert or R3 + L2 in game opens the menu.", font=self.f_small,
@@ -2426,6 +2542,8 @@ class Launcher:
         self.play_button.bind("<Enter>", lambda e: self.draw_play(hover=True))
         self.play_button.bind("<Leave>", lambda e: self.draw_play())
         self.draw_play()
+        # After PLAY: a long status line is cut, never the button.
+        left.pack(side="left", fill="x", expand=True)
         self.update_button = tk.Label(inner, text="UPDATE", font=self.f_body_bold, bg=PANEL_HI, fg=ACCENT,
                                       padx=self.px(16), pady=self.px(10), cursor="hand2",
                                       highlightthickness=1, highlightbackground=ACCENT)
@@ -2480,7 +2598,7 @@ class Launcher:
             self.update_release = release
             version = updater.version_text(release["version"])
             self.update_button.config(text=f"UPDATE TO {version}")
-            self.update_button.pack(side="right", padx=(0, self.px(14)))
+            self.update_button.pack(side="right", padx=(0, self.px(14)), before=self.status.master)
             if not self.process:
                 self.set_status(f"Version {version} is available.",
                                 "UPDATE installs it: saves and settings are kept, the launcher restarts.")
@@ -2760,7 +2878,7 @@ class Launcher:
         return messagebox.askokcancel(
             APP_TITLE, "Your game update folder has missing or damaged files:\n\n" + "\n".join(problems[:6]) +
             f"\n\n{update}\n\nThe games will probably stop at start. Extract the update again (or use Install "
-            "from .pkg under Advanced -> GAME UPDATE). Play anyway?")
+            "from .pkg under System -> GAME UPDATE). Play anyway?")
 
     def confirm_without_update(self):
         """Without update 1.02 most of the port's game fixes (crash fixes among them) are skipped:
@@ -2775,7 +2893,7 @@ class Launcher:
                 APP_TITLE, f"Your game is version {version.lstrip('0')}, without update 1.02.\n\n"
                 "Most of this port's fixes, crash fixes among them, are written for update 1.02, so "
                 "without it the games crash more often.\n\nDump update 1.02 from your PS4 and extract it "
-                f"next to the game folder as {title.name}-patch (the Advanced tab then shows it).\n\n"
+                f"next to the game folder as {title.name}-patch (the System section then shows it).\n\n"
                 "Play anyway?"):
             return False
         self.config["warned_no_update"] = str(folder)
@@ -2843,7 +2961,7 @@ class Launcher:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL), daemon=True).start()
         self.set_status("Stopping the game...")
 
-    # -- advanced actions -------------------------------------------------------------------
+    # -- system actions ---------------------------------------------------------------------
 
     def open_logs(self):
         log = self.latest_log()
@@ -3019,7 +3137,7 @@ class Launcher:
                 messagebox.showerror(APP_TITLE, f"The game was not installed:\n{state['error']}")
             else:
                 messagebox.showinfo(APP_TITLE, f"Game installed:\n{state['path']}\n\nIt is the game folder now. "
-                                               "Next, install update 1.02: GAME UPDATE -> Install from .pkg.")
+                                               "Next, install update 1.02: System -> GAME UPDATE -> Install from .pkg.")
         poll()
 
     def in_background(self, work, done):

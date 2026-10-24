@@ -6,6 +6,14 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Changed (24 Oct 2026): launcher layout.** The games and the settings sections are now in a
+  sidebar on the left, with the selected game's name in a smaller banner and PLAY always at the
+  bottom right. The sections were renamed: Quick Setup is now Home, Cheats is now Gameplay and
+  Advanced is now System (the launcher opens the section you used last). The window fits a
+  1280x720 screen (1080p at 150% scaling); on a short screen the settings scroll and PLAY stays in
+  view. Long hints wrap to the window's width, and choices with many options (the frame rate
+  limit) are a menu.
+
 - **Fixed (24 Oct 2026): launcher.** The mouse wheel no longer stops scrolling the pages after you
   rebind a control. Reset (now "Reset this game's settings" under Advanced) also puts the
   keyboard, mouse and controller controls back to the defaults; before, they came back the next

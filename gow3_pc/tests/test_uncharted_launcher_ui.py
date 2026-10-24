@@ -64,12 +64,24 @@ class LauncherUiTest(unittest.TestCase):
             time.sleep(0.01)
         return until()
 
-    def test_builds_and_every_tab_shows(self):
+    def test_builds_and_every_section_shows(self):
         self.assertEqual(set(self.launcher.pages),
-                         {"setup", "display", "performance", "controls", "cheats", "advanced"})
+                         {"home", "display", "performance", "controls", "gameplay", "system"})
         for name in self.launcher.pages:
             self.launcher.show_tab(name, save=False)
             self.root.update()
+            self.assertEqual(self.launcher.section, name)
+
+    def test_old_tab_names_map_to_sections(self):
+        mod = uncharted_launcher
+        for old, new in (("setup", "home"), ("cheats", "gameplay"), ("advanced", "system"),
+                         ("display", "display"), ("nonsense", "home"), (None, "home")):
+            self.assertEqual(mod.section_name(old), new)
+        mod.CONFIG_FILE.write_text('{"version": 8, "tab": "advanced"}', encoding="utf-8")
+        self.assertEqual(mod.read_config()["tab"], "system")
+        self.launcher.show_tab("setup")
+        self.assertEqual(self.launcher.section, "home")
+        self.assertEqual(self.launcher.config["tab"], "home")
 
     def test_change_reaches_the_games_ini(self):
         game = self.launcher.config["game"]
