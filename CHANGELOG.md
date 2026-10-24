@@ -6,13 +6,6 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
-- **Fixed (24 Oct 2026): Uncharted 1's treasure models in the Treasures screen load again.** The
-  Uncharted 3 crowd speed-up from the same day (mesh snapshots) was on in every game; it now runs
-  in Uncharted 3 only, as Uncharted 1 and 2 had it before. Uncharted 1's treasure models are
-  skinned by the same compute shader, so that speed-up is the suspected cause (not confirmed in
-  game). To turn it on for Uncharted 1 or 2, set `GOW3_STATIC_MESH_SNAPSHOTS=1` and
-  `GOW3_DISPATCH_RUNS=1` in `analysis/uncharted-user/test-env.txt`.
-
 - **24 Oct 2026: Uncharted 3's Cartagena market street (chapter 2) runs about 10-12% faster.**
   The street's crowd made the port prepare about 1,500 tiny skinning jobs a frame one by one,
   which kept the processor, not the graphics card, as the limit. They now go to the graphics card

@@ -1418,12 +1418,8 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     # runs (live A/B 84.4 vs 78.6 real FPS), and the crowd's mesh inputs stay in an append-only
     # buffer instead of the constant ring (+1.3 FPS with runs). Disabled2 bits 40 and 35 turn them
     # off live; "=0" here turns them off at start.
-    # Only U3 (24 Oct 2026): U1's Treasures-screen models are skinned by the same cs 8f067540, which
-    # the snapshots hook; U1 and U2 keep them off unless GOW3_STATIC_MESH_SNAPSHOTS=1 /
-    # GOW3_DISPATCH_RUNS=1 is set in the environment or test-env.txt.
-    if executable == "big3-ps4_Shipping.elf":
-        env.setdefault("GOW3_DISPATCH_RUNS", "1")
-        env.setdefault("GOW3_STATIC_MESH_SNAPSHOTS", "1")
+    env.setdefault("GOW3_DISPATCH_RUNS", "1")
+    env.setdefault("GOW3_STATIC_MESH_SNAPSHOTS", "1")
     # No pipeline binaries (24 Oct 2026). Each pipeline made from one kept its ~2 MB in memory:
     # Uncharted 2 used 15.5 GB of RAM with them and 7.0 GB without, and loaded its pipelines in
     # 40 s instead of 9.6 s (the graphics driver's own shader cache does the job, faster).
