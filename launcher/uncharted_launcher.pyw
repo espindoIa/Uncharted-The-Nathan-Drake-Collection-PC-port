@@ -1083,6 +1083,10 @@ RESOLUTIONS = [("960x540", "540p"), ("1280x720", "720p"), ("1600x900", "900p"), 
 # 1280x800): the render resolution's width, taller; the games keep the 16:9 width of view and
 # show more at the top and bottom.
 ASPECTS = [("16:10", "16:10"), ("16:9", "16:9"), ("21:9", "21:9"), ("32:9", "32:9")]
+# Uncharted 2 at 21:9 / 32:9 (tools/probe_uncharted.py hud_layout): its HUD and menus in the
+# centred 16:9 area, in it with the side elements at the screen edges, or the game's own stretch.
+HUD_WIDE_AREAS = [("screen", "Screen edges"), ("21:9", "21:9"), ("32:9", "32:9")]
+HUD_MODES = [("16:9", "16:9"), ("wide", "Wide"), ("stretch", "Stretched")]
 ASPECT_WIDTHS = {"16:10": 16 / 10, "16:9": 16 / 9, "21:9": 64 / 27, "32:9": 32 / 9}
 
 
@@ -2760,9 +2764,30 @@ class Launcher:
             "the sides and the same view top to bottom as on a 16:9 screen. 16:10 (Steam Deck: 800p is "
             "1280x800) fills the screen and shows more at the top and bottom.", aspect,
             short="Match your monitor's shape: ultrawide shows more at the sides, 16:10 more top and bottom.")
+
         self.render_size_note = tk.Label(page, text="", font=self.f_small, bg=BG, fg=ACCENT, anchor="w")
         self.render_size_note.pack(side="top", fill="x", pady=(0, self.px(10)))
         self.refresh_render_size()
+
+        def hud(parent):
+            return Segmented(parent, HUD_MODES, self.config.get("hud", "16:9"),
+                             lambda value: self.change_config("hud", value), self.f_small)
+        self.widgets["hud"] = self.row(
+            page, "HUD (Uncharted 2, ultrawide)",
+            "At 21:9 and 32:9: 16:9 keeps the HUD and menus in the middle 16:9 of the screen; Wide "
+            "moves the corner elements (ammo, prompts at the sides) out to the screen edges, the rest "
+            "stays in the middle (experimental); Stretched is the game's own, stretched to the sides.",
+            hud, short="Ultrawide: keep the HUD and menus in the middle 16:9, or move side elements out.")
+
+        def hud_wide(parent):
+            return Segmented(parent, HUD_WIDE_AREAS, self.config.get("hud_wide_aspect", "screen"),
+                             lambda value: self.change_config("hud_wide_aspect", value),
+                             self.f_small)
+        self.widgets["hud_wide_aspect"] = self.row(
+            page, "Wide HUD edges",
+            "With HUD Wide: where the side elements go \u2014 the screen's edges, or the edges of a "
+            "21:9 area (closer in on a 32:9 screen).",
+            hud_wide, short="With HUD Wide: how far out the side elements go.")
         self.ini_choice(page, "upscaler", "Anti-aliasing",
                         "Smooths jagged, shimmering edges. TAA is the lightest; FSR and DLSS (NVIDIA RTX "
                         "cards) keep the most detail. Also in the in-game menu, where it changes at once.",
@@ -3974,6 +3999,8 @@ class Launcher:
         env["UNCHARTED_U3_EXPOSURE"] = str(self.config.get("u3_exposure", "0"))
         env["UNCHARTED_UNLOCK"] = "1" if self.config.get("unlock", False) else "0"
         env["UNCHARTED_UNLOCK_REWARDS"] = "1" if self.config.get("unlock_rewards", False) else "0"
+        env["UNCHARTED_HUD"] = str(self.config.get("hud", "16:9"))
+        env["UNCHARTED_HUD_WIDE_ASPECT"] = str(self.config.get("hud_wide_aspect", "screen"))
         if self.chosen_update():
             env["UNCHARTED_UPDATE"] = str(self.chosen_update())  # tools/probe_uncharted.py find_update
         env["UNCHARTED_CHEATS"] = ",".join(name for name, *_ in CHEATS if self.config.get("cheat_" + name, False))

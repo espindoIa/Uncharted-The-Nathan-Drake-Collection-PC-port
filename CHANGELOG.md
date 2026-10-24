@@ -6,6 +6,16 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Uncharted 2 ultrawide: the HUD and menus are no longer stretched** (26 October; from
+  feros's fork, upstream PR #191; launcher -> Display -> HUD). At 21:9 and 32:9, **16:9** (the
+  default) draws them in the middle 16:9 of the screen; full-screen fades and backdrops still
+  cover the whole screen. **Wide** (experimental) puts the in-game HUD elements that lie in a
+  side third of the HUD (ammo, side prompts) at the screen edges and keeps the rest in the
+  middle; menus stay 16:9. **Wide HUD edges** (Screen edges, 21:9, 32:9) sets the area those side
+  elements fill. **Stretched** is the game's own. Each HUD draw is placed by where its own
+  vertices lie; no game code is changed for it. Environment: `UNCHARTED_HUD` (`16:9`, `wide`,
+  `stretch`) and `UNCHARTED_HUD_WIDE_ASPECT` (`screen`, `21:9`, `32:9`). Not tested in game.
+
 - **Merged BilalReloaded's 0.6.1, 0.6.2 and 0.7.0 (26 October).** Their notes are in the subsection
   "From BilalReloaded's 0.6.1, 0.6.2 and 0.7.0" below; the package version is now 0.7.0. Where
   the fork differs: the launcher's new **IGPU** preset (integrated graphics) draws at 540p, or 720p
