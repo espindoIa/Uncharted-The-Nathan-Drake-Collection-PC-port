@@ -6,6 +6,13 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **24 Oct 2026: with DLSS/DLAA, FSR or TAA on, the game's own FXAA no longer blurs the picture
+  and the HUD a second time.** The upscaler already anti-aliases the image; the game's last
+  full-screen pass then softened it again. The pass is skipped while an upscaler is active;
+  with the upscaler off the game keeps its FXAA. For the old look, set bit 1099511627776 in the
+  second number of `analysis/uncharted-user/disabled-optimizations.txt` (live). Not tested in
+  game yet (measurement follows).
+
 - **Fixed (24 Oct 2026): in Uncharted 3, young Sully's shirt in chapter 2 (Cartagena chase) no
   longer stretches into a long strip down to his knees.** The cloth shader read and wrote past
   the shared memory the game reserves for it; the PS4 ignores such accesses, NVIDIA cards did

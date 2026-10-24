@@ -28,6 +28,7 @@ New entries go at the end, dated, measured numbers only.
 - U3 market stutter and CPU work (earlier 23 Oct benchmarks stood at the save's gate): `Cartagena market: stutter and lower frame rate from readback faults (23 Oct 2026)`.
 - Structural crowd experiments and exact rollback: `Structural crowd snapshots and output grouping (23 Oct 2026)`.
 - Market frame rate = Reflex sleep, pacer replaces it: `Reflex pacer: market frame rate (24 Oct 2026)`
+- Game FXAA skipped under temporal AA: `Game FXAA skipped under temporal AA (24 Oct 2026)`
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
@@ -4205,3 +4206,25 @@ into u32 halves are checked per half.
 
 Not verified: U1/U2, other U3 scenes, performance A/B of the extra compare/select per LDS access,
 AMD GPUs.
+
+## Game FXAA skipped under temporal AA (24 Oct 2026)
+
+Evidence: U2 capture C:\dev\cap\frame_20261017-214933_3.txt, passes #54-#56. #54 (ps 484cdbf5 plus
+HUD draws) writes the frame into the display buffer (R8G8B8A8Srgb). #55 (ps 6bd1e015) copies it
+into a temp RGBA8Unorm with luma in alpha. #56 (ps 749bbec9) is FXAA 3.11 quality 39 (subpix
+0.75, edge thresholds 0.166/0.0833; decompiled from the shader dumps) and writes back into the
+display buffer. Same hash in the U1/U2/U3 caches. The port's upscaler runs earlier, at cs
+aec539f0 on the HDR scene, so FXAA softened an already anti-aliased image and the HUD.
+
+Design: tools/probe_uncharted.py sets GOW3_GAME_AA_PS=749bbec9 in the temporal-AA branch.
+TemporalUpscaler::SkipsGameAa(ps_hash) is true when it matches, Active(), !composite_frames and
+Disabled2(GameFxaa) is clear. The rasterizer's draw returns right after the OnComposite block when
+the draw's colour target is a display buffer and SkipsGameAa is true (bind_prepared cleared as in
+the OnComposite return); the frame-start gate is unchanged. #54's image stays in the display
+buffer; only alpha differs (0 instead of luma). The presenter ignores display alpha:
+vk_presenter.cpp:799 (view alpha swizzle eOne) and :810 (same on the upscaled path), swapchain
+composite alpha opaque (vk_swapchain.cpp:359); post_process.frag passes alpha through but sees 1.
+Toggle: Disabled2 bit GameFxaa = 1 << 40 (1099511627776). Bit 1 << 31 (2147483648) is already
+RingAssociative, so it could not be used. Set = the game's FXAA runs.
+
+Not verified: in-game A/B (pending), U1/U2/menu.

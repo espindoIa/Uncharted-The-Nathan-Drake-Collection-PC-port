@@ -1173,6 +1173,10 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
             # depth natively in every draw, and resolving its proxy each time cost more than it saved.
             env.setdefault("GOW3_SCENE_HALF_RES", "0")
         env.setdefault("GOW3_UPSCALE_BEFORE_CS", "aec539f0")
+        # 24 Oct 2026: the game's FXAA 3.11 (ps 749bbec9, last draw into the display buffer, same
+        # hash in U1/U2/U3) is skipped under a temporal AA: it softened the already anti-aliased
+        # image and the HUD. Toggle bit GameFxaa (second number) brings it back live.
+        env.setdefault("GOW3_GAME_AA_PS", "749bbec9")
         # Full-screen passes that rebuild positions from the jittered scene depth get the jitter
         # too: the sun shadow pass, shared by the three games (its shadows flickered under TAA,
         # FSR and DLAA; Supermedo/uncharted_pc #261).

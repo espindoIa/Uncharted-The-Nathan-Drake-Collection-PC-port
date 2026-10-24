@@ -233,6 +233,9 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     if (const char* ps = std::getenv("GOW3_UI_TONEMAP_PS")) {
         tonemap_ps = u32(std::strtoull(ps, nullptr, 16));
     }
+    if (const char* ps = std::getenv("GOW3_GAME_AA_PS")) {
+        game_aa_ps = u32(std::strtoull(ps, nullptr, 16));
+    }
     composite_frames = enabled && scaled_session && composite_ps && camera_motion.VelocityMode() &&
                        (render_width < target_width || render_height < target_height);
     if (composite_frames) {
@@ -265,6 +268,19 @@ bool TemporalUpscaler::Active() const {
             Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa ||
             Gow3Settings::Get().upscaler == Gow3Settings::UpscalerDlss) &&
            !Gow3Toggle::Disabled(1u << 24);
+}
+
+bool TemporalUpscaler::SkipsGameAa(u64 ps_hash) const {
+    if (!game_aa_ps || ps_hash != game_aa_ps || composite_frames || !Active() ||
+        Gow3Toggle::Disabled2(Gow3Toggle::GameFxaa)) {
+        return false;
+    }
+    if (!game_aa_logged) {
+        game_aa_logged = true;
+        std::printf("Upscaler: the game's FXAA (ps %08llx) is skipped\n",
+                    static_cast<unsigned long long>(ps_hash));
+    }
+    return true;
 }
 
 bool TemporalUpscaler::ReactiveOn() const {

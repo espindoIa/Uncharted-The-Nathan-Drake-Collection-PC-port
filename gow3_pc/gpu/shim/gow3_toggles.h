@@ -237,6 +237,11 @@ enum : std::uint64_t {
     /// Set: Reflex uses the driver's/Streamline's sleep (old behaviour). Clear: the GPU-gated pacer
     /// (the guest waits until the GPU finished frame id - lag; default).
     ReflexPacer = 1ull << 39,
+    /// 24 Oct 2026: with a temporal AA on (DLSS/DLAA, FSR, TAA) the game's own FXAA draw
+    /// (GOW3_GAME_AA_PS, 749bbec9) is skipped: the upscaler already anti-aliased the image and
+    /// FXAA blurred it and the HUD a second time. Set: the game's FXAA runs (old behaviour).
+    /// Not 1 << 31: that bit is RingAssociative.
+    GameFxaa = 1ull << 40,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

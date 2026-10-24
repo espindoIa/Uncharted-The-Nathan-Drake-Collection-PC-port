@@ -3422,6 +3422,14 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         frame_start();           // the guest's copy is replaced by the upscale
         return;
     }
+    // 24 Oct 2026: the game's FXAA (last draw into the display buffer) is skipped under a
+    // temporal AA; the image from the draw before it stays in the display buffer.
+    if (fragment && regs.color_buffers[0] &&
+        FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address()) &&
+        upscaler->SkipsGameAa(fragment->pgm_hash)) {
+        bind_prepared = nullptr;
+        return;
+    }
     if (upscaler->Enabled() && std::popcount(pipeline->GetGraphicsKey().mrt_mask) == 1) {
         const auto& viewport = Regs().viewports[0];
         upscaler->OnDraw(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
