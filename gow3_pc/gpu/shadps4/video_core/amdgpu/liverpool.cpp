@@ -1109,17 +1109,25 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
         });
 }
 
+// gow3 24 Oct 2026: das (destination address space: memory or register) only applies when the
+// destination is an address (dst_sel Memory/MemoryUsingL2); with dst_sel Gds it has no meaning
+// and the packet must still run. The 21 Oct skip dropped every das != 0 packet.
+static bool DmaDstIsRegister(const PM4DmaData* d) {
+    return d->command.das != 0 &&
+           (d->dst_sel == DmaDataDst::Memory || d->dst_sel == DmaDataDst::MemoryUsingL2);
+}
+
 void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const Vulkan::GpuWriteSite site{4};
     const auto* dma_data = reinterpret_cast<const PM4DmaData*>(data);
     // gow3 21 Oct 2026: upstream shadPS4 dropped the das == 0 assert, which stopped the port with
     // exit code 23. With das set the destination is a register offset, not guest memory: writing
     // it as an address would hit a bogus low address, so the packet is skipped.
-    if (dma_data->command.das != 0) {
+    if (DmaDstIsRegister(dma_data)) {
         static bool logged = false;
         if (!std::exchange(logged, true)) {
-            std::printf("gow3: DMA_DATA to a register address space skipped (das=%u)\n",
-                        u32(dma_data->command.das));
+            std::printf("gow3: DMA_DATA to a register address space skipped (das=%u dst_sel=%u)\n",
+                        u32(dma_data->command.das), u32(dma_data->dst_sel));
         }
         return;
     }
@@ -2234,7 +2242,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 // written to note.
                 if (rasterizer->RunInOrder(&RunDmaData, dma_data, sizeof(PM4DmaData),
                                            Gow3Toggle::PipelinedMemoryWrites, true) &&
-                    dma_data->command.das == 0 &&
+                    !DmaDstIsRegister(dma_data) &&
                     (dma_data->dst_sel == DmaDataDst::Memory ||
                      dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
                     rasterizer->NotePendingGpuWrite(dma_data->DstAddress<VAddr>(),
@@ -2673,11 +2681,11 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 break;
             }
             // gow3 21 Oct 2026: as in RunDmaData, a register destination is skipped, not asserted.
-            if (dma_data->command.das != 0) {
+            if (DmaDstIsRegister(dma_data)) {
                 static bool logged = false;
                 if (!std::exchange(logged, true)) {
-                    std::printf("gow3: DMA_DATA to a register address space skipped (das=%u)\n",
-                                u32(dma_data->command.das));
+                    std::printf("gow3: DMA_DATA to a register address space skipped (das=%u dst_sel=%u)\n",
+                                u32(dma_data->command.das), u32(dma_data->dst_sel));
                 }
                 break;
             }

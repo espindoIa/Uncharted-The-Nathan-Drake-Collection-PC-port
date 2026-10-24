@@ -3646,3 +3646,11 @@ Mechanism: `GpuRangesAdd` returns early on a `gpu_add_cache` hit (same address a
 Fix: the entry-clearing loop of `GpuRangesSubtract` is now `GpuAddCacheDrop(address, size)` (caller holds `gpu_ranges_mutex`). `GpuRangesSubtract` calls it after Subtract; `DiscardCpuWritePage` calls it with `(page, 4096)` right after its Subtract, inside the same lock block. No other behaviour change.
 
 Not verified: no game run; never observed (found by static review).
+
+## 24 October 2026: DMA_DATA skip only for address destinations
+
+Mechanism: commit e1df90a replaced `ASSERT(das == 0)` with a skip of every DMA_DATA packet whose `command.das` is set (RunDmaData, the graphics caller's NotePendingGpuWrite guard, the compute queue case). Per the AMD PM4 spec DAS (destination address space: memory or register) only applies when the destination is an address (dst_sel Memory or MemoryUsingL2). With dst_sel Gds it has no meaning and the packet must run, but the skip dropped such a GDS write silently.
+
+Fix: file-local `DmaDstIsRegister(d)` in liverpool.cpp returns `das != 0 && dst_sel in {Memory, MemoryUsingL2}`. RunDmaData and the compute case skip on it; the graphics caller's guard is `!DmaDstIsRegister(...)`. The once-only log now prints dst_sel too. Packets with dst_sel Gds run as before e1df90a. No other behaviour change.
+
+Not verified: no game run; no Uncharted scene known to send das=1.

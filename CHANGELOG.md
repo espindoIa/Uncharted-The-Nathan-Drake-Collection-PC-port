@@ -6,6 +6,8 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Uncharted: a GPU copy into the shader-engine scratch memory (GDS) that carried a register flag
+  is no longer dropped.** Found by code review, no known scene sends it, not tested in game.
 - **Uncharted: after a file read replaced a page that held GPU data, a later GPU write to the same
   place could be forgotten, so the old bytes could be shown.** Found by code review, not seen in
   game, not tested in game.
