@@ -739,6 +739,21 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
                                        std::move(spv));
 }
 
+std::vector<u32> LoadBatchComputeBinary(u64 pgm_hash, u64 compute_key) {
+    // Opt-in crowd prototype only. Resolve the cached permutation once per host pipeline;
+    // never invent a shader binary or modify the persistent shader/pipeline cache.
+    std::vector<u32> binary;
+    if (pgm_hash != 0x8f067540 || !Storage::DataBase::Instance().IsOpened()) return binary;
+    for (u64 permutation = 0; permutation < 4096; ++permutation) {
+        if (HashCombine(pgm_hash, permutation) == compute_key) {
+            Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
+                Serialization::ShaderBinaryName(pgm_hash, permutation), binary);
+            break;
+        }
+    }
+    return binary;
+}
+
 // gow3 21 Oct 2026: a cache entry that cannot be read (truncated by a game that ended during a
 // write, a bad disk sector) is a cache miss and the pipeline compiles at run time. The serializer's
 // assertion used to end the port with exit code 23 on it. Only the first one is logged; WarmUp and

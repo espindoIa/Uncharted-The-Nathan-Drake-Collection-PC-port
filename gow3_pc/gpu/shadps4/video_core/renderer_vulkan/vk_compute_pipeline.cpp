@@ -7,6 +7,9 @@
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_dispatch_batch_spirv.h"
+#include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
+#include "video_core/renderer_vulkan/vk_shader_util.h"
 
 namespace Vulkan {
 
@@ -115,5 +118,62 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
 }
 
 ComputePipeline::~ComputePipeline() = default;
+
+bool ComputePipeline::EnsureBatchPipeline() const {
+    if (batch_attempted) return bool(batch_pipeline);
+    batch_attempted = true;
+    const auto& info = GetStage(Shader::SwStage::Compute);
+    const u32 bindings = info.buffers.size() + 1; // extra array replaces PushData
+    const auto limits = instance.GetPhysicalDevice().getProperties().limits;
+    if (info.pgm_hash != 0x8f067540 || info.buffers.size() != 10 ||
+        !info.images.empty() || !info.samplers.empty() ||
+        !instance.SupportsStorageBufferArrayIndexing() ||
+        bindings * BatchCapacity > limits.maxPerStageDescriptorStorageBuffers ||
+        bindings * BatchCapacity > limits.maxDescriptorSetStorageBuffers ||
+        bindings * BatchCapacity > limits.maxPerStageResources) return false;
+    for (u32 i = 0; i < 9; ++i) {
+        if (info.buffers[i].IsSpecial() || bool(info.buffers[i].is_written) != (i >= 6))
+            return false;
+    }
+    if (info.buffers[9].buffer_type != Shader::BufferType::Flatbuf) return false;
+    const auto binary = LoadBatchComputeBinary(info.pgm_hash, compute_key.value);
+    std::string problem;
+    const auto batch = MakeDispatchBatchSpirv(binary, BatchCapacity, info.buffers.size(), problem);
+    if (batch.empty()) {
+        std::printf("Dispatch fusion: shader %llx not eligible: %s\n", info.pgm_hash, problem.c_str());
+        return false;
+    }
+    const auto device = instance.GetDevice();
+    const vk::ShaderModule module = CompileSPV(batch, device);
+    std::vector<vk::DescriptorSetLayoutBinding> layout_bindings;
+    for (u32 binding = 0; binding < bindings; ++binding) {
+        layout_bindings.push_back({.binding = binding, .descriptorType = vk::DescriptorType::eStorageBuffer,
+            .descriptorCount = BatchCapacity, .stageFlags = vk::ShaderStageFlagBits::eCompute});
+    }
+    auto [desc_result, descriptors] = device.createDescriptorSetLayoutUnique(
+        {.bindingCount = bindings, .pBindings = layout_bindings.data()});
+    if (desc_result != vk::Result::eSuccess) { device.destroyShaderModule(module); return false; }
+    batch_descriptors = std::move(descriptors);
+    const vk::DescriptorSetLayout descriptor_layout = *batch_descriptors;
+    auto [layout_result, layout] = device.createPipelineLayoutUnique(
+        {.setLayoutCount = 1, .pSetLayouts = &descriptor_layout});
+    if (layout_result != vk::Result::eSuccess) { device.destroyShaderModule(module); return false; }
+    batch_layout = std::move(layout);
+    const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup{.requiredSubgroupSize = 64};
+    const vk::PipelineShaderStageCreateInfo shader{
+        .pNext = instance.IsSubgroupSize64Supported() ? &subgroup : nullptr,
+        .stage = vk::ShaderStageFlagBits::eCompute, .module = module, .pName = "main"};
+    auto [result, pipeline] = device.createComputePipelineUnique({}, {.stage = shader, .layout = *batch_layout});
+    device.destroyShaderModule(module);
+    if (result != vk::Result::eSuccess) return false;
+    batch_pipeline = std::move(pipeline);
+    std::printf("Dispatch fusion: shader %llx validated, %u instances per dispatch, %u bindings\n",
+                info.pgm_hash, BatchCapacity, bindings);
+    return true;
+}
+
+vk::DescriptorSet ComputePipeline::BatchDescriptorSet() const {
+    return desc_heap.Commit(*batch_descriptors);
+}
 
 } // namespace Vulkan

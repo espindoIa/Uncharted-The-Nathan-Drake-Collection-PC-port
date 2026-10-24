@@ -231,6 +231,9 @@ enum : std::uint64_t {
     /// Opt-in (GOW3_FORWARD_COPY_DEFER=1, also needs forwarded copies): protect a memcpy
     /// destination before returning, but submit with normal work unless the CPU consumes it.
     ForwardCopyDefer = 1ull << 37,
+    /// Opt-in (GOW3_DISPATCH_FUSION=1): one crowd workgroup per mesh instance, batched as Y
+    /// groups with per-instance descriptor/push-data arrays. Set: one dispatch per instance.
+    DispatchFusion = 1ull << 38,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

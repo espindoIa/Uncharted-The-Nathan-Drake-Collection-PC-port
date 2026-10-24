@@ -282,6 +282,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
 }
 
 Rasterizer::~Rasterizer() {
+    if (draw_pipe) draw_pipe->Drain();
+    scheduler.FlushDeferredRecord(); // callback must not outlive this rasterizer
     liverpool->SetComputePrecompileHook({}); // before the pipeline cache goes
     Shader::g_srt_pre_walk = nullptr;
 }
@@ -4024,6 +4026,115 @@ void Rasterizer::DispatchDirect() {
     DispatchRecord(pipeline);
 }
 
+bool Rasterizer::AppendSkinningBatch(const ComputePipeline* pipeline) {
+    static const bool requested = [] {
+        const char* env = std::getenv("GOW3_DISPATCH_FUSION");
+        return env && env[0] == '1';
+    }();
+    if (!requested || Gow3Toggle::Disabled2(Gow3Toggle::DispatchFusion) ||
+        !UseDrawPipe() || !DrawPipe::OnStageB() || GpuProfiler::Get() || FrameCapture::Active() ||
+        FullBarriersEnabled() || !cloth_peeks.empty()) return false;
+    const auto& cs = CsRegs();
+    const auto& info = pipeline->GetStage(Shader::SwStage::Compute);
+    if (info.pgm_hash != 0x8f067540 || cs.dim_y != 1 || cs.dim_z != 1 || !cs.dim_x ||
+        set_writes.size() != info.buffers.size() || !pipeline->EnsureBatchPipeline()) return false;
+    for (u32 i = 0; i < set_writes.size(); ++i) {
+        const auto& write = set_writes[i];
+        if (write.dstBinding != i || write.descriptorCount != 1 || !write.pBufferInfo ||
+            write.descriptorType != vk::DescriptorType::eStorageBuffer) return false;
+    }
+    if (skinning_batch.count &&
+        (skinning_batch.pipeline != pipeline || skinning_batch.dim_x != cs.dim_x)) {
+        scheduler.FlushDeferredRecord();
+    }
+    // Allocate BEFORE installing/appending to the deferred batch. A stream wrap may submit:
+    // earlier batches must be emitted at their original tick, not after the wrap's Finish().
+    auto& stream = buffer_cache.GetStreamBuffer();
+    const u64 push_offset = stream.Copy(&push_data, sizeof(push_data), instance.StorageMinAlignment());
+    auto& batch = skinning_batch;
+    if (!batch.count) {
+        batch.pipeline = pipeline;
+        batch.dim_x = cs.dim_x;
+        batch.bindings = set_writes.size() + 1;
+        batch.first_push = push_data;
+        scheduler.DeferRecord([this] { FlushSkinningBatch(); });
+    }
+    for (u32 i = 0; i < set_writes.size(); ++i)
+        batch.buffers[i][batch.count] = *set_writes[i].pBufferInfo;
+    batch.buffers[set_writes.size()][batch.count] = {stream.Handle(), push_offset, sizeof(push_data)};
+    ++batch.count;
+    DebugState.IncDispatch(); // logical PS4 dispatches; physical Vulkan count is reported separately
+    ResetBindings(true);    // retain exact resource hazards for EVERY original dispatch
+    if (batch.count == ComputePipeline::BatchCapacity) scheduler.FlushDeferredRecord();
+    return true;
+}
+
+void Rasterizer::FlushSkinningBatch() {
+    auto& batch = skinning_batch;
+    if (!batch.count) return;
+    const auto* pipeline = batch.pipeline;
+    const u32 count = batch.count, dim_x = batch.dim_x;
+    batch.count = 0; // emitted commands can themselves flush/submit without re-entering the batch
+    if (count == 1) {
+        // An ordering boundary after one instance: ordinary shader/commands, not a padded set.
+        std::vector<vk::WriteDescriptorSet> writes(batch.bindings - 1);
+        for (u32 i = 0; i < writes.size(); ++i) {
+            writes[i] = {.dstBinding = i, .descriptorCount = 1,
+                         .descriptorType = vk::DescriptorType::eStorageBuffer,
+                         .pBufferInfo = &batch.buffers[i][0]};
+        }
+        pipeline->BindResources(writes, batch.first_push);
+        const auto handle = pipeline->Handle();
+        scheduler.Record([=](vk::CommandBuffer cmd) {
+            cmd.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
+            cmd.dispatch(dim_x, 1, 1);
+        });
+        ++fused_singles;
+        if (fused_singles <= 8 || fused_singles % 50000 == 0) {
+            const auto caller = scheduler.DeferredRecordBoundary();
+            std::printf("Dispatch fusion singleton %llu: boundary %s:%u (%s)\n",
+                        fused_singles, caller.file_name(), caller.line(), caller.function_name());
+        }
+        scheduler.KickRecording();
+        return;
+    }
+    const vk::DescriptorSet set = pipeline->BatchDescriptorSet();
+    std::vector<vk::WriteDescriptorSet> writes(batch.bindings);
+    for (u32 i = 0; i < batch.bindings; ++i) {
+        // All declared descriptors are initialized, even in a partial batch: no partially-bound
+        // feature or nonuniform indexing required. Workgroup Y is uniform within each group.
+        for (u32 j = count; j < ComputePipeline::BatchCapacity; ++j)
+            batch.buffers[i][j] = batch.buffers[i][count - 1];
+        writes[i] = {.dstSet = set, .dstBinding = i,
+                     .descriptorCount = ComputePipeline::BatchCapacity,
+                     .descriptorType = vk::DescriptorType::eStorageBuffer,
+                     .pBufferInfo = batch.buffers[i].data()};
+    }
+    instance.GetDevice().updateDescriptorSets(writes, {});
+    const auto handle = pipeline->BatchHandle();
+    const auto layout = pipeline->BatchLayout();
+    scheduler.Checkpoint("skinning batch", count);
+    scheduler.Record([=](vk::CommandBuffer cmd) {
+        cmd.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
+        cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, layout, 0, set, {});
+        cmd.dispatch(dim_x, count, 1);
+    });
+    scheduler.KickRecording();
+    fused_dispatches += count;
+    ++fused_batches;
+    if ((fused_batches & 255) == 0) {
+        static auto last = std::chrono::steady_clock::now();
+        if (const auto now = std::chrono::steady_clock::now(); now - last >= std::chrono::seconds{5}) {
+            last = now;
+            std::printf("Dispatch fusion (5 s): %llu logical -> %llu Vulkan dispatches, %llu singles, "
+                        "%.2f instances/batch, %llu dispatches removed\n",
+                        fused_dispatches, fused_batches, fused_singles,
+                        double(fused_dispatches) / fused_batches, fused_dispatches - fused_batches);
+            fused_dispatches = fused_batches = fused_singles = 0;
+        }
+    }
+}
+
 void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     if (DispatchTraceTarget()) [[unlikely]] {
         DispatchTraceEnter(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash);
@@ -4118,6 +4229,9 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
 
     scheduler.EndRendering();
     mark();
+    // Any resource transfer/barrier recorded by BindResources has already flushed earlier
+    // batches through Scheduler::Record. Only compatible, hazard-free consecutive work fuses.
+    if (AppendSkinningBatch(pipeline)) return;
     // gow3 20 Oct 2026 (GOW3_SKIP_COMPUTE_REBIND=0: always bind): the compute pipeline is not
     // bound again when the previous dispatch bound the same one and nothing but this dispatch's
     // push constants and descriptors was recorded since, in the same command buffer (the

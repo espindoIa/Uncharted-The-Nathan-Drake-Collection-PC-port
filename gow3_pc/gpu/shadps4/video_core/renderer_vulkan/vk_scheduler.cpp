@@ -290,6 +290,7 @@ void Scheduler::KickRecording(bool force) {
 }
 
 void Scheduler::SyncRecording() {
+    FlushDeferredRecord();
     if (!recording_threaded) {
         return;
     }
@@ -585,6 +586,9 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
+    // A pending fused dispatch still belongs to the CURRENT tick. Emit before NextTick,
+    // host-copy waits and the submit callback, not into the following command buffer.
+    FlushDeferredRecord();
     const bool log = log_id >= 0 && SubmitLog::Enabled();
     SubmitLog::SubmitTimes times{};
     times.start = log ? SubmitLog::NowMs() : 0.0;

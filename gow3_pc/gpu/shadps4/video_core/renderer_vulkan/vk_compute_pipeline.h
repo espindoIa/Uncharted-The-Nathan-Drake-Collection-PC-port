@@ -50,8 +50,18 @@ public:
                     vk::ShaderModule module, SerializationSupport& sdata, bool preloading);
     ~ComputePipeline();
 
+    static constexpr u32 BatchCapacity = 16;
+    bool EnsureBatchPipeline() const;
+    vk::Pipeline BatchHandle() const { return *batch_pipeline; }
+    vk::PipelineLayout BatchLayout() const { return *batch_layout; }
+    vk::DescriptorSet BatchDescriptorSet() const;
+
 private:
     ComputePipelineKey compute_key;
+    mutable bool batch_attempted = false;
+    mutable vk::UniquePipeline batch_pipeline;
+    mutable vk::UniquePipelineLayout batch_layout;
+    mutable vk::UniqueDescriptorSetLayout batch_descriptors;
 };
 
 } // namespace Vulkan

@@ -42,6 +42,7 @@ endif()
 
 find_package(Vulkan REQUIRED)
 find_package(fmt REQUIRED)
+find_package(SPIRV-Tools CONFIG REQUIRED)
 find_package(Boost REQUIRED)
 # gow3 (Windows): MSYS2 has no magic_enum/miniz packages; the submodules are used instead.
 find_package(magic_enum QUIET)
@@ -177,6 +178,7 @@ if (NOT WIN32)
     target_link_options(gow3gpu PRIVATE -Wl,--allow-shlib-undefined)
 endif()
 target_link_libraries(gow3gpu PRIVATE ffx-vulkan::portable ffx-vulkan::fsr4-v07-vulkan)
+target_link_libraries(gow3gpu PRIVATE SPIRV-Tools)
 target_link_libraries(gow3gpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
     tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit)
 target_include_directories(gow3gpu PRIVATE third_party/xbyak)
@@ -441,6 +443,15 @@ target_compile_options(page-state-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 add_executable(skinning-writes-test EXCLUDE_FROM_ALL ../tests/test_skinning_writes.cpp)
 target_include_directories(skinning-writes-test PRIVATE shadps4)
 target_compile_options(skinning-writes-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_executable(dispatch-batch-spirv-test EXCLUDE_FROM_ALL ../tests/test_dispatch_batch_spirv.cpp
+    shadps4/video_core/renderer_vulkan/vk_dispatch_batch_spirv.cpp)
+target_include_directories(dispatch-batch-spirv-test PRIVATE shadps4
+    third_party/sirit/externals/SPIRV-Headers/include)
+target_link_libraries(dispatch-batch-spirv-test PRIVATE SPIRV-Tools)
+target_compile_options(dispatch-batch-spirv-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_executable(dispatch-batch-gpu-test EXCLUDE_FROM_ALL ../tests/test_dispatch_batch_gpu.cpp)
+target_link_libraries(dispatch-batch-gpu-test PRIVATE Vulkan::Vulkan)
+target_compile_options(dispatch-batch-gpu-test PRIVATE -UNDEBUG -Wall -Wextra -Werror -Wno-missing-field-initializers)
 
 add_executable(fsr4-bench EXCLUDE_FROM_ALL tools/fsr4_bench.cpp
     shadps4/video_core/renderer_vulkan/fsr411/fsr411.cpp)

@@ -655,6 +655,16 @@ private:
     /// the scheduler's RecordSerial() right after its dispatch.
     vk::Pipeline bound_compute_pipeline{};
     u64 bound_compute_serial = ~u64{0};
+    bool AppendSkinningBatch(const ComputePipeline* pipeline);
+    void FlushSkinningBatch();
+    struct SkinningBatch {
+        const ComputePipeline* pipeline = nullptr;
+        u32 count = 0, dim_x = 0, bindings = 0;
+        Shader::PushData first_push;
+        std::array<std::array<vk::DescriptorBufferInfo, ComputePipeline::BatchCapacity>,
+                   Shader::NUM_BUFFERS + 1> buffers;
+    } skinning_batch;
+    u64 fused_dispatches = 0, fused_batches = 0, fused_singles = 0;
     // gow3: two-stage draw pipeline (stage B state; the thread is the last member so it
     // stops first).
     static inline thread_local const AmdGpu::Regs* stage_regs = nullptr;

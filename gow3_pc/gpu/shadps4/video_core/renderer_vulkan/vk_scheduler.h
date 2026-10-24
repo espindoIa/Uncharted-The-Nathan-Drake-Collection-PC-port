@@ -732,7 +732,8 @@ public:
     /// recording this first waits until all commands passed to Record() are recorded, then
     /// records directly (Record() included, so callers may mix both) until the next
     /// KickRecording() or submission.
-    [[gnu::noinline]] vk::CommandBuffer CommandBuffer() {
+    [[gnu::noinline]] vk::CommandBuffer CommandBuffer(std::source_location caller = std::source_location::current()) {
+        FlushDeferredRecord(caller);
         ++record_serial; // the caller may record anything (RecordSerial)
         if (recording_threaded && !direct_mode) {
             SyncRecording();
@@ -754,7 +755,8 @@ public:
     /// Records `func(vk::CommandBuffer)` in order with other commands. The closure must own
     /// everything it uses (capture by value): it may run later on the recording thread.
     template <typename Func>
-    void Record(Func&& func) {
+    void Record(Func&& func, std::source_location caller = std::source_location::current()) {
+        FlushDeferredRecord(caller);
         ++record_serial;
         if (!recording_threaded || direct_mode) {
             func(current_cmdbuf);
@@ -781,6 +783,20 @@ public:
     [[nodiscard]] u64 RecordSerial() const noexcept {
         return record_serial;
     }
+
+    // Clear the hook BEFORE invoking it: its emitted commands call Record() themselves.
+    void DeferRecord(std::function<void()> record) {
+        ASSERT(!deferred_record);
+        deferred_record = std::move(record);
+    }
+    void FlushDeferredRecord(std::source_location caller = std::source_location::current()) {
+        if (deferred_record) {
+            deferred_record_boundary = caller;
+            auto record = std::exchange(deferred_record, {});
+            record();
+        }
+    }
+    std::source_location DeferredRecordBoundary() const { return deferred_record_boundary; }
 
     /// gow3: a recording thread exists (Record() may defer commands to it).
     [[nodiscard]] bool IsRecordingThreaded() const noexcept {
@@ -988,6 +1004,8 @@ private:
     // compares thread ids, which on Windows (libc++ over winpthreads) costs two system calls.
     bool recording_threaded{false};
     u64 record_serial = 0; ///< gow3: see RecordSerial()
+    std::function<void()> deferred_record;
+    std::source_location deferred_record_boundary;
     /// gow3 20 Oct 2026: the draw scheduler counts its waits for the submit lock (Gow3Stats).
     bool count_lock_waits{false};
     std::jthread recorder_thread;

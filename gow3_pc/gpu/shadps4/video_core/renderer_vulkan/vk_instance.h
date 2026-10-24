@@ -180,6 +180,9 @@ public:
     bool IsAttachmentFeedbackLoopLayoutSupported() const {
         return attachment_feedback_loop;
     }
+    bool SupportsStorageBufferArrayIndexing() const {
+        return features.shaderStorageBufferArrayDynamicIndexing;
+    }
 
     /// Returns true when VK_EXT_custom_border_color is supported
     bool IsCustomBorderColorSupported() const {
