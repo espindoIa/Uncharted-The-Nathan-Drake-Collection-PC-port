@@ -368,6 +368,47 @@ class LauncherUiTest(unittest.TestCase):
         toggle.click()
         self.assertEqual(calls, [True])
 
+    def test_keyboard_arrows_change_a_choice_and_disabled_ones_skip_tab(self):
+        launcher, mod = self.launcher, uncharted_launcher
+        choice = launcher.widgets["upscaler"]
+        first, second = list(choice.labels)[:2]
+        launcher.change("upscaler", first)
+        self.assertEqual(str(choice.cget("takefocus")), "1")
+        choice.focus_set()
+        choice.move(1)  # what Right does
+        self.assertEqual(choice.value, second)
+        self.assertEqual(mod.read_ini(launcher.config["game"])["upscaler"], second)
+        choice.move(to=0)  # Home
+        self.assertEqual(mod.read_ini(launcher.config["game"])["upscaler"], first)
+        choice.move(-1)  # Left on the first one: nothing to change
+        self.assertEqual(choice.value, first)
+        choice.set_enabled(False)
+        self.assertEqual(str(choice.cget("takefocus")), "0")
+
+    def test_shortcuts_select_the_game_and_cycle_the_sections(self):
+        launcher = self.launcher
+        launcher.shortcut(lambda: launcher.select_game("u2"))()  # Ctrl+2
+        self.assertEqual(launcher.config["game"], "u2")
+        launcher.show_tab("home", save=False)
+        launcher.step_section(1)  # Ctrl+Tab
+        self.assertEqual(launcher.section, "display")
+        launcher.step_section(-1)
+        launcher.step_section(-1)  # Ctrl+Shift+Tab wraps to the last
+        self.assertEqual(launcher.section, "system")
+
+    def test_tab_is_a_binding_while_a_slot_captures(self):
+        launcher = self.launcher
+        launcher.capturing, launcher.capture_armed = ("jump", 0), True
+        seen = []
+        with mock.patch.object(launcher, "capture_key", lambda event: seen.append(event.keysym) or "break"):
+            self.assertEqual(launcher.on_key(SimpleNamespace(keysym="Tab")), "break")  # root's <Tab>
+            step = launcher.shortcut(lambda: seen.append("section"), tab=True)  # Ctrl+Tab
+            self.assertEqual(step(SimpleNamespace(keysym="Tab")), "break")
+            self.assertIsNone(launcher.shortcut(lambda: seen.append("game"))(SimpleNamespace(keysym="2")))
+        self.assertEqual(seen, ["Tab", "Tab"])
+        launcher.capturing, launcher.capture_armed = None, False
+        self.assertIsNone(launcher.on_key(SimpleNamespace(keysym="Tab")))  # not capturing: Tk moves the focus
+
     def test_launcher_uses_no_native_message_box(self):
         text = (LAUNCHER / "uncharted_launcher.pyw").read_text(encoding="utf-8")
         self.assertNotIn("messagebox.", text.split('if __name__ == "__main__"')[0])

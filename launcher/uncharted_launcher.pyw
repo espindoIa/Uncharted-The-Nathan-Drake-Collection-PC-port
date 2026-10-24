@@ -27,7 +27,7 @@ from tkinter import font as tkfont, messagebox
 from PIL import Image, ImageDraw, ImageOps, ImageTk
 
 import updater  # launcher/updater.py: updates from the GitHub releases
-from widgets import (ACCENT, ACCENT_HI, BG, DIM, GOOD, HERO_DARK, HERO_GRID, HERO_LIGHT, HOVER_LINE, INK, LINE, MUTED, PANEL, PANEL_HI, STOP_RED, TEXT, Badge, Dialog, Dropdown, InfoTip, ScrollBar, Segmented, Toast, Toggle, copy_text, round_rect)  # launcher/widgets.py
+from widgets import (ACCENT, ACCENT_HI, BG, DIM, GOOD, HERO_DARK, HERO_GRID, HERO_LIGHT, HOVER_LINE, INK, LINE, MUTED, PANEL, PANEL_HI, STOP_RED, TEXT, Badge, Dialog, Dropdown, InfoTip, ScrollBar, Segmented, Toast, Toggle, copy_text, on_activate, on_keys, round_rect)  # launcher/widgets.py
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "launcher" / "assets"
@@ -1341,6 +1341,8 @@ class Launcher:
         self.fit_to_screen()
         self.restore_window_position()
         write_config(self.config)  # keeps one-time updates (read_config) even without a change
+        if not direct:
+            self.focus_first()
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after(150, self.poll)
         # Updates (launcher/updater.py): what an installed one left behind goes; a newer release
@@ -1447,6 +1449,77 @@ class Launcher:
         self.select_game(self.config.get("game", "u1"), save=False)
         self.show_tab(self.config.get("tab"), save=False)
         self.refresh_dependencies()
+        self.footer.lift()  # Tab goes through the settings before PLAY (the footer is built before the page)
+        self.bind_keyboard()
+
+    def focus_first(self):
+        """The keyboard starts on PLAY, or on the first fix on Home when the game is not set up."""
+        target = self.play_button if is_game_dir(self.game_dir()) else self.first_focusable(self.home_list)
+        try:
+            if target is not None:
+                target.focus_set()
+        except tk.TclError:
+            pass
+
+    def first_focusable(self, widget):
+        for child in widget.winfo_children():
+            if str(child.cget("takefocus")) == "1":
+                return child
+            found = self.first_focusable(child)
+            if found is not None:
+                return found
+
+    def bind_keyboard(self):
+        """24 Oct 2026: window shortcuts (Ctrl+1/2/3 game, Ctrl+Tab / Ctrl+Shift+Tab section, Ctrl+Enter
+        PLAY) on the toplevel, not bind_all. Tk's own Tab binding (tag "all") beats the launcher's
+        <KeyPress> there, so a Controls slot waiting for a key would see Tab move the focus: the
+        toplevel's Tab bindings (they run before "all") hand it to on_key and stop."""
+        root = self.root
+        for number, game in enumerate(GAMES, 1):
+            root.bind(f"<Control-Key-{number}>", self.shortcut(lambda k=game["key"]: self.select_game(k)))
+        root.bind("<Control-Tab>", self.shortcut(lambda: self.step_section(1), tab=True))
+        for sequence in ("<Control-Shift-Tab>", "<Control-ISO_Left_Tab>"):
+            root.bind(sequence, self.shortcut(lambda: self.step_section(-1), tab=True))
+        root.bind("<Control-Return>", self.shortcut(self.play_or_stop))
+        for sequence in ("<Tab>", "<ISO_Left_Tab>"):
+            root.bind(sequence, self.on_key)
+        root.bind("<FocusIn>", self.on_focus, add="+")
+
+    def shortcut(self, action, tab=False):
+        """A window shortcut's handler. While a Controls slot waits for a key it is not a shortcut: the
+        key is the binding (`tab`: the ones Tk would otherwise take for itself, so they stop here)."""
+        def run(event=None):
+            if self.capture_active():
+                return self.capture_key(event) if tab else None
+            if self.capturing is None:
+                action()
+            return "break"
+        return run
+
+    def step_section(self, step):
+        names = [name for name, _ in SECTIONS]
+        name = names[(names.index(self.section) + step) % len(names)]
+        self.show_tab(name)
+        self.tab_buttons[name][0].focus_set()  # the page it replaces may hold the focus
+
+    def on_focus(self, event):
+        """Tab to a control inside a scrolling page scrolls the page until the control is in view."""
+        canvas = event.widget
+        while isinstance(canvas, tk.Misc) and str(canvas) not in self.scroll_canvases:
+            canvas = canvas.master
+        if not isinstance(canvas, tk.Misc) or canvas is event.widget:
+            return
+        region = canvas.tk.splitlist(canvas.cget("scrollregion"))
+        view = canvas.winfo_height()
+        if len(region) != 4 or view <= 1:
+            return
+        top = event.widget.winfo_rooty() - canvas.winfo_rooty()
+        bottom = top + event.widget.winfo_height()
+        move = top if top < 0 else max(0, bottom - view)
+        total = float(region[3]) - float(region[1])
+        if move and total > view:
+            wanted = min(max(canvas.canvasy(0) + move, float(region[1])), float(region[1]) + total - view)
+            canvas.yview_moveto((wanted - float(region[1])) / total)
 
     def build_sidebar(self):
         bar = tk.Frame(self.root, bg=PANEL)
@@ -1466,9 +1539,11 @@ class Launcher:
         tk.Label(bar, text=f"Version {updater.version_text(version)}" if version else "Source tree (updates with git)",
                  font=self.f_small, bg=PANEL, fg=DIM, anchor="w").pack(side="bottom", fill="x", padx=pad,
                                                                        pady=(0, self.px(14)))
-        links = tk.Canvas(bar, width=w, height=self.px(40), bg=PANEL, highlightthickness=0)
+        links = tk.Canvas(bar, width=w, height=self.px(40), bg=PANEL, highlightthickness=2,
+                          highlightbackground=PANEL, highlightcolor=ACCENT, takefocus=1)
         links.pack(side="bottom")
         self.draw_links(links, w)
+        on_activate(links, lambda: webbrowser.open(LINKS[0][1]))  # the one link
 
         def caption(text):
             tk.Label(bar, text=text, font=self.f_caption, bg=PANEL, fg=DIM, anchor="w").pack(
@@ -1477,9 +1552,11 @@ class Launcher:
         self.cards = {}
         for game in GAMES:
             h = self.px(48)
-            canvas = tk.Canvas(bar, width=w, height=h, bg=PANEL, highlightthickness=0, cursor="hand2")
+            canvas = tk.Canvas(bar, width=w, height=h, bg=PANEL, highlightthickness=2, highlightbackground=PANEL,
+                               highlightcolor=ACCENT, takefocus=1, cursor="hand2")
             canvas.pack(side="top")
             canvas.bind("<Button-1>", lambda e, k=game["key"]: self.select_game(k))
+            on_activate(canvas, lambda k=game["key"]: self.select_game(k))
             canvas.bind("<Double-Button-1>", lambda e, k=game["key"]: self.play_game(k))
             canvas.bind("<Enter>", lambda e, k=game["key"]: self.draw_card(k, hover=True))
             canvas.bind("<Leave>", lambda e, k=game["key"]: self.draw_card(k))
@@ -1488,12 +1565,15 @@ class Launcher:
         self.section = None
         self.tab_buttons = {}
         for name, label in SECTIONS:
-            canvas = tk.Canvas(bar, width=w, height=self.px(34), bg=PANEL, highlightthickness=0, cursor="hand2")
+            canvas = tk.Canvas(bar, width=w, height=self.px(34), bg=PANEL, highlightthickness=2,
+                               highlightbackground=PANEL, highlightcolor=ACCENT, takefocus=1, cursor="hand2")
             canvas.pack(side="top")
             canvas.bind("<Button-1>", lambda e, n=name: self.show_tab(n))
+            on_activate(canvas, lambda n=name: self.show_tab(n))
             canvas.bind("<Enter>", lambda e, n=name: self.draw_section(n, hover=True))
             canvas.bind("<Leave>", lambda e, n=name: self.draw_section(n))
             self.tab_buttons[name] = (canvas, label)
+        tk.Misc.lift(links)  # last in the Tab order (it was built first to sit at the bottom); Canvas.lift is for items
 
     def draw_section(self, name, hover=False):
         canvas, label = self.tab_buttons[name]
@@ -1781,7 +1861,7 @@ class Launcher:
         self.row_notes = {}  # key -> the hidden "Needs ..." line of a row (see refresh_dependencies)
         # 24 Oct 2026: bound once for the whole session. Capturing a key used to bind_all and then
         # unbind_all these sequences, which also removed the page scrolling until the launcher restarted.
-        self.capturing, self.capture_armed = None, False
+        self.capturing, self.capture_armed, self.capture_back = None, False, None
         self.root.bind_all("<MouseWheel>", self.on_wheel)
         self.root.bind_all("<KeyPress>", self.on_key)
         self.root.bind_all("<ButtonPress>", self.on_button)
@@ -1985,15 +2065,17 @@ class Launcher:
                 self.draw_preset(name)
         # Four cards that share the column's width (spacer columns between them).
         for i, name in enumerate(PRESET_ORDER):
-            canvas = tk.Canvas(grid, width=self.px(150), height=card_h, bg=BG, highlightthickness=0, cursor="hand2")
+            canvas = tk.Canvas(grid, width=self.px(150), height=card_h, bg=BG, highlightthickness=2,
+                               highlightbackground=BG, highlightcolor=ACCENT, takefocus=1, cursor="hand2")
             canvas.grid(row=0, column=2 * i, sticky="ew")
+            on_activate(canvas, lambda n=name: self.apply_preset(n))
             grid.columnconfigure(2 * i, weight=1, uniform="preset")
             if i:
                 grid.columnconfigure(2 * i - 1, minsize=self.px(16))
             canvas.bind("<Button-1>", lambda e, n=name: self.apply_preset(n))
             canvas.bind("<Enter>", lambda e, n=name: self.draw_preset(n, hover=True))
             canvas.bind("<Leave>", lambda e, n=name: self.draw_preset(n))
-            canvas.bind("<Configure>", lambda e, n=name: resized(n, e.width))
+            canvas.bind("<Configure>", lambda e, n=name: resized(n, e.width - 4))  # less the focus ring's border
             self.preset_cards[name] = (canvas, self.px(150), card_h)
         self.custom_note = tk.Label(page, text="", font=self.f_small, bg=BG, fg=MUTED, anchor="w")
         self.custom_note.pack(side="top", fill="x", pady=(self.px(10), 0))
@@ -2432,20 +2514,28 @@ class Launcher:
                          width=17).pack(side="left")
                 for slot in (0, 1):
                     cell = tk.Label(row, text="", font=self.f_small, bg=PANEL, fg=TEXT, width=14,
-                                    pady=self.px(3), cursor="hand2", highlightthickness=1,
-                                    highlightbackground=LINE)
+                                    pady=self.px(3), cursor="hand2", highlightthickness=2,
+                                    highlightbackground=LINE, highlightcolor=ACCENT, takefocus=1)
                     cell.pack(side="left", padx=(self.px(6), 0))
                     cell.bind("<Button-1>", lambda e, a=action, i=slot: self.start_capture(a, i))
                     cell.bind("<Button-3>", lambda e, a=action, i=slot: self.set_binding(a, i, None))
+                    # Keyboard: Enter/Space is a click, Delete is a right-click.
+                    on_activate(cell, lambda c=cell, a=action, i=slot: self.key_capture(c, a, i))
+                    on_keys(cell, {"<Delete>": lambda a=action, i=slot: self.set_binding(a, i, None),
+                                   "<BackSpace>": lambda a=action, i=slot: self.set_binding(a, i, None)})
                     self.binding_slots[(action, slot)] = cell
                 # The controller button: its icon; a click, then a controller button rebinds it.
                 pad_cell = tk.Label(row, text="", font=self.f_small, bg=PANEL, fg=TEXT, width=14, height=1,
-                                    highlightthickness=1, highlightbackground=LINE, compound="center")
+                                    highlightthickness=2, highlightbackground=LINE, highlightcolor=ACCENT,
+                                    compound="center")
                 pad_cell.pack(side="left", padx=(self.px(6), 0))
                 if action in PAD_DEFAULTS:
-                    pad_cell.config(cursor="hand2")
+                    pad_cell.config(cursor="hand2", takefocus=1)
                     pad_cell.bind("<Button-1>", lambda e, a=action: self.start_pad_capture(a))
                     pad_cell.bind("<Button-3>", lambda e, a=action: self.set_pad_binding(a, None))
+                    on_activate(pad_cell, lambda a=action: self.key_capture(None, a))
+                    on_keys(pad_cell, {"<Delete>": lambda a=action: self.set_pad_binding(a, None),
+                                       "<BackSpace>": lambda a=action: self.set_pad_binding(a, None)})
                 self.pad_slots[action] = pad_cell
         self.refresh_bindings()
         self.refresh_pad_slots()
@@ -2548,6 +2638,23 @@ class Launcher:
             cell.config(text="Press a key…" if capturing else binding_label(bindings[slot] if slot < len(bindings) else None),
                         bg=PANEL_HI if capturing else PANEL, fg=ACCENT if capturing else TEXT)
 
+    def key_capture(self, cell, action, slot=None):
+        """Enter/Space on a focused Controls slot (slot None: the controller button) starts the
+        capture like a click; a key capture takes the focus (start_capture), so it returns to the
+        slot when the capture ends."""
+        if self.capturing is not None or self.pad_capture is not None:
+            return
+        if slot is None:
+            self.start_pad_capture(action)
+        else:
+            self.capture_back = cell
+            self.start_capture(action, slot)
+
+    def restore_focus(self):
+        cell, self.capture_back = self.capture_back, None
+        if cell is not None and cell.winfo_exists():
+            cell.focus_set()
+
     def start_capture(self, action, slot):
         self.stop_capture()
         self.capturing = (action, slot)
@@ -2568,6 +2675,7 @@ class Launcher:
         self.capturing = None
         self.capture_armed = False
         self.refresh_bindings()
+        self.restore_focus()
 
     def capture_key(self, event):
         keysym = event.keysym
@@ -2625,6 +2733,7 @@ class Launcher:
         self.capturing = None
         self.capture_armed = False
         self.refresh_bindings()
+        self.restore_focus()
 
     def reset_controls(self):
         name = self.current_game()["name"]
@@ -2748,8 +2857,10 @@ class Launcher:
 
     def flat_button(self, parent, label, action):
         button = tk.Label(parent, text=label, font=self.f_small, bg=PANEL, fg=TEXT, padx=self.px(12), pady=self.px(6),
-                          cursor="hand2", highlightthickness=1, highlightbackground=LINE)
+                          cursor="hand2", highlightthickness=2, highlightbackground=LINE, highlightcolor=ACCENT,
+                          takefocus=1)
         button.bind("<Button-1>", lambda e: action())
+        on_activate(button, action)
         button.bind("<Enter>", lambda e: button.config(bg=PANEL_HI))
         button.bind("<Leave>", lambda e: button.config(bg=PANEL))
         return button
@@ -2757,7 +2868,7 @@ class Launcher:
     # -- footer -----------------------------------------------------------------------------
 
     def build_footer(self):
-        footer = tk.Frame(self.main, bg=PANEL)
+        footer = self.footer = tk.Frame(self.main, bg=PANEL)
         footer.pack(side="bottom", fill="x")
         tk.Frame(self.main, bg=LINE, height=1).pack(side="bottom", fill="x")
         inner = tk.Frame(footer, bg=PANEL)
@@ -2769,18 +2880,21 @@ class Launcher:
                                   bg=PANEL, fg=MUTED, anchor="w")
         self.substatus.pack(side="top", fill="x")
         w, h = self.px(210), self.px(54)
-        self.play_button = tk.Canvas(inner, width=w, height=h, bg=PANEL, highlightthickness=0, cursor="hand2")
+        self.play_button = tk.Canvas(inner, width=w, height=h, bg=PANEL, highlightthickness=2,
+                                     highlightbackground=PANEL, highlightcolor=ACCENT, takefocus=1, cursor="hand2")
         self.play_button.pack(side="right")
         self.play_button.bind("<Button-1>", lambda e: self.play_or_stop())
+        on_activate(self.play_button, self.play_or_stop)
         self.play_button.bind("<Enter>", lambda e: self.draw_play(hover=True))
         self.play_button.bind("<Leave>", lambda e: self.draw_play())
         self.draw_play()
         # After PLAY: a long status line is cut, never the button.
         left.pack(side="left", fill="x", expand=True)
         self.update_button = tk.Label(inner, text="UPDATE", font=self.f_body_bold, bg=PANEL_HI, fg=ACCENT,
-                                      padx=self.px(16), pady=self.px(10), cursor="hand2",
-                                      highlightthickness=1, highlightbackground=ACCENT)
+                                      padx=self.px(16), pady=self.px(10), cursor="hand2", takefocus=1,
+                                      highlightthickness=2, highlightbackground=ACCENT, highlightcolor=TEXT)  # TEXT: the ring must differ from its own orange border
         self.update_button.bind("<Button-1>", lambda e: self.install_update())
+        on_activate(self.update_button, self.install_update)
         self.set_status(f"Ready to play {self.current_game()['name']}." if self.config.get("game") else "Ready.")
 
     def draw_play(self, hover=False):

@@ -33,13 +33,34 @@ def round_rect(canvas, x1, y1, x2, y2, r, **kw):
     return canvas.create_polygon(points, smooth=True, **kw)
 
 
+def on_keys(widget, handlers):
+    """Keys for a widget that takes the keyboard focus ({"<Left>": handler}). Ctrl+key is left to
+    the window's shortcuts (Ctrl+Enter plays); a handled key stops there ("break")."""
+    def bind(sequence, handler):
+        def run(event):
+            if not event.state & 0x4:
+                handler()
+                return "break"
+        widget.bind(sequence, run)
+    for sequence, handler in handlers.items():
+        bind(sequence, handler)
+
+
+def on_activate(widget, action):
+    """Space, Enter or the numpad Enter on the focused widget runs `action`."""
+    on_keys(widget, {sequence: action for sequence in ("<space>", "<Return>", "<KP_Enter>")})
+
+
 class Toggle(tk.Canvas):
     def __init__(self, parent, scale, value, command):
         self.s = scale
         w, h = int(46 * scale), int(24 * scale)
-        super().__init__(parent, width=w, height=h, bg=parent["bg"], highlightthickness=0, cursor="hand2")
+        # 24 Oct 2026: keyboard focus (Tab, Space/Enter); the focus ring is the 2 px highlight border.
+        super().__init__(parent, width=w, height=h, bg=parent["bg"], highlightthickness=2,
+                         highlightbackground=parent["bg"], highlightcolor=ACCENT, takefocus=1, cursor="hand2")
         self.w, self.h, self.value, self.command, self.enabled = w, h, bool(value), command, True
         self.bind("<Button-1>", lambda e: self.click())
+        on_activate(self, self.click)
         self.draw()
 
     def click(self):
@@ -55,7 +76,7 @@ class Toggle(tk.Canvas):
     def set_enabled(self, enabled):
         """Greyed out (a setting that does nothing now): shows its value, ignores clicks."""
         self.enabled = bool(enabled)
-        self.config(cursor="hand2" if self.enabled else "arrow")
+        self.config(cursor="hand2" if self.enabled else "arrow", takefocus=int(self.enabled))
         self.draw()
 
     def draw(self):
@@ -70,12 +91,16 @@ class Toggle(tk.Canvas):
 
 
 class Segmented(tk.Frame):
-    """A row of choices; the selected one is gold."""
+    """A row of choices; the selected one is gold. One Tab stop: Left/Right change the choice, Home/End
+    pick the first/last."""
 
     def __init__(self, parent, options, value, command, font, recommended=None):
-        super().__init__(parent, bg=LINE, padx=1, pady=1)
+        super().__init__(parent, bg=LINE, padx=1, pady=1, highlightthickness=2, highlightbackground=parent["bg"],
+                         highlightcolor=ACCENT, takefocus=1)
         self.command, self.labels, self.value, self.recommended = command, {}, value, recommended
         self.enabled = True
+        on_keys(self, {"<Left>": lambda: self.move(-1), "<Right>": lambda: self.move(1),
+                       "<Home>": lambda: self.move(to=0), "<End>": lambda: self.move(to=-1)})
         for i, (option, label) in enumerate(options):
             item = tk.Label(self, text=self.text(option, label), font=font, padx=12, pady=5, cursor="hand2", bd=0)
             item.grid(row=0, column=i, padx=(0 if i == 0 else 1, 0))
@@ -105,9 +130,19 @@ class Segmented(tk.Frame):
         if self.enabled:
             self.set(option, notify=True)
 
+    def move(self, by=0, to=None):
+        """The keyboard: `by` choices on from the selected one, or the choice at index `to`."""
+        options = list(self.labels)
+        if to is None:
+            current = options.index(self.value) if self.value in options else -1
+            to = min(max(current + by, 0), len(options) - 1)
+        if options[to] != self.value:  # Right on the last choice changes nothing
+            self.click(options[to])
+
     def set_enabled(self, enabled):
         """Greyed out (a setting that does nothing now): shows its value, ignores clicks."""
         self.enabled = bool(enabled)
+        self.config(takefocus=int(self.enabled))
         self.restyle()
 
     def restyle(self):
@@ -124,17 +159,19 @@ class Dropdown(tk.Label):
 
     def __init__(self, parent, options, value, command, font):
         super().__init__(parent, font=font, bg=PANEL, fg=TEXT, padx=12, pady=5, cursor="hand2", anchor="w",
-                         highlightthickness=1, highlightbackground=LINE)
+                         highlightthickness=2, highlightbackground=LINE, highlightcolor=ACCENT, takefocus=1)
         self.options, self.command, self.font, self.enabled = options, command, font, True
         self.set(value)
         self.bind("<Button-1>", lambda e: self.open())
+        on_keys(self, {sequence: self.open for sequence in ("<space>", "<Return>", "<KP_Enter>", "<Down>")})
         self.bind("<Enter>", lambda e: self.enabled and self.config(bg=PANEL_HI))
         self.bind("<Leave>", lambda e: self.config(bg=PANEL))
 
     def set_enabled(self, enabled):
         """Greyed out (a setting that does nothing now): shows its value, does not open."""
         self.enabled = bool(enabled)
-        self.config(fg=TEXT if self.enabled else DIM, bg=PANEL, cursor="hand2" if self.enabled else "arrow")
+        self.config(fg=TEXT if self.enabled else DIM, bg=PANEL, cursor="hand2" if self.enabled else "arrow",
+                    takefocus=int(self.enabled))
 
     def set(self, value, notify=False):
         self.value = value
@@ -227,7 +264,7 @@ class InfoTip(tk.Canvas):
 
     def __init__(self, parent, text, scale, font):
         size = int(18 * scale)
-        super().__init__(parent, width=size, height=size, bg=parent["bg"], highlightthickness=1,
+        super().__init__(parent, width=size, height=size, bg=parent["bg"], highlightthickness=2,
                          highlightbackground=parent["bg"], highlightcolor=ACCENT, takefocus=1, cursor="hand2")
         self.text, self.scale, self.font, self.size = text, scale, font, size
         self.popover, self.pinned, self.timer = None, False, None
@@ -235,8 +272,7 @@ class InfoTip(tk.Canvas):
         self.bind("<Enter>", self.enter)
         self.bind("<Leave>", self.leave)
         self.bind("<Button-1>", self.click)
-        self.bind("<space>", self.toggle)
-        self.bind("<Return>", self.toggle)
+        on_activate(self, self.toggle)  # not with Ctrl: Ctrl+Enter plays
         self.bind("<Escape>", lambda e: self.close())
         self.bind("<FocusOut>", lambda e: self.close())
         self.bind("<Destroy>", lambda e: self.close(), add="+")

@@ -6,6 +6,14 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Added (24 Oct 2026): the launcher can be used with the keyboard.** Tab and Shift+Tab move
+  through the games, the sections, the settings and the buttons, with an orange outline on the one
+  that has the focus; Space or Enter presses a button or flips a switch, Left and Right change a
+  choice (Home and End pick the first and the last), and Down or Enter opens a list. In
+  Controls, Enter on a slot waits for the next key like a click, and Delete clears it. Shortcuts:
+  Ctrl+1, Ctrl+2, Ctrl+3 pick the game, Ctrl+Tab and Ctrl+Shift+Tab the next and previous section,
+  Ctrl+Enter plays (or stops). The launcher opens with the focus on PLAY.
+
 - **Added (24 Oct 2026): "Apply to all games" and a note when a setting waits for the next start.**
   Display and Performance have an Apply to all games button at the top right: it copies the
   selected game's graphics and performance settings (resolution, aspect ratio, anti-aliasing,
