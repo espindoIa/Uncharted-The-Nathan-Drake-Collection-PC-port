@@ -6,6 +6,11 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Fixed (24 Oct 2026): in Uncharted 3, young Sully's shirt in chapter 2 (Cartagena chase) no
+  longer stretches into a long strip down to his knees.** The cloth shader read and wrote past
+  the shared memory the game reserves for it; the PS4 ignores such accesses, NVIDIA cards did
+  not. (`GOW3_LDS_BOUNDS=0` restores the old behaviour.)
+
 - **24 Oct 2026: Uncharted 3 market (and any GPU-heavy scene) runs about 27-30% faster with Reflex
   or Frame Generation on.** Reflex's sleep held the game back, so the graphics card sat idle
   between frames. The port now starts the next frame as soon as the card has one frame queued.

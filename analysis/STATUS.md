@@ -4170,3 +4170,38 @@ Not reproduced (measured, S-event intervals over 200 ms after the first 20 s of 
 - 0 of 7 against an earlier rate of about 6 in 28 is not significant (chance about 0.2-0.3); the hitch is NOT shown fixed. In skinwrite1 the first stall (453 ms, "GPU ticks 439.6 ms", 0 compiles, 0 faults) precedes any read fault: the GPU stopped finishing an already-submitted submission; the stuck faults on page 0x103c561000 follow from it.
 
 Next time it happens: run with `GOW3_WAIT_TIMEOUT_MS=150 GOW3_SUBMIT_LOG=<file>` (optionally `GOW3_GPU_CHECKPOINTS=1`) and read the "GPU wait: stuck" lines.
+
+## U3 Sully shirt stretched: LDS out of bounds (24 Oct 2026)
+
+Report: U3 ch. 2 Cartagena, young Sully's back shirt tail hung as a long strip to knee height
+(player video 24 Oct). Long-standing: also in the 20 Oct build (ab_ring_base.exe).
+
+Ruled out (user visual check each): 30 FPS/FG off; Disabled2 bits 28-33; GOW3_STALE_READBACK=0 +
+GOW3_DEFERRED_READBACK=0 + MT off; GOW3_LDS_BARRIERS_MULTIWAVE=1 and + GOW3_LDS_BARRIER_REGIONS=1.
+GOW3_CLOTH_PEEK: solvers 1c957b01/809864d3 0 exploded, 0 outliers.
+
+Cause: cs 1c957b01 runs 1024-thread groups with 2 KiB LDS declared; it zeroes lds[tid] up to 1023
+and reads lds[tid+512]. GCN drops LDS writes past the allocation and reads 0; the port's SPIR-V
+shared array had the declared size (+ wave64 scratch) and no bounds check, so NVIDIA corrupted the
+reductions. Evidence: a temporary build with an 8 KiB array brought 1c957b01 output maxima from
+slot0 305 -> 2.7, slot3 49-86 -> 1.8, slot17 5-16 -> 0.2, slot23 55-68 -> 0.07, and the user saw a
+normal shirt. GOW3_WAVE64_ALL_BALLOTS=1 made 1c957b01 explode every dispatch (waist hole),
+confirming the tail comes from it.
+
+Fix: shader_recompiler/ir/passes/shared_memory_bounds_pass.cpp (SharedMemoryBoundsPass, before
+LowerWave64BallotPass): compute-shader game LDS loads past the declared size read 0,
+writes/atomics go to an 8-byte dummy slot behind it (atomics return 0); GDS and in-range
+immediates untouched; wave64 scratch starts after the dummy. GOW3_LDS_BOUNDS: default all compute
+shaders, 0 off, or hex list. SPIR-V cache names get "_ldsb" (all shaders recompile once).
+
+Verified: user saw a normal shirt with the fix at the player's settings (1440p, 165 cap, FG on);
+runtime build ok; street ~57-59 FPS in that run, no assert/device-loss lines.
+
+Limits (from an adversarial review): the pass is skipped when the 8-byte dummy would push the shader
+past the device's shared memory limit (a shader declaring exactly maxComputeSharedMemorySize keeps
+the old unchecked accesses). LDS that SharedMemoryToStoragePass moves to a storage buffer (runs
+earlier) gets no bounds handling, as before. Without explicit workgroup layout, u64 LDS ops split
+into u32 halves are checked per half.
+
+Not verified: U1/U2, other U3 scenes, performance A/B of the extra compare/select per LDS access,
+AMD GPUs.

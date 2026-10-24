@@ -43,6 +43,10 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
                              const Profile& profile);
 /// gow3: whether the shader gets LDS barriers for groups of several waves on 32-lane subgroups.
 bool MultiwaveLdsBarriers(u64 pgm_hash);
+/// gow3: whether compute shader `pgm_hash` gets GCN-style LDS bounds handling (GOW3_LDS_BOUNDS).
+bool LdsBoundsEnabled(u64 pgm_hash);
+void SharedMemoryBoundsPass(IR::Program& program, const RuntimeInfo& runtime_info,
+                            const Profile& profile);
 void SharedMemorySimplifyPass(IR::Program& program, const Profile& profile);
 void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_info,
                                const Profile& profile);
