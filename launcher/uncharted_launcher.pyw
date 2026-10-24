@@ -27,7 +27,7 @@ from tkinter import font as tkfont, messagebox
 from PIL import Image, ImageDraw, ImageOps, ImageTk
 
 import updater  # launcher/updater.py: updates from the GitHub releases
-from widgets import (ACCENT, ACCENT_HI, BG, DIM, GOOD, HERO_DARK, HERO_GRID, HERO_LIGHT, HOVER_LINE, INK, LINE, MUTED, PANEL, PANEL_HI, STOP_RED, TEXT, Dialog, Dropdown, ScrollBar, Segmented, Toast, Toggle, copy_text, round_rect)  # launcher/widgets.py
+from widgets import (ACCENT, ACCENT_HI, BG, DIM, GOOD, HERO_DARK, HERO_GRID, HERO_LIGHT, HOVER_LINE, INK, LINE, MUTED, PANEL, PANEL_HI, STOP_RED, TEXT, Badge, Dialog, Dropdown, InfoTip, ScrollBar, Segmented, Toast, Toggle, copy_text, round_rect)  # launcher/widgets.py
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "launcher" / "assets"
@@ -251,6 +251,9 @@ CHEATS = (("invincible", "Invincible", "Nate takes no damage. All three games.")
           ("noreload", "No reload", "The magazine never empties. Uncharted 2 and 3."),
           ("grenades", "Infinite grenades", "Grenades never run out. Uncharted 3."),
           ("onehit", "One-hit kills", "Enemies go down with one hit. Uncharted 3."))
+HINT_MAX = 110  # a settings row's hint longer than this needs a `short` line (<= SHORT_MAX) and a ? with the full text
+SHORT_MAX = 100
+ALL_GAMES = "ALL GAMES"  # the badge on settings that apply to all three games (launcher config, not a game's ini)
 LAUNCHER_DEFAULTS = {"game": "u1", "diagnostics": True, "game_dir": "", "check_updates": True, "language": "1",
                      "unlock": False}
 
@@ -1732,6 +1735,7 @@ class Launcher:
         self.body.pack_propagate(False)
         # Pages taller than the body scroll (Display, Performance, System, Controls).
         self.scroll_canvases = set()
+        self.rows = []  # every settings row built (title, hint, short, badge), for the tests
         # 24 Oct 2026: bound once for the whole session. Capturing a key used to bind_all and then
         # unbind_all these sequences, which also removed the page scrolling until the launcher restarted.
         self.capturing, self.capture_armed = None, False
@@ -1750,6 +1754,7 @@ class Launcher:
     def show_tab(self, name, save=True):
         """Shows a section (old tab names map to theirs: section_name)."""
         name = section_name(name)
+        InfoTip.dismiss()
         if save and self.config.get("tab") != name:
             self.config["tab"] = name
             write_config(self.config)
@@ -1768,6 +1773,7 @@ class Launcher:
         return self.capturing is not None and self.capture_armed
 
     def on_wheel(self, event):
+        InfoTip.dismiss()  # the page scrolls under an open popover
         # A Controls slot waiting for an input takes the wheel step as its binding.
         return self.capture_wheel(event) if self.capture_active() else self.wheel(event)
 
@@ -1775,6 +1781,7 @@ class Launcher:
         return self.capture_key(event) if self.capture_active() else None
 
     def on_button(self, event):
+        InfoTip.dismiss(event.widget)  # a click elsewhere closes an open "?" popover
         return self.capture_button(event) if self.capture_active() else None
 
     def wheel(self, event):
@@ -1839,17 +1846,26 @@ class Launcher:
         self.on_resize(label, lambda width: label.config(wraplength=max(1, width - self.px(4))))
         return label
 
-    def row(self, page, title, hint, control_factory):
+    def row(self, page, title, hint, control_factory, short=None, badge=None):
         """A setting: title and hint, the control right of them, or under them when it would take
         more than 45% of the row (long choice lists, graphics card names); decided again whenever
-        the row's width changes."""
+        the row's width changes. 24 Oct 2026: with `short`, the row shows that one line and a ?
+        (InfoTip) after the title opens the full `hint`; a hint over HINT_MAX without a `short` is
+        a bug (test_every_long_hint_has_a_short_line). `badge` ("ALL GAMES") sits after the title."""
+        self.rows.append({"title": title, "hint": hint, "short": short, "badge": badge})
         row = tk.Frame(page, bg=BG)
         row.pack(side="top", fill="x", pady=(0, self.px(10)))
         text = tk.Frame(row, bg=BG)
-        tk.Label(text, text=title, font=self.f_body_bold, bg=BG, fg=TEXT, anchor="w").pack(side="top", fill="x")
-        if hint:
-            self.wrap(tk.Label(text, text=hint, font=self.f_small, bg=BG, fg=MUTED, anchor="w", justify="left",
-                               wraplength=self.px(560))).pack(side="top", fill="x")
+        head = tk.Frame(text, bg=BG)
+        head.pack(side="top", fill="x")
+        tk.Label(head, text=title, font=self.f_body_bold, bg=BG, fg=TEXT, anchor="w").pack(side="left")
+        if badge:
+            Badge(head, badge, self.s, self.f_caption).pack(side="left", padx=(self.px(8), 0))
+        if short:
+            InfoTip(head, hint, self.s, self.f_small).pack(side="left", padx=(self.px(8), 0))
+        if short or hint:
+            self.wrap(tk.Label(text, text=short or hint, font=self.f_small, bg=BG, fg=MUTED, anchor="w",
+                               justify="left", wraplength=self.px(560))).pack(side="top", fill="x")
         control = control_factory(row)
         state = {"below": None}
 
@@ -1872,20 +1888,20 @@ class Launcher:
         self.on_resize(row, resized)
         return control
 
-    def ini_toggle(self, page, key, title, hint):
+    def ini_toggle(self, page, key, title, hint, **row_args):
         def factory(parent):
             return Toggle(parent, self.s, self.ini.get(key, "0") == "1",
                           lambda v, k=key: self.change(k, "1" if v else "0"))
-        self.widgets[key] = self.row(page, title, hint, factory)
+        self.widgets[key] = self.row(page, title, hint, factory, **row_args)
 
-    def ini_choice(self, page, key, title, hint, options, recommended=None):
+    def ini_choice(self, page, key, title, hint, options, recommended=None, **row_args):
         def factory(parent):
             value, command = self.ini.get(key, INI_DEFAULTS.get(key)), lambda v, k=key: self.change(k, v)
             if len(options) > 9:  # a menu for long lists (frame rate limits: 10, with Frame Generation 16)
                 return Dropdown(parent, [(o, f"{label}  ★" if o == recommended else label) for o, label in options],
                                 value, command, self.f_small)
             return Segmented(parent, options, value, command, self.f_small, recommended)
-        self.widgets[key] = self.row(page, title, hint, factory)
+        self.widgets[key] = self.row(page, title, hint, factory, **row_args)
 
     def page_setup(self):
         page = self.page()
@@ -2082,7 +2098,8 @@ class Launcher:
             page, "Render resolution",
             "How sharp the picture is; higher needs a faster graphics card (the PS4 drew 1080p). If a "
             "game crashes above 1080p, go back to 1080p. Drake's Fortune draws at most 1620p and "
-            "scales up.", resolution)
+            "scales up.", resolution,
+            short="How sharp the picture is; higher needs a faster graphics card.")
 
         def aspect(parent):
             return Segmented(parent, ASPECTS, self.game_settings().get("aspect", "16:9"),
@@ -2091,32 +2108,37 @@ class Launcher:
             page, "Aspect ratio",
             "For ultrawide monitors (21:9, 32:9), with Borderless or Fullscreen: the games show more at "
             "the sides and the same view top to bottom as on a 16:9 screen. 16:10 (Steam Deck: 800p is "
-            "1280x800) fills the screen and shows more at the top and bottom.", aspect)
+            "1280x800) fills the screen and shows more at the top and bottom.", aspect,
+            short="Match your monitor's shape: ultrawide shows more at the sides, 16:10 more top and bottom.")
         self.render_size_note = tk.Label(page, text="", font=self.f_small, bg=BG, fg=ACCENT, anchor="w")
         self.render_size_note.pack(side="top", fill="x", pady=(0, self.px(10)))
         self.refresh_render_size()
         self.ini_choice(page, "upscaler", "Anti-aliasing",
                         "Smooths jagged, shimmering edges. TAA is the lightest; FSR and DLSS (NVIDIA RTX "
                         "cards) keep the most detail. Also in the in-game menu, where it changes at once.",
-                        anti_aliasing_options())
+                        anti_aliasing_options(),
+                        short="Smooths jagged, shimmering edges. TAA is the lightest; FSR and DLSS keep the most detail.")
         self.ini_choice(page, "preset", "Upscaling mode",
                         "FSR and DLSS only. Native / DLAA smooths edges at the render resolution; the other "
                         "modes draw the scene smaller and rebuild it at the render resolution (set it to your "
                         "screen's): more FPS, a little softer. Ultra Quality draws 71% of the width and height "
                         "(DLSS model M at 4K: about 24% more FPS than DLAA), Quality 67% (about 31%).",
-                        UPSCALE_MODES)
+                        UPSCALE_MODES,
+                        short="FSR and DLSS only: drawing the scene smaller gives more FPS and a slightly softer picture.")
         self.ini_choice(page, "dlss_model", "DLSS model",
                         "NVIDIA's transformer models. K is the fastest and NVIDIA's pick for Native / DLAA, "
                         "Quality and Balanced; M is made for Performance mode. With DLAA at 4K, M costs about "
                         "5.7 ms more per frame than K (RTX 5070); in Performance mode about 0.9 ms.",
-                        DLSS_MODELS, recommended="k")
+                        DLSS_MODELS, recommended="k",
+                        short="NVIDIA's transformer models: K is the fastest, M is made for Performance mode.")
         self.ini_choice(page, "frame_gen", "DLSS Frame Generation",
                         "Adds one AI-generated frame between every two: about twice the frames shown, with a "
                         "little more input delay. Needs an RTX 40 or newer, an anti-aliasing mode (TAA, FSR or "
                         "DLSS) and NVIDIA's nvngx_dlssg.dll (add it under Ready to play on Home). The frame rate limit counts the "
                         "frames shown. Frames are only added while the game window has the focus, and it "
                         "turns Reflex on. Also in the in-game menu.",
-                        [("0", "Off"), ("1", "On")], recommended="0")
+                        [("0", "Off"), ("1", "On")], recommended="0",
+                        short="Adds one AI-generated frame between every two: about twice the frames shown.")
         self.ini_choice(page, "display_mode", "Display mode",
                         "A normal window, a borderless window (quick Alt+Tab) or fullscreen.",
                         [("windowed", "Windowed"), ("borderless", "Borderless"), ("fullscreen", "Fullscreen")])
@@ -2134,7 +2156,8 @@ class Launcher:
         self.ini_choice(page, "anisotropy", "Texture filtering",
                         "Sharper textures on floors and walls seen at an angle (anisotropic filtering). Game's is "
                         "how the PS4 drew them.",
-                        [("0", "Game's"), ("4", "4x"), ("8", "8x"), ("16", "16x")], recommended="16")
+                        [("0", "Game's"), ("4", "4x"), ("8", "8x"), ("16", "16x")], recommended="16",
+                        short="Sharper textures on floors and walls seen at an angle. Game's is the PS4 look.")
         self.ini_toggle(page, "show_fps", "Show FPS counter", "Shows the frame rate in a corner of the screen.")
         self.display_page = page  # the Graphics card row joins it when the Vulkan list arrives
         return page
@@ -2221,17 +2244,20 @@ class Launcher:
                         f"rate ({monitor_refresh_hz()} Hz) is the smoothest."
                         + (" 144 and above count the frames shown and need DLSS Frame Generation switched on "
                            "(Display); with it off the game stays at 120." if frame_gen_available() else ""),
-                        [(str(v), label) for v, label in fps_limits()], recommended="60")
+                        [(str(v), label) for v, label in fps_limits()], recommended="60",
+                        short="60 is how the games were made; higher is smoother but experimental.")
         self.ini_choice(page, "frames_queued", "Frames queued",
                         "Keep 1. 2 can add a few FPS in heavy scenes, but in Uncharted 2 Nate and other "
                         "characters then float a little above the floor.",
-                        [("1", "1"), ("2", "2"), ("0", "Unlimited")], recommended="1")
+                        [("1", "1"), ("2", "2"), ("0", "Unlimited")], recommended="1",
+                        short="Keep 1. 2 can add a few FPS, but in Uncharted 2 characters float above the floor.")
         self.ini_choice(page, "reflex", "NVIDIA Reflex",
                         "NVIDIA RTX cards. Lets the driver time the start of each frame. When the graphics card "
                         "limits the frame rate (Uncharted 3 at 4K) it cuts input delay by about 10 ms but costs "
                         "about 20% of the frame rate; when the processor limits it (1080p) it changes nothing. "
                         "Keep it off.",
-                        [("0", "Off"), ("1", "On"), ("2", "On + Boost")], recommended="0")
+                        [("0", "Off"), ("1", "On"), ("2", "On + Boost")], recommended="0",
+                        short="NVIDIA RTX cards: less input delay, but it can cost frame rate. Keep it off.")
         self.ini_toggle(page, "async_shaders", "Compile shaders in the background",
                         "Fewer stutters when you reach new areas. Recommended on.")
 
@@ -2242,7 +2268,8 @@ class Launcher:
             page, "Multithreaded rendering (experimental)",
             "Prepares the picture on a second CPU core: more FPS on some PCs, mostly in Uncharted 2 and 3 "
             "(on by default; keep Frames queued at 1 with it). Turn it off if a game hangs while loading, or "
-            "in Drake's Fortune if its guns flicker grey.", multithreaded)
+            "in Drake's Fortune if its guns flicker grey.", multithreaded,
+            short="Prepares the picture on a second CPU core: more FPS on some PCs. Turn off if a game hangs.")
 
         def job_threads(parent):
             value = "off" if self.config.get("job_sleep", "auto") == "off" else "on"
@@ -2250,7 +2277,9 @@ class Launcher:
                              lambda v: self.change_config("job_sleep", v), self.f_small, recommended="on")
         self.row(page, "Idle game threads",
                  "Sleep: the game's helper threads rest while they wait, which keeps 4-6 core CPUs fast "
-                 "and saves power. Spin keeps their cores busy, as on the PS4.", job_threads)
+                 "and saves power. Spin keeps their cores busy, as on the PS4.", job_threads,
+                 short="Sleep lets the game's helper threads rest and saves power; Spin keeps them busy, as on the PS4.",
+                 badge=ALL_GAMES)
 
         self.fps_note = tk.Label(page, text="", font=self.f_small, bg=BG, fg=ACCENT, anchor="w")
         self.fps_note.pack(side="top", fill="x")
@@ -2561,7 +2590,7 @@ class Launcher:
         for name, title, hint in CHEATS:
             def cheat(parent, key="cheat_" + name):
                 return Toggle(parent, self.s, self.config.get(key, False), lambda v, k=key: self.change_config(k, v))
-            self.row(page, title, hint, cheat)
+            self.row(page, title, hint, cheat, badge=ALL_GAMES)
         return page
 
     def page_advanced(self):
@@ -2575,7 +2604,8 @@ class Launcher:
         self.widgets["language"] = self.row(
             page, "Language",
             "Menus and subtitles in another language: pick it here, then press Square in a game's main "
-            "menu to switch. Languages marked + voices are also spoken in your copy of the game.", language)
+            "menu to switch. Languages marked + voices are also spoken in your copy of the game.", language,
+            short="Pick a language here, then press Square in a game's main menu to switch.", badge=ALL_GAMES)
 
         def speakers(parent):
             return Segmented(parent, (("auto", "Auto"), ("2", "Stereo"), ("6", "5.1"), ("8", "7.1")),
@@ -2584,14 +2614,16 @@ class Launcher:
         self.row(page, "Speakers",
                  "The games have their own stereo, 5.1 and 7.1 sound mixes. Auto picks the one that matches "
                  "your Windows sound output (Sound settings -> speaker setup); headphones get stereo.",
-                 speakers)
+                 speakers, short="Auto picks the stereo, 5.1 or 7.1 mix that matches your Windows sound output.",
+                 badge=ALL_GAMES)
 
         def unlock(parent):
             return Toggle(parent, self.s, self.config.get("unlock", False),
                           lambda v: self.change_config("unlock", v))
         self.row(page, "Unlock all chapters",
                  "Every chapter in Chapter Select and the Brutal difficulty from the start, in all three "
-                 "games. Your saves and progress stay as they are. Needs update 1.02.", unlock)
+                 "games. Your saves and progress stay as they are. Needs update 1.02.", unlock,
+                 short="Every chapter and the Brutal difficulty from the start. Needs update 1.02.", badge=ALL_GAMES)
 
         def unlock_rewards(parent):
             return Toggle(parent, self.s, self.config.get("unlock_rewards", False),
@@ -2599,20 +2631,24 @@ class Launcher:
         self.row(page, "Unlock all rewards",
                  "Every reward in Bonuses (skins, weapons, render modes, art galleries, gameplay tweaks) "
                  "and every story cutscene, while this is on. Nothing is saved: turned off, the menus show "
-                 "your own progress again. Needs update 1.02.", unlock_rewards)
+                 "your own progress again. Needs update 1.02.", unlock_rewards,
+                 short="Every Bonuses reward and story cutscene, while this is on. Needs update 1.02.",
+                 badge=ALL_GAMES)
 
         def diagnostics(parent):
             return Toggle(parent, self.s, self.config.get("diagnostics", True),
                           lambda v: self.change_config("diagnostics", v))
         self.row(page, "Performance log", "Writes frame rate statistics to the log every 5 seconds. Helps when "
-                                          "you report a problem.", diagnostics)
+                                          "you report a problem.", diagnostics, badge=ALL_GAMES)
 
         def torch_forward(parent):
             return Toggle(parent, self.s, self.config.get("torch_forward", True),
                           lambda v: self.change_config("torch_forward", v))
         self.row(page, "Torch follows Nate (Uncharted 2)",
                  "The torch lights where Nate points it. Off: as on the PS4, it lights where the camera "
-                 "looks. Needs update 1.02.", torch_forward)
+                 "looks. Needs update 1.02.", torch_forward,
+                 short="The torch lights where Nate points it; off, where the camera looks. Needs update 1.02.",
+                 badge=ALL_GAMES)
 
         def check_updates(parent):
             return Toggle(parent, self.s, self.config.get("check_updates", True),
@@ -2620,7 +2656,7 @@ class Launcher:
         version = updater.installed_version(ROOT)
         self.row(page, "Check for updates at start",
                  f"Installed: {updater.version_text(version) if version else 'source tree (updates with git)'}. "
-                 "The launcher asks before it installs anything.", check_updates)
+                 "The launcher asks before it installs anything.", check_updates, badge=ALL_GAMES)
 
         def section(title, actions, note=""):
             tk.Label(page, text=title, font=self.f_small, bg=BG, fg=ACCENT, anchor="w").pack(

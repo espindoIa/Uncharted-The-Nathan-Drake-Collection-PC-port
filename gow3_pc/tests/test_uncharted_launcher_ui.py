@@ -240,6 +240,23 @@ class LauncherUiTest(unittest.TestCase):
         self.assertEqual(self.root.clipboard_get(), report)
         toast.assert_called_once_with("Report copied", "ok")
 
+    def test_every_long_hint_has_a_short_line_and_global_rows_a_badge(self):
+        mod, launcher = uncharted_launcher, self.launcher
+        launcher.add_gpu_row([("0", "GPU A"), ("1", "GPU B")])  # the row that joins Display later
+        self.assertGreater(len(launcher.rows), 20)
+        glob = {"Language", "Speakers", "Unlock all chapters", "Unlock all rewards", "Performance log",
+                "Torch follows Nate (Uncharted 2)", "Check for updates at start", "Idle game threads",
+                *(title for _, title, _ in mod.CHEATS)}
+        for row in launcher.rows:
+            title = row["title"]
+            if len(row["hint"]) > mod.HINT_MAX:
+                self.assertTrue(row["short"], f"{title}: hint of {len(row['hint'])} characters has no short line")
+            if row["short"]:
+                self.assertLessEqual(len(row["short"]), mod.SHORT_MAX, title)
+                self.assertLess(len(row["short"]), len(row["hint"]), title)
+            self.assertEqual(row["badge"], "ALL GAMES" if title in glob else None, title)
+        self.assertTrue(glob <= {row["title"] for row in launcher.rows}, "a global row was not built")
+
     def test_launcher_uses_no_native_message_box(self):
         text = (LAUNCHER / "uncharted_launcher.pyw").read_text(encoding="utf-8")
         self.assertNotIn("messagebox.", text.split('if __name__ == "__main__"')[0])
@@ -298,6 +315,39 @@ class DialogTest(unittest.TestCase):
         self.root.after(100, copy)
         Dialog.error(self.root, "t", "m", detail="C:\\some\\path\nsecond line")
         self.assertEqual(self.root.clipboard_get(), "C:\\some\\path\nsecond line")
+
+    def test_info_tip_opens_one_popover_at_a_time(self):
+        InfoTip, Badge = self.widgets.InfoTip, self.widgets.Badge
+        self.root.deiconify()
+        self.root.update()
+        first = InfoTip(self.root, "first full text", 1.0, ("Segoe UI", 9))
+        second = InfoTip(self.root, "second full text", 1.0, ("Segoe UI", 9))
+        Badge(self.root, "ALL GAMES", 1.0, ("Segoe UI", 8)).pack()
+        first.pack()
+        second.pack()
+        self.root.update()
+        self.addCleanup(InfoTip.dismiss)
+        first.open()
+        self.assertTrue(first.popover.winfo_exists())
+        self.assertEqual(first.popover.winfo_manager(), "place")  # inside the window, not a Toplevel
+        self.assertIs(InfoTip.current, first)
+        old = first.popover
+        second.open()
+        self.assertFalse(old.winfo_exists())
+        self.assertIsNone(first.popover)
+        self.assertTrue(second.popover.winfo_exists())
+        InfoTip.dismiss(second)  # a click on its own "?" is left to its handler
+        self.assertTrue(second.popover.winfo_exists())
+        InfoTip.dismiss(self.root)  # a click elsewhere
+        self.assertIsNone(second.popover)
+        self.assertIsNone(InfoTip.current)
+        first.open(pin=True)
+        first.leave()  # pinned: the pointer leaving does not close it
+        self.assertIsNotNone(first.popover)
+        first.toggle()  # Space / Enter on the focused "?" closes an open one
+        self.assertIsNone(first.popover)
+        first.toggle()
+        self.assertTrue(first.popover.winfo_exists())
 
     def test_toast_shows_stacks_and_goes_away(self):
         Toast = self.widgets.Toast

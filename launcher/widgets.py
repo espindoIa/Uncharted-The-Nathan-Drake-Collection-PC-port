@@ -173,6 +173,124 @@ class ScrollBar(tk.Canvas):
         self.draw()
 
 
+class Badge(tk.Canvas):
+    """A small label with a rounded border ("ALL GAMES" next to a setting that all three games share)."""
+
+    def __init__(self, parent, text, scale, font):
+        pad = int(7 * scale)
+        measure = tkfont.Font(root=parent, font=font)
+        w, h = measure.measure(text) + 2 * pad, measure.metrics("linespace") + int(4 * scale)
+        super().__init__(parent, width=w, height=h, bg=parent["bg"], highlightthickness=0)
+        round_rect(self, 1, 1, w - 1, h - 1, h // 2, fill="", outline=LINE)
+        self.create_text(w // 2, h // 2, text=text, font=font, fill=MUTED)
+        self.text = text
+
+
+class InfoTip(tk.Canvas):
+    """A round "?" that explains a setting: the full text opens in a popover (a frame placed inside the
+    window, like Toast) on hover after DELAY ms, on a click (stays until closed) or on Space/Enter.
+    Closes on leaving (unless pinned), Esc, losing the focus, a click elsewhere (the launcher's button
+    router calls dismiss) and when another tip opens: only one is open at a time."""
+    DELAY = 250
+    current = None
+
+    def __init__(self, parent, text, scale, font):
+        size = int(18 * scale)
+        super().__init__(parent, width=size, height=size, bg=parent["bg"], highlightthickness=1,
+                         highlightbackground=parent["bg"], highlightcolor=ACCENT, takefocus=1, cursor="hand2")
+        self.text, self.scale, self.font, self.size = text, scale, font, size
+        self.popover, self.pinned, self.timer = None, False, None
+        self.draw(MUTED)
+        self.bind("<Enter>", self.enter)
+        self.bind("<Leave>", self.leave)
+        self.bind("<Button-1>", self.click)
+        self.bind("<space>", self.toggle)
+        self.bind("<Return>", self.toggle)
+        self.bind("<Escape>", lambda e: self.close())
+        self.bind("<FocusOut>", lambda e: self.close())
+        self.bind("<Destroy>", lambda e: self.close(), add="+")
+
+    def draw(self, color):
+        self.delete("all")
+        self.create_oval(1, 1, self.size - 1, self.size - 1, outline=color)
+        self.create_text(self.size // 2, self.size // 2, text="?", font=self.font, fill=color)
+
+    def enter(self, event=None):
+        self.draw(TEXT)
+        if self.popover is None:
+            self.timer = self.after(self.DELAY, self.open)
+
+    def leave(self, event=None):
+        self.draw(MUTED)
+        self.cancel_timer()
+        if not self.pinned:
+            self.close()
+
+    def click(self, event=None):
+        self.cancel_timer()
+        self.focus_set()  # Esc and FocusOut then reach this tip
+        if self.popover is not None and self.pinned:
+            self.close()
+        else:
+            self.open(pin=True)
+
+    def toggle(self, event=None):
+        if self.popover is not None:
+            self.close()
+        else:
+            self.open(pin=True)
+
+    def cancel_timer(self):
+        if self.timer is not None:
+            try:
+                self.after_cancel(self.timer)
+            except tk.TclError:
+                pass
+            self.timer = None
+
+    def open(self, pin=False):
+        self.cancel_timer()
+        if self.popover is not None:
+            self.pinned = self.pinned or pin
+            return
+        InfoTip.dismiss()
+        top, px = self.winfo_toplevel(), lambda v: int(v * self.scale)  # noqa: E731
+        frame = tk.Frame(top, bg=LINE, padx=1, pady=1)
+        tk.Label(frame, text=self.text, font=self.font, bg=PANEL_HI, fg=TEXT, justify="left", anchor="w",
+                 wraplength=px(420), padx=px(12), pady=px(10)).pack()
+        frame.update_idletasks()
+        w, h = frame.winfo_reqwidth(), frame.winfo_reqheight()
+        x = self.winfo_rootx() - top.winfo_rootx()
+        y = self.winfo_rooty() - top.winfo_rooty() + self.winfo_height() + px(4)
+        if y + h > top.winfo_height() - px(4):  # no room below: above the "?"
+            y = self.winfo_rooty() - top.winfo_rooty() - h - px(4)
+        x = max(px(4), min(x, top.winfo_width() - w - px(4)))
+        y = max(px(4), min(y, top.winfo_height() - h - px(4)))  # also for a "?" scrolled out of view (Tab)
+        frame.place(x=x, y=y)
+        frame.lift()
+        self.popover, self.pinned = frame, pin
+        InfoTip.current = self
+
+    def close(self):
+        self.cancel_timer()
+        self.pinned = False
+        popover, self.popover = self.popover, None
+        if InfoTip.current is self:
+            InfoTip.current = None
+        if popover is not None:
+            try:
+                popover.destroy()
+            except tk.TclError:
+                pass
+
+    @classmethod
+    def dismiss(cls, widget=None):
+        """Closes the open popover, unless `widget` is its own "?" (its click handler decides)."""
+        tip = cls.current
+        if tip is not None and widget is not tip:
+            tip.close()
+
+
 # ---------------------------------------------------------------------------------------------
 # Messages: Dialog (modal, replaces the native message box) and Toast (a short acknowledgement)
 

@@ -6,6 +6,13 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Changed (24 Oct 2026): settings show one line and a ? with the details.** Each setting now has
+  a short one-line hint; the full explanation (the numbers, what to do if a game misbehaves) is
+  behind the round ? next to its name: hover it, click it (it stays open until you click elsewhere
+  or press Esc) or press Space or Enter on it. Settings that apply to all three games (language,
+  speakers, the unlocks, the cheats, the performance log, update checks, idle game threads) carry
+  an ALL GAMES label; the others are kept separately for each game.
+
 - **Changed (24 Oct 2026): launcher messages and questions match the launcher's look.** They are
   dark windows in the launcher's colours instead of the grey Windows message boxes: Enter
   answers the highlighted button, Esc cancels, and long details (an error's text) have a Copy
