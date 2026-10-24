@@ -6,6 +6,15 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **24 Oct 2026: Uncharted 3 market (and any GPU-heavy scene) runs about 27-30% faster with Reflex
+  or Frame Generation on.** Reflex's sleep held the game back, so the graphics card sat idle
+  between frames. The port now starts the next frame as soon as the card has one frame queued.
+  Measured at 4K DLAA in the market street (RTX 5070): 42 -> 55 FPS with Frame Generation on, and
+  49-51 -> 62-64 FPS with Frame Generation off and Reflex on. Trade-off: the median latency is
+  higher than with the driver's sleep, but slow frames are rarer. For the old behaviour, toggle bit
+  549755813888 in the second number of `analysis/uncharted-user/disabled-optimizations.txt`.
+  The market hitches of up to a second are not fixed and are still under investigation.
+
 - **Experimental (23 Oct 2026): further Uncharted 3 crowd-rendering work.** Static mesh inputs can
   stay in immutable GPU snapshots instead of being recycled through temporary copies. Two short
   market comparisons did not establish a material FPS or smoothness improvement; this is opt-in

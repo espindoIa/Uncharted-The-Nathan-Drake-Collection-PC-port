@@ -27,6 +27,7 @@ New entries go at the end, dated, measured numbers only.
 - Measuring method (ab2.sh, abstats.py, PresentMon, profilers): see the Tools list in the U3 performance section above, and AGENTS.md "Measuring".
 - U3 market stutter and CPU work (earlier 23 Oct benchmarks stood at the save's gate): `Cartagena market: stutter and lower frame rate from readback faults (23 Oct 2026)`.
 - Structural crowd experiments and exact rollback: `Structural crowd snapshots and output grouping (23 Oct 2026)`.
+- Market frame rate = Reflex sleep, pacer replaces it: `Reflex pacer: market frame rate (24 Oct 2026)`
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
@@ -4104,3 +4105,55 @@ Final checks: runtime rebuild succeeded; `skinning-writes-test` passed again (as
 `git diff --check` clean apart from Git's CRLF-conversion notices; no game instance left running.
 No regression suite/FG comparison/other-game tests, following the request for fewer short tests.
 Structural source changes remain uncommitted; the earlier checkpoint remains c48f91f.
+
+## Reflex pacer: market frame rate (24 Oct 2026)
+
+Setup: U3 Cartagena market street after the mkt_back route, 4K DLAA model M, RTX 5070, cap 120.
+
+Cause (measured, `C:/dev/bench/market_bottleneck1`): the frame was paced by the Reflex sleep,
+not by GPU or CPU throughput. The driver/Streamline sleep averaged 12.7-14.6 ms per ~24 ms
+frame. GPU busy 17.5 ms of 22.4 ms per frame; the GPU sat idle ~9 ms before the next frame's first
+submission in ~43% of frames (262 gaps over 8 ms holding 2,687 ms of 16 s). Frame Generation
+forces Reflex on, so FG players always paid this. Inferred: this is why the 23 Oct CPU
+experiments (crowd dispatch fusion, fusion1: 43.8/43.3/43.3/42.0 FPS off/on/on/off, opt-in,
+0d209c7) showed no gain at 4K: the sleep, not the CPU work, set the frame time.
+
+Change (`gow3_pc/gpu/shim/gow3_reflex.cpp`): with Reflex effectively on, the guest thread no
+longer calls the driver's/Streamline's sleep. `PacerWait` waits until the draw scheduler's work
+timeline reaches frame (id-2)'s `ready_tick` (recorded lock-free by `FrameQueued` in
+`Presenter::PrepareFrame`), 50 ms timeout. The GPU always has the next frame queued and the CPU
+stays about one GPU frame ahead. Markers, Reflex mode and FG forcing are unchanged. `Disabled2`
+bit 39 (`ReflexPacer`, 549755813888) restores the driver sleep live. `GOW3_REFLEX_PACER_LAG`
+(1-4, default 2). The stats line adds `pacer=`, `pacer_waits=`, `pacer_avg_ms=`,
+`pacer_timeouts=`. EarlySubmit (SleepActive) is off while the pacer runs.
+
+Measurements (measured; `C:/dev/bench/reflex_ab.py`, one session each, 8 s windows in order
+A,B,B,A,A,B, real FPS from S events; external CPU load 0.4-2.6 cores, per window in the .json):
+
+| run | A | B | A FPS (p99 ms) | B FPS (p99 ms) |
+|---|---|---|---|---|
+| reflexfg1 (FG+Reflex) | driver sleep | no sleep at all | 42.1/42.3/42.2 (31.5-33.0) | 53.1/53.8/53.5 (24.5-25.0) |
+| pacerfg1 (FG+Reflex) | driver sleep | pacer | 51.7*/43.4/41.5 (29.4-32.2) | 54.9/55.0/54.7 (21.5-23.9) |
+| pacernofg1 (FG off, Reflex on, final build) | driver sleep | pacer | 59.9*/50.6/49.1 (25.5-29.0) | 62.3/63.8/64.2 (21.0-23.8) |
+
+\* first window, driver sleep still ramping (pacerfg1: 3.7 -> 13 ms). FG doubled every real frame
+in both arms. pacernofg1: `pacer_timeouts` 0, no assert/device-loss lines.
+
+Latency (measured from the Reflex log, simStart->gpuRenderEnd, pacerfg1, FG on; the driver's
+per-frame attribution under FG is not reliable): pacer p50 36.1 ms, p90 37.5; driver sleep
+p50 20.5, p90 46.0. Trade-off: about +15 ms p50, much shorter tail, +27-30% real FPS.
+
+Tried and removed: an adaptive extra delay after the wait (feedback from GPU-idle-at-submit).
+The first signal never fired (pacerfg2: delay saturated at 16 ms, 42-45 FPS). The fixed signal
+converged to 0-2.4 ms (pacerfg3: 53.7/54.1/53.9 FPS, latency p50 35.1 ms): no latency or FPS
+gain. Inferred: the CPU chain fills the frame, so there is no slack to trade for latency.
+
+Hitches, found, not fixed: the 0.5-1.5 s market hitches are the GPU holding one already-submitted
+submission for multiples of ~500 ms (skinwrite1/mkd/fusion1 logs; "GPU wait: 1 seconds,
+target=15768 completed=15767 submitted-next=15777"). The repeated "Stuck fault" on page
+0x103c561000 is a consequence. Cause not established. Next diagnostic: `GOW3_GPU_CHECKPOINTS=1` +
+`GOW3_SUBMIT_LOG` with a 200 ms WAIT_TIMEOUT in `vk_semaphore.cpp`, or an ETW/GPUView capture.
+
+Not verified: U1/U2, other U3 chapters, long sessions, input latency by an external tool,
+laptops/non-NVIDIA (the pacer only runs where Reflex is on, i.e. NVIDIA), the installed player
+package (not updated).

@@ -72,6 +72,10 @@ u64 PreparedFlip();
 /// Presenter, after the frame's last submission: sets the render submit end marker.
 void RenderSubmitEnd(u64 serial);
 
+/// Presenter, next to RenderSubmitEnd (24 Oct 2026): the frame's GPU work is done when `timeline`
+/// reaches `tick` on `device`. Lock free; feeds the pacer that replaces the driver sleep.
+void FrameQueued(u64 id, vk::Device device, vk::Semaphore timeline, u64 tick);
+
 /// Present thread, around vkQueuePresentKHR of a game frame (not redraws, black or loading frames).
 /// PresentStart also applies a change of the mode (setting or toggle).
 void PresentStart(u64 serial);

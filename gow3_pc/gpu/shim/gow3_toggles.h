@@ -234,6 +234,9 @@ enum : std::uint64_t {
     /// Opt-in (GOW3_DISPATCH_FUSION=1): one crowd workgroup per mesh instance, batched as Y
     /// groups with per-instance descriptor/push-data arrays. Set: one dispatch per instance.
     DispatchFusion = 1ull << 38,
+    /// Set: Reflex uses the driver's/Streamline's sleep (old behaviour). Clear: the GPU-gated pacer
+    /// (the guest waits until the GPU finished frame id - lag; default).
+    ReflexPacer = 1ull << 39,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

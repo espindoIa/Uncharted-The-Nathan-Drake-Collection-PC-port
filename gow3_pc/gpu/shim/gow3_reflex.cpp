@@ -77,6 +77,15 @@ struct State {
     std::atomic<unsigned> timeouts_in_row{0};
     std::atomic<u64> sleeps{0}, sleep_ns{0}, timeouts{0};
 
+    /// 24 Oct 2026, the pacer: per frame id % 64 the draw scheduler's timeline tick that marks the
+    /// frame's GPU work done; the id is written last (release) so a reader of the id sees its tick.
+    struct Queued {
+        std::atomic<u64> id{0}, tick{0};
+    };
+    std::array<Queued, 64> queued{};
+    std::atomic<VkSemaphore> pacer_semaphore{VK_NULL_HANDLE};
+    std::atomic<VkDevice> pacer_device{VK_NULL_HANDLE};
+    std::atomic<u64> pacer_waits{0}, pacer_wait_ns{0}, pacer_timeouts{0};
     /// GOW3_REFLEX_VARIANT, read once in Init. 22 Oct 2026, DIAGNOSTIC ONLY, not a default: where
     /// RenderSubmitStart is sent. 0 = today (first submit after a flip); 2 "chain" = frame N+1's
     /// start follows RenderSubmitEnd(N), so the span is stage B's whole frame; 3 "zero" = start
@@ -221,6 +230,50 @@ void Sleep(u64 id) {
     }
 }
 
+/// 24 Oct 2026: the pacer stands in for the driver sleep unless ReflexPacer or ReflexNoSleep is set.
+bool PacerReplacesSleep() {
+    return EffectiveMode() != 0 && !Gow3Toggle::Disabled2(Gow3Toggle::ReflexPacer) &&
+           !Gow3Toggle::Disabled2(Gow3Toggle::ReflexNoSleep);
+}
+
+/// 24 Oct 2026: replaces the driver sleep (measured on U3 4K FG: 12.7-14.6 ms of sleep per frame,
+/// 42 FPS; without it 53 FPS) by waiting until the GPU finished frame id - lag, so it never starves.
+void PacerWait(u64 id) {
+    static const u64 lag = [] {
+        const char* env = std::getenv("GOW3_REFLEX_PACER_LAG");
+        return u64(std::clamp(env ? std::atoi(env) : 2, 1, 4));
+    }();
+    const s64 start = NowNs();
+    const s64 last_present = g.last_present_ns.load(std::memory_order_relaxed);
+    if (id <= lag || last_present == 0 || start - last_present > IdleNs) {
+        return;
+    }
+    const u64 target = id - lag;
+    const auto& slot = g.queued[target % g.queued.size()];
+    if (slot.id.load(std::memory_order_acquire) != target) {
+        return;
+    }
+    const u64 tick = slot.tick.load(std::memory_order_relaxed);
+    const VkSemaphore semaphore = g.pacer_semaphore.load(std::memory_order_relaxed);
+    const VkDevice raw_device = g.pacer_device.load(std::memory_order_relaxed);
+    if (!semaphore || !raw_device) {
+        return;
+    }
+    const vk::Device device{raw_device};
+    const vk::Semaphore handle{semaphore};
+    const vk::SemaphoreWaitInfo wait = {
+        .semaphoreCount = 1,
+        .pSemaphores = &handle,
+        .pValues = &tick,
+    };
+    const vk::Result result = device.waitSemaphores(wait, 50'000'000);
+    if (result != vk::Result::eSuccess) {
+        g.pacer_timeouts.fetch_add(1, std::memory_order_relaxed);
+    }
+    g.pacer_waits.fetch_add(1, std::memory_order_relaxed);
+    g.pacer_wait_ns.fetch_add(u64(NowNs() - start), std::memory_order_relaxed);
+}
+
 /// Present thread, once per game frame: follows the setting and the toggle. The mode is applied
 /// before `active` drops, so turning Reflex off reaches the driver although the guest paths already
 /// do nothing.
@@ -253,6 +306,7 @@ void Update() {
 /// the frames in flight (it can read -1 for a moment); a drift would mean an unpaired flip.
 void PrintStats() {
     static u64 last_sleeps = 0, last_sleep_ns = 0, last_timeouts = 0;
+    static u64 last_pacer_waits = 0, last_pacer_ns = 0, last_pacer_timeouts = 0;
     const u64 sleeps = g.sleeps.load(std::memory_order_relaxed);
     const u64 sleep_ns = g.sleep_ns.load(std::memory_order_relaxed);
     const u64 timeouts = g.timeouts.load(std::memory_order_relaxed);
@@ -260,12 +314,24 @@ void PrintStats() {
     const double mean_ms = count ? double(sleep_ns - last_sleep_ns) / double(count) / 1e6 : 0.0;
     const long long lag = static_cast<long long>(g.guest_flips.load(std::memory_order_relaxed)) -
                           static_cast<long long>(g.prepared_flips.load(std::memory_order_relaxed));
+    const u64 pacer_waits = g.pacer_waits.load(std::memory_order_relaxed);
+    const u64 pacer_ns = g.pacer_wait_ns.load(std::memory_order_relaxed);
+    const u64 pacer_timeouts = g.pacer_timeouts.load(std::memory_order_relaxed);
+    const u64 pacer_count = pacer_waits - last_pacer_waits;
+    const double pacer_ms =
+        pacer_count ? double(pacer_ns - last_pacer_ns) / double(pacer_count) / 1e6 : 0.0;
     std::printf(
-        "Reflex: mode=%d sleeps=%llu avg_sleep_ms=%.2f timeouts=%llu lag=%lld nosleep=%d variant=%d\n",
+        "Reflex: mode=%d sleeps=%llu avg_sleep_ms=%.2f timeouts=%llu lag=%lld nosleep=%d variant=%d"
+        " pacer=%d pacer_waits=%llu pacer_avg_ms=%.2f pacer_timeouts=%llu\n",
         EffectiveMode(), static_cast<unsigned long long>(count), mean_ms,
         static_cast<unsigned long long>(timeouts - last_timeouts), lag,
-        Gow3Toggle::Disabled2(Gow3Toggle::ReflexNoSleep) ? 1 : 0, g.variant);
+        Gow3Toggle::Disabled2(Gow3Toggle::ReflexNoSleep) ? 1 : 0, g.variant,
+        PacerReplacesSleep() ? 1 : 0, static_cast<unsigned long long>(pacer_count), pacer_ms,
+        static_cast<unsigned long long>(pacer_timeouts - last_pacer_timeouts));
     std::fflush(stdout);
+    last_pacer_waits = pacer_waits;
+    last_pacer_ns = pacer_ns;
+    last_pacer_timeouts = pacer_timeouts;
     last_sleeps = sleeps;
     last_sleep_ns = sleep_ns;
     last_timeouts = timeouts;
@@ -352,6 +418,7 @@ void Shutdown(vk::Device device) {
     }
     g.available.store(false, std::memory_order_release);
     g.active.store(false, std::memory_order_relaxed);
+    g.pacer_device.store(VK_NULL_HANDLE, std::memory_order_relaxed);
     {
         std::scoped_lock lock{g.mutex};
         g.swapchain = vk::SwapchainKHR{};
@@ -395,7 +462,20 @@ void OnSwapchain(vk::SwapchainKHR swapchain) {
 
 bool SleepActive() {
     return g.applied_mode.load(std::memory_order_relaxed) != 0 && EffectiveMode() != 0 &&
-           !Gow3Toggle::Disabled2(Gow3Toggle::ReflexNoSleep);
+           !Gow3Toggle::Disabled2(Gow3Toggle::ReflexNoSleep) &&
+           Gow3Toggle::Disabled2(Gow3Toggle::ReflexPacer); // 24 Oct 2026: false while the pacer sleeps
+}
+
+void FrameQueued(u64 id, vk::Device device, vk::Semaphore timeline, u64 tick) {
+    if (!id) {
+        return;
+    }
+    // 24 Oct 2026: the scheduler's work semaphore never changes; the latest is stored anyway.
+    g.pacer_device.store(static_cast<VkDevice>(device), std::memory_order_relaxed);
+    g.pacer_semaphore.store(static_cast<VkSemaphore>(timeline), std::memory_order_relaxed);
+    auto& slot = g.queued[id % g.queued.size()];
+    slot.tick.store(tick, std::memory_order_relaxed);
+    slot.id.store(id, std::memory_order_release);
 }
 
 void InputSample() {
@@ -410,11 +490,14 @@ void InputSample() {
     }
     const bool reflex_on = EffectiveMode() != 0;
     const bool sleeps = reflex_on && !Gow3Toggle::Disabled2(Gow3Toggle::ReflexNoSleep);
-    const u8 state = sleeps ? 1 : reflex_on ? 2 : 0;
+    const bool pacer = PacerReplacesSleep();
+    const u8 state = pacer ? 3 : sleeps ? 1 : reflex_on ? 2 : 0;
     const u64 id = g.guest_flips.load(std::memory_order_relaxed) + 1;
     const bool streamline = g.streamline.load(std::memory_order_relaxed);
+    if (pacer) {
+        PacerWait(id);
     // Streamline: slReflexSleep also with Reflex off (it returns at once then; Reflex guide 4.0).
-    if (sleeps || (streamline && !Gow3Toggle::Disabled2(Gow3Toggle::ReflexNoSleep))) {
+    } else if (sleeps || (streamline && !Gow3Toggle::Disabled2(Gow3Toggle::ReflexNoSleep))) {
         Sleep(id);
     }
     g.frame_state[id % g.frame_state.size()].store(state, std::memory_order_relaxed);

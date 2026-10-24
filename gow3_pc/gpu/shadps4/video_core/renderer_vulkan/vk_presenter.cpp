@@ -888,6 +888,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // GPU's (up to a frame when it is the bottleneck), and counted as render submit time it would
     // tell the driver the CPU needs that long, so Reflex would release the game that much earlier.
     Gow3Reflex::RenderSubmitEnd(frame->serial);
+    Gow3Reflex::FrameQueued(frame->serial, instance.GetDevice(), frame->ready_semaphore,
+                            frame->ready_tick);
 
     // gow3: the GPU command thread runs at most GOW3_FRAMES_AHEAD (default 1) guest frames
     // ahead of the GPU: it waits here for the frame that many flips back. When the GPU is the
