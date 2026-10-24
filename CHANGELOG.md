@@ -6,6 +6,15 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **24 Oct 2026: Uncharted 3's Cartagena market street (chapter 2) runs about 10-12% faster.**
+  The street's crowd made the port prepare about 1,500 tiny skinning jobs a frame one by one,
+  which kept the processor, not the graphics card, as the limit. They now go to the graphics card
+  in batches. Measured at 4K, DLSS Quality, Frame Generation on (RTX 5070, Ryzen 5 5600): the
+  street went from about 78 to about 87 real FPS and the meat market gate from about 86 to about
+  97. The street is still a little slower than the gate because the game draws more there. To turn
+  it off, set `GOW3_DISPATCH_RUNS=0` (and `GOW3_STATIC_MESH_SNAPSHOTS=0`) in
+  `analysis/uncharted-user/test-env.txt`.
+
 - **Fixed (24 Oct 2026): in Uncharted 3, young Sully's shirt in chapter 2 (Cartagena chase) no
   longer stretches into a long strip down to his knees.** The cloth shader read and wrote past
   the shared memory the game reserves for it; the PS4 ignores such accesses, NVIDIA cards did
