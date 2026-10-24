@@ -242,6 +242,10 @@ enum : std::uint64_t {
     /// Cartagena: 1,522 a frame, ~3.7 ms of stage A and ~4.4 ms of stage B). Set: one packet and
     /// one dispatch each, read live on both stages (vk_rasterizer.cpp, DispatchRunRecord).
     DispatchRuns = 1ull << 40,
+    /// Bit set: old behaviour (read live). Clear, the compute releases staged in a batched
+    /// dispatch run reach the Vulkan recorder as one signal (24 Oct 2026 U3 street: ~20 a run,
+    /// ~666k per 5 s, each with its own download pass, Record and kick on stage B).
+    RunReleaseBatch = 1ull << 41,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

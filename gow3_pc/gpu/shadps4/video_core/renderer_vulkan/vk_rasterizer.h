@@ -170,6 +170,20 @@ public:
         CutRefused,    ///< an instance that cannot be batched
         NumRunCuts,
     };
+    /// gow3 24 Oct 2026 (Gow3Toggle::RunReleaseBatch): set by Liverpool. `task` is the compute
+    /// release task (`size` bytes of data); `stage` does a release's stage B part per label and
+    /// mixes it into `hash` (false: run the task itself); `signal` queues one host-copy signal
+    /// for the staged releases' bytes (taken out of `batch`), `hash` for verify mode.
+    struct ReleaseBatchHooks {
+        OrderedTask task;
+        bool (*stage)(Rasterizer&, const u8* data, u64& hash);
+        void (*signal)(Rasterizer&, std::vector<u8>& batch, u64 hash);
+        u32 size;
+    };
+    static inline ReleaseBatchHooks release_hooks{nullptr, nullptr, nullptr, 0};
+    /// GOW3_RUN_RELEASE_VERIFY=1: each batch's signal checks its writes and IRQs (any thread).
+    static bool RunReleaseVerify();
+    static void NoteReleaseVerify(u64 fences, bool mismatch);
     /// Stage A: the open run (if any) is handed to stage B first. `detail`: for CutOpcode the
     /// PM4 opcode (and SET_SH_REG's register << 8), for the statistics.
     void CutDispatchRun(u32 reason, u32 detail = 0) {
@@ -923,6 +937,8 @@ private:
     void DispatchRunRecord(const ComputePipeline* pipeline, const u8* tail, const u8* end);
     struct RunPlan;
     std::unique_ptr<RunPlan> run_plan; ///< stage B scratch
+    std::vector<u8> release_batch; ///< stage B: staged release bytes (ReleaseBatchHooks)
+    u64 release_batch_hash = 0;
     /// Stage B, GOW3_DISPATCH_RUN_VERIFY=1: the replayed instance DispatchRecord compares.
     u32 run_verify_index = ~0u;
     std::vector<std::pair<VAddr, u64>> run_verify_writes; ///< its GPU-written views

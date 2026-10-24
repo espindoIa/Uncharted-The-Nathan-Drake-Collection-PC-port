@@ -4180,6 +4180,9 @@ struct RunStats {
     std::array<u64, 10 + NumRunReplays + 7> seen{};
 };
 RunStats g_run_stats;
+/// GOW3_RUN_RELEASE_VERIFY: fences signalled in checked batches, batches whose writes or IRQs
+/// differed from what was staged (any thread: the batches signal on the recorder or copy threads).
+std::atomic<u64> g_release_verify_fences{0}, g_release_verify_mismatches{0};
 
 void RunCount(std::atomic<u64>& counter, u64 add = 1) {
     counter.store(counter.load(std::memory_order_relaxed) + add, std::memory_order_relaxed);
@@ -4283,6 +4286,11 @@ void PrintRunStats() {
                 (unsigned long long)s.pruned);
     s.task_cuts = {};
     s.join_cuts = {};
+    if (Rasterizer::RunReleaseVerify()) {
+        std::printf("; release verify (totals): %llu fences, %llu batch mismatches",
+                    (unsigned long long)g_release_verify_fences.load(std::memory_order_relaxed),
+                    (unsigned long long)g_release_verify_mismatches.load(std::memory_order_relaxed));
+    }
     if (RunVerifyEnabled()) {
         std::printf("; verify: %llu dispatches compared, mismatches: descriptors %llu, push data "
                     "%llu, tracked ranges %llu, written bytes %llu",
@@ -4297,6 +4305,19 @@ void PrintRunStats() {
     s.cuts = {};
 }
 } // namespace
+
+bool Rasterizer::RunReleaseVerify() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_RUN_RELEASE_VERIFY");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+void Rasterizer::NoteReleaseVerify(u64 fences, bool mismatch) {
+    g_release_verify_fences.fetch_add(fences, std::memory_order_relaxed);
+    g_release_verify_mismatches.fetch_add(mismatch, std::memory_order_relaxed);
+}
 
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
@@ -4968,8 +4989,22 @@ void Rasterizer::DispatchRunRecord(const ComputePipeline* pipeline, const u8* ta
         skip_tasks(at, record.num_tasks);
     }
     ASSERT(at == end);
+    // gow3 24 Oct 2026 (Gow3Toggle::RunReleaseBatch): after a batch, its compute releases (~20 a
+    // run, ~666k per 5 s in U3's street) are noted one by one and signalled together: one
+    // SignalAfterHostCopies whose closure writes every label and raises every IRQ in order
+    // (SignalAfterHostCopies + its Flush were ~4.9% of stage B). One download pass before the
+    // first: between releases nothing queues an image download or a tiny readback (the
+    // per-label part only notes buffer cache state), so later passes found nothing. Any other
+    // task sends the batch first. Not on the replay path.
+    const auto& hooks = release_hooks;
+    const auto flush_releases = [&] {
+        if (!release_batch.empty()) {
+            hooks.signal(*this, release_batch, release_batch_hash);
+            release_batch_hash = 0;
+        }
+    };
     // An instance's in-order tasks, as RunDrawPacket runs Task packets (no stage state).
-    const auto run_tasks = [&](const Instance& run) {
+    const auto run_tasks = [&](const Instance& run, bool batch_releases) {
         const auto* cs = stage_cs;
         const u32 snapshots = Shader::Info::num_ud_snapshots;
         stage_cs = nullptr;
@@ -4978,8 +5013,19 @@ void Rasterizer::DispatchRunRecord(const ComputePipeline* pipeline, const u8* ta
         const u8* task = run.tasks;
         for (u32 t = 0; t < run.num_tasks; ++t) {
             const auto& packet = *reinterpret_cast<const TaskPacket*>(task);
-            packet.task(*this, task + sizeof(TaskPacket));
+            const u8* data = task + sizeof(TaskPacket);
             task += sizeof(TaskPacket) + AlignPacket(packet.size);
+            if (batch_releases && packet.task == hooks.task && packet.size == hooks.size) {
+                if (release_batch.empty()) {
+                    ProcessDownloadImages();
+                }
+                if (hooks.stage(*this, data, release_batch_hash)) {
+                    release_batch.insert(release_batch.end(), data, data + packet.size);
+                    continue;
+                }
+            }
+            flush_releases();
+            packet.task(*this, data);
         }
         stage_cs = cs;
         Shader::Info::num_ud_snapshots = snapshots;
@@ -5310,9 +5356,14 @@ void Rasterizer::DispatchRunRecord(const ComputePipeline* pipeline, const u8* ta
         }
         ResetBindings(true); // the spans' tracked ranges into the barrier tracker
         scheduler.KickRecording();
+        // Fences after their dispatch: after the batch. Batched where RunComputeReleaseMem would
+        // queue each on the Vulkan recorder (else it waits and writes them itself).
+        const bool batch_releases = !Gow3Toggle::Disabled2(Gow3Toggle::RunReleaseBatch) &&
+                                    hooks.task && scheduler.IsRecordingDeferred();
         for (u32 k = 0; k < count; ++k) {
-            run_tasks(runs[k]); // fences after their dispatch: after the batch
+            run_tasks(runs[k], batch_releases);
         }
+        flush_releases();
         RunCount(stats.batched, count);
         RunCount(stats.batches);
         return;
@@ -5339,7 +5390,7 @@ void Rasterizer::DispatchRunRecord(const ComputePipeline* pipeline, const u8* ta
         if (constant_ring) {
             constant_ring->Stamp(runs[k].ring_end);
         }
-        run_tasks(runs[k]);
+        run_tasks(runs[k], false);
     }
     run_verify_index = ~0u;
     stage_cs = run_cs;

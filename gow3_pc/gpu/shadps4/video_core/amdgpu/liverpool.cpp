@@ -1090,43 +1090,128 @@ struct ComputeRelease {
     u32 pipe_id;
 };
 
+// gow3 17 Oct 2026: multithreaded rendering: like end-of-pipe fences (RunEventWriteEop), the
+// Vulkan recording thread signals the fence after the copies queued before it instead of this
+// thread waiting for them (Uncharted 3: ~1,800 compute releases a frame, 16% of the draw
+// recording thread blocked on host copies at 4K).
+bool ComputeReleaseOnRecorder(const ComputeRelease& release) {
+    return Vulkan::DrawPipe::OnStageB() && !Gow3Toggle::Disabled(Gow3Toggle::RecorderFences) &&
+           release.packet.data_sel.Value() != DataSelect::GdsMemStore;
+}
+
+/// Stage B's part of a recorder release, per label (before its signal is queued).
+void NoteComputeRelease(Vulkan::Rasterizer& rasterizer, const ComputeRelease& release) {
+    const auto sel = release.packet.data_sel.Value();
+    const VAddr label = release.packet.Address<VAddr>();
+    NoteOvertake(rasterizer, "compute release (recorder)", label);
+    const bool backing = rasterizer.GetBufferCache().MayBeGpuWritten(label & ~VAddr{4095}, 4096);
+    if (backing) {
+        rasterizer.NoteLabelWrite(label, sel == DataSelect::Data32Low ? 4 : 8);
+    }
+}
+
+// gow3 19 Oct 2026: the Vulkan recording thread must never fault on guest memory: a fault there
+// downloads through the GPU command thread, which drains the draw pipe, which (presenting a
+// frame) waits for the recording thread. A plain store into a protected page (GPU writes later
+// in the stream, or CPU-write tracking of a bound buffer) froze Uncharted 3 for good after
+// loading a save at 4K, twice. The label always goes through the backing view, as end-of-pipe
+// labels do (SignalEop; the window is marked backing-written for the buffer cache); a plain store
+// only where there is no backing. `note(address, value, bytes)` / `note_irq()`: verify mode.
+void SignalComputeRelease(const ComputeRelease& release, auto&& note, auto&& note_irq) {
+    const u32 pipe_id = release.pipe_id;
+    release.packet.SignalFence(
+        [pipe_id, &note_irq] {
+            note_irq(pipe_id);
+            Platform::IrqC::Instance()->SignalAsync(static_cast<Platform::InterruptId>(pipe_id));
+        },
+        [](VAddr, u16, u16) {},
+        [&note](void* address, u64 value, u32 num_bytes) {
+            note(address, value, num_bytes);
+            if (!Core::Memory::Instance()->TryWriteBacking(address, &value, num_bytes)) {
+                StoreFenceValue(address, value, num_bytes);
+            }
+        });
+}
+
+// gow3 24 Oct 2026 (GOW3_RUN_RELEASE_VERIFY=1): a rolling hash of what a batch of releases
+// writes and signals, in order: (address, bytes, value; clocks as 0) per label, pipe per IRQ.
+u64 ReleaseHashStep(u64 hash, u64 value) {
+    return (hash ^ value) * 0x100000001B3ull + 0x9E3779B97F4A7C15ull;
+}
+bool ReleaseValueFixed(const ComputeRelease& release) {
+    const auto sel = release.packet.data_sel.Value();
+    return sel == DataSelect::Data32Low || sel == DataSelect::Data64;
+}
+u64 HashComputeRelease(u64 hash, const ComputeRelease& release) {
+    const auto& packet = release.packet;
+    const auto sel = packet.data_sel.Value();
+    hash = ReleaseHashStep(hash, packet.Address<u64>());
+    hash = ReleaseHashStep(hash, sel == DataSelect::Data32Low ? 4 : 8);
+    hash = ReleaseHashStep(hash, sel == DataSelect::Data32Low ? u64(packet.DataDWord())
+                                 : sel == DataSelect::Data64  ? packet.DataQWord()
+                                                              : 0);
+    const auto irq = packet.int_sel.Value();
+    if (irq == InterruptSelect::IrqUndocumented || irq == InterruptSelect::IrqWhenWriteConfirm) {
+        hash = ReleaseHashStep(hash, 0x10000 | release.pipe_id);
+    }
+    return hash;
+}
+
+/// Rasterizer::ReleaseBatchHooks::stage: a run's release on the recorder path is noted here and
+/// its signal batched by the caller; false: run the task itself.
+bool StageComputeRelease(Vulkan::Rasterizer& rasterizer, const u8* data, u64& hash) {
+    alignas(ComputeRelease) u8 storage[sizeof(ComputeRelease)];
+    std::memcpy(storage, data, sizeof(storage));
+    const auto& release = *reinterpret_cast<const ComputeRelease*>(storage);
+    if (!ComputeReleaseOnRecorder(release)) {
+        return false;
+    }
+    NoteComputeRelease(rasterizer, release);
+    hash = HashComputeRelease(hash, release);
+    return true;
+}
+
+/// Rasterizer::ReleaseBatchHooks::signal: one SignalAfterHostCopies for the batch's releases (the
+/// bytes of `count` ComputeRelease), each signalled in order as RunComputeReleaseMem does.
+void SignalComputeReleases(Vulkan::Rasterizer& rasterizer, std::vector<u8>& batch, u64 hash) {
+    const bool verify = Vulkan::Rasterizer::RunReleaseVerify();
+    rasterizer.SignalAfterHostCopies([bytes = std::exchange(batch, {}), hash, verify] {
+        u64 seen = 0;
+        alignas(ComputeRelease) u8 storage[sizeof(ComputeRelease)];
+        const auto& release = *reinterpret_cast<const ComputeRelease*>(storage);
+        const auto note = [&](void* address, u64 value, u32 num_bytes) {
+            if (verify) {
+                seen = ReleaseHashStep(seen, reinterpret_cast<u64>(address));
+                seen = ReleaseHashStep(seen, num_bytes);
+                seen = ReleaseHashStep(seen, ReleaseValueFixed(release) ? value : 0);
+            }
+        };
+        const auto note_irq = [&](u32 pipe_id) {
+            if (verify) {
+                seen = ReleaseHashStep(seen, 0x10000 | pipe_id);
+            }
+        };
+        const size_t count = bytes.size() / sizeof(ComputeRelease);
+        for (size_t i = 0; i < count; ++i) {
+            std::memcpy(storage, bytes.data() + i * sizeof(ComputeRelease), sizeof(storage));
+            SignalComputeRelease(release, note, note_irq);
+        }
+        if (verify) {
+            Vulkan::Rasterizer::NoteReleaseVerify(count, seen != hash);
+        }
+    });
+}
+
 void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
     alignas(ComputeRelease) u8 storage[sizeof(ComputeRelease)];
     std::memcpy(storage, data, sizeof(storage));
     const auto& release = *reinterpret_cast<const ComputeRelease*>(storage);
     const u32 pipe_id = release.pipe_id;
-    // gow3 17 Oct 2026: multithreaded rendering: like end-of-pipe fences (RunEventWriteEop), the
-    // Vulkan recording thread signals the fence after the copies queued before it instead of
-    // this thread waiting for them (Uncharted 3: ~1,800 compute releases a frame, 16% of the
-    // draw recording thread blocked on host copies at 4K).
-    const auto sel = release.packet.data_sel.Value();
-    if (Vulkan::DrawPipe::OnStageB() && !Gow3Toggle::Disabled(Gow3Toggle::RecorderFences) &&
-        sel != DataSelect::GdsMemStore) {
+    if (ComputeReleaseOnRecorder(release)) {
         rasterizer.ProcessDownloadImages();
-        const VAddr label = release.packet.Address<VAddr>();
-        NoteOvertake(rasterizer, "compute release (recorder)", label);
-        const bool backing = rasterizer.GetBufferCache().MayBeGpuWritten(label & ~VAddr{4095}, 4096);
-        if (backing) {
-            rasterizer.NoteLabelWrite(label, sel == DataSelect::Data32Low ? 4 : 8);
-        }
-        // gow3 19 Oct 2026: the Vulkan recording thread must never fault on guest memory: a fault
-        // there downloads through the GPU command thread, which drains the draw pipe, which
-        // (presenting a frame) waits for the recording thread. A plain store into a protected
-        // page (GPU writes later in the stream, or CPU-write tracking of a bound buffer) froze
-        // Uncharted 3 for good after loading a save at 4K, twice. The label always goes through
-        // the backing view, as end-of-pipe labels do (SignalEop; the window is marked
-        // backing-written for the buffer cache); a plain store only where there is no backing.
-        rasterizer.SignalAfterHostCopies([packet = release.packet, pipe_id] {
-            packet.SignalFence(
-                [pipe_id] {
-                    Platform::IrqC::Instance()->SignalAsync(static_cast<Platform::InterruptId>(pipe_id));
-                },
-                [](VAddr, u16, u16) {},
-                [](void* address, u64 value, u32 num_bytes) {
-                    if (!Core::Memory::Instance()->TryWriteBacking(address, &value, num_bytes)) {
-                        StoreFenceValue(address, value, num_bytes);
-                    }
-                });
+        NoteComputeRelease(rasterizer, release);
+        rasterizer.SignalAfterHostCopies([release] {
+            SignalComputeRelease(release, [](void*, u64, u32) {}, [](u32) {});
         });
         return;
     }
@@ -1166,6 +1251,13 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
             StoreFenceValue(address, value, num_bytes);
         });
 }
+
+// gow3 24 Oct 2026: the dispatch runs' batched release signals (Rasterizer::DispatchRunRecord).
+[[maybe_unused]] const bool g_release_batch_hooks = [] {
+    Vulkan::Rasterizer::release_hooks = {&RunComputeReleaseMem, &StageComputeRelease,
+                                         &SignalComputeReleases, sizeof(ComputeRelease)};
+    return true;
+}();
 
 void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const Vulkan::GpuWriteSite site{4};
