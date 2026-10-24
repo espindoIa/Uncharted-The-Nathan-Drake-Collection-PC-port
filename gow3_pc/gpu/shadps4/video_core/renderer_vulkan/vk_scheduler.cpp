@@ -42,6 +42,7 @@ std::mutex Scheduler::submit_mutex;
 Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
     : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore},
       count_lock_waits{threaded_recording} {
+    submit_diag = RegisterSubmitDiag(&work_semaphore);
     // gow3: GOW3_VK_RECORD_THREAD=0 records on the calling thread.
     const char* env = std::getenv("GOW3_VK_RECORD_THREAD");
     const char* checkpoints = std::getenv("GOW3_GPU_CHECKPOINTS");
@@ -662,6 +663,19 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     const vk::Semaphore timeline = work_semaphore.Handle();
     info.AddSignal(timeline, signal_value);
+    {
+        // gow3 24 Oct 2026: O(1) record of what this submission waits on (under submit_mutex).
+        SubmitRecord& rec = submit_diag->ring[signal_value % SubmitDiag::RING];
+        rec.tick = signal_value;
+        rec.submit_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+        rec.num_waits = info.num_wait_semas;
+        for (u32 i = 0; i < std::min(info.num_wait_semas, 8u); ++i) {
+            rec.waits[i] = info.wait_semas[i];
+            rec.values[i] = info.wait_ticks[i];
+        }
+    }
 
     static constexpr std::array<vk::PipelineStageFlags, 2> wait_stage_masks = {
         vk::PipelineStageFlagBits::eAllCommands,

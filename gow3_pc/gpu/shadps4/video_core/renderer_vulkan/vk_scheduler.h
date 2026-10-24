@@ -946,6 +946,7 @@ public:
     /// present 1, flip 2); unset: not logged.
     void SetLogId(int id) {
         log_id = id;
+        submit_diag->log_id = id;
     }
 
 private:
@@ -1010,6 +1011,7 @@ private:
     bool count_lock_waits{false};
     std::jthread recorder_thread;
     tracy::VkCtxScope* profiler_scope{};
+    SubmitDiag* submit_diag{}; ///< gow3 24 Oct 2026: submission ring for wait-timeout dumps
     int log_id = -1;          ///< gow3: GOW3_SUBMIT_LOG
     u32 log_slot = ~0u;       ///< timestamp queries of the current command buffer
     u64 log_slot_tick = 0;    ///< CurrentTick() when the command buffer began

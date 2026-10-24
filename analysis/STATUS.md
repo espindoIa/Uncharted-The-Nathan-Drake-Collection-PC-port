@@ -4157,3 +4157,16 @@ target=15768 completed=15767 submitted-next=15777"). The repeated "Stuck fault" 
 Not verified: U1/U2, other U3 chapters, long sessions, input latency by an external tool,
 laptops/non-NVIDIA (the pacer only runs where Reflex is on, i.e. NVIDIA), the installed player
 package (not updated).
+
+## Market hitches: diagnostics, not reproduced (24 Oct 2026)
+
+Diagnostics added (opt-in except one stats line): `GOW3_WAIT_TIMEOUT_MS=<50..10000>` shortens the GPU semaphore wait poll in `vk_semaphore.cpp` (default 1000 ms as before) and prints, on every timeout (max 50 lines), "GPU wait: N ms ..." plus the stuck submission: scheduler (draw/present/flip, names set by `GOW3_SUBMIT_LOG`), tick, age since submit, each wait semaphore with its value and current counter, and the last 16 `bindSparse` calls when it waited on the sparse semaphore. Each scheduler keeps a 512-entry ring of submission records (O(1) write under the existing submit_mutex). `BufferCache::SubmitPendingArenaBinds` prints "Sparse binds (5 s): N submits, B binds, U unbinds, X MiB" (only in 5 s windows with binds). Bench script: `C:/dev/bench/hitch_hunt.py <tag> [RES=WxH] [GOW3_KEY=VALUE ...]` (120 s of movement in the street after mkt_back, lists frames over 150 ms).
+
+Hypothesis tested: a slow `bindSparse` holding the draw queue. Measured in hitch1: 3-208 bindSparse submits per 5 s, binds only, 0 unbinds.
+
+Not reproduced (measured, S-event intervals over 200 ms after the first 20 s of a session):
+- Today, build with the pacer: pacerfg1, pacerfg2, pacerfg3, pacernofg1, hitch1 (4K FG+Reflex, checkpoints on), hitch2 (4K Reflex/FG off, checkpoints on), hitch3 (1080p DLAA K, Reflex/FG off, checkpoints off, the skinwrite1 conditions): 0 in all seven; largest street frame 146 ms. hitch3's only long interval was 14 s of initial loading at 1.2 s, before gameplay.
+- Earlier sessions (22-23 Oct builds): 6 of 28 had street hitches: skinwrite1 17 (0.5/1.0 s, Reflex off, 1080p), mkd 7, mky 2, mkab1 1, fusion1 1, ringassoc1 1.
+- 0 of 7 against an earlier rate of about 6 in 28 is not significant (chance about 0.2-0.3); the hitch is NOT shown fixed. In skinwrite1 the first stall (453 ms, "GPU ticks 439.6 ms", 0 compiles, 0 faults) precedes any read fault: the GPU stopped finishing an already-submitted submission; the stuck faults on page 0x103c561000 follow from it.
+
+Next time it happens: run with `GOW3_WAIT_TIMEOUT_MS=150 GOW3_SUBMIT_LOG=<file>` (optionally `GOW3_GPU_CHECKPOINTS=1`) and read the "GPU wait: stuck" lines.

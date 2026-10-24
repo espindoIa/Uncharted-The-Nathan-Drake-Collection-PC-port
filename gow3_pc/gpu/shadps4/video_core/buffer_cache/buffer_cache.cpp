@@ -31,6 +31,7 @@
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
+#include <chrono>
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -4582,6 +4583,30 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
     };
 
     info.AddWait(signal_sema, signal_tick);
+    {
+        // gow3 24 Oct 2026: bindSparse history for GPU-stall attribution (5 s line + timeout dump).
+        u32 binds = 0, unbinds = 0;
+        u64 bytes = 0;
+        for (const auto& arena_binds : pending_binds) {
+            for (const auto& bind : arena_binds.binds) {
+                (bind.memory ? binds : unbinds)++;
+                bytes += bind.size;
+            }
+        }
+        Vulkan::SetSparseSemaphore(signal_sema);
+        Vulkan::NoteSparseBind(signal_tick, binds, unbinds, bytes);
+        static u64 w_submits = 0, w_binds = 0, w_unbinds = 0, w_bytes = 0;
+        static auto w_start = std::chrono::steady_clock::now();
+        ++w_submits, w_binds += binds, w_unbinds += unbinds, w_bytes += bytes;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - w_start >= std::chrono::seconds(5)) {
+            std::printf("Sparse binds (5 s): %llu submits, %llu binds, %llu unbinds, %.1f MiB\n",
+                        (unsigned long long)w_submits, (unsigned long long)w_binds,
+                        (unsigned long long)w_unbinds, double(w_bytes) / 1048576.0);
+            w_submits = w_binds = w_unbinds = w_bytes = 0;
+            w_start = now;
+        }
+    }
     auto submit_result = instance.GetSparseQueue().bindSparse(sparse_info);
     if (submit_result == vk::Result::eErrorDeviceLost) {
         Vulkan::DumpGpuCheckpoints(instance);
