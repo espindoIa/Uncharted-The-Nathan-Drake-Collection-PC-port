@@ -1347,6 +1347,13 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     # m_gfxEopTick); cached pipelines avoid recompiling every shader on each run.
     # Set GOW3_PIPELINE_CACHE=0 when testing shader recompiler changes.
     env.setdefault("GOW3_PIPELINE_CACHE", "1")
+    # U3 chapter 2 Cartagena street (24 Oct 2026, 4K DLSS Quality, FG + Reflex, CPU-bound on the
+    # draw pipe): crowd skinning cs 8f067540 (1,522 dispatches a frame) goes to the GPU as batched
+    # runs (live A/B 84.4 vs 78.6 real FPS), and the crowd's mesh inputs stay in an append-only
+    # buffer instead of the constant ring (+1.3 FPS with runs). Disabled2 bits 40 and 35 turn them
+    # off live; "=0" here turns them off at start.
+    env.setdefault("GOW3_DISPATCH_RUNS", "1")
+    env.setdefault("GOW3_STATIC_MESH_SNAPSHOTS", "1")
     env.setdefault("GOW3_PIPELINE_BINARIES", "1")
     env["GOW3_TOGGLE_FILE"] = str(user / "disabled-optimizations.txt")
     env["GOW3_LOADEXEC_FILE"] = str(loadexec)
