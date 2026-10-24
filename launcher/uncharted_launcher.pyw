@@ -1427,6 +1427,7 @@ class Launcher:
             root.after(1500, self.check_updates)
         if not direct:
             self.detect_gpu()
+            self.in_background(vulkan_gpus, self.add_gpu_row)
         if direct:
             self.select_game(direct, save=False)
             root.after(100, self.play_direct)
@@ -1777,7 +1778,12 @@ class Launcher:
         self.body.pack_propagate(False)
         # Pages taller than the space under the tabs scroll (Display, Performance, Advanced, Controls).
         self.scroll_canvases = set()
-        self.root.bind_all("<MouseWheel>", self.wheel)
+        # 24 Oct 2026: bound once for the whole session. Capturing a key used to bind_all and then
+        # unbind_all these sequences, which also removed the page scrolling until the launcher restarted.
+        self.capturing, self.capture_armed = None, False
+        self.root.bind_all("<MouseWheel>", self.on_wheel)
+        self.root.bind_all("<KeyPress>", self.on_key)
+        self.root.bind_all("<ButtonPress>", self.on_button)
         self.pages = {
             "setup": self.page_setup(),
             "display": self.page_display(),
@@ -1800,6 +1806,19 @@ class Launcher:
                 holder.pack(fill="both", expand=True)
             else:
                 holder.pack_forget()
+
+    def capture_active(self):
+        return self.capturing is not None and self.capture_armed
+
+    def on_wheel(self, event):
+        # A Controls slot waiting for an input takes the wheel step as its binding.
+        return self.capture_wheel(event) if self.capture_active() else self.wheel(event)
+
+    def on_key(self, event):
+        return self.capture_key(event) if self.capture_active() else None
+
+    def on_button(self, event):
+        return self.capture_button(event) if self.capture_active() else None
 
     def wheel(self, event):
         """The mouse wheel scrolls the page under the pointer, when it is taller than the window."""
@@ -2039,13 +2058,17 @@ class Launcher:
                         "how the PS4 drew them.",
                         [("0", "Game's"), ("4", "4x"), ("8", "8x"), ("16", "16x")], recommended="16")
         self.ini_toggle(page, "show_fps", "Show FPS counter", "Shows the frame rate in a corner of the screen.")
-        gpus = vulkan_gpus()
+        self.display_page = page  # the Graphics card row joins it when the Vulkan list arrives
+        return page
+
+    def add_gpu_row(self, gpus):
+        # 24 Oct 2026: the Vulkan device list (a child process, up to 10 s) is read in the background
+        # at start; with more than one card the row is added at the end of the Display page.
         if len(gpus) > 1:
-            self.ini_choice(page, "gpu_id", "Graphics card",
+            self.ini_choice(self.display_page, "gpu_id", "Graphics card",
                             "Which GPU runs the game. Automatic picks the fastest one. Takes effect the next "
                             "time the game starts.",
                             [("-1", "Automatic")] + list(gpus), recommended="-1")
-        return page
 
     def add_ngx(self, dll=NGX_DLL):
         from tkinter import filedialog
@@ -2059,21 +2082,28 @@ class Launcher:
         if source.name.lower() != dll:
             messagebox.showerror(APP_TITLE, f"Choose the file named {dll}.")
             return
-        if not ngx_signature_ok(source):
-            messagebox.showerror(APP_TITLE, f"{source.name} has no valid NVIDIA signature. Download it again "
-                                            "from NVIDIA's DLSS page.")
-            return
-        try:
-            shutil.copy2(source, ROOT / "gow3_pc" / "out" / dll)
-        except OSError as error:
-            messagebox.showerror(APP_TITLE, f"Could not copy {dll}: {error}")
-            return
-        if dll == NGX_FG_DLL:
-            messagebox.showinfo(APP_TITLE, "NVIDIA DLSS Frame Generation is ready. Reopen the launcher, then "
-                                           "switch it on under Display.")
-            return
-        messagebox.showinfo(APP_TITLE, "NVIDIA DLSS is ready. Reopen the launcher, then choose DLSS under "
-                                       "Anti-aliasing.")
+        # 24 Oct 2026: the PowerShell signature check (up to 60 s) runs off the Tk thread.
+        self.set_status("Checking NVIDIA's signature...", "")
+
+        def done(signed):
+            if not self.process:
+                self.set_status(f"Ready to play {self.current_game()['name']}.")
+            if not signed:
+                messagebox.showerror(APP_TITLE, f"{source.name} has no valid NVIDIA signature. Download it again "
+                                                "from NVIDIA's DLSS page.")
+                return
+            try:
+                shutil.copy2(source, ROOT / "gow3_pc" / "out" / dll)
+            except OSError as error:
+                messagebox.showerror(APP_TITLE, f"Could not copy {dll}: {error}")
+                return
+            if dll == NGX_FG_DLL:
+                messagebox.showinfo(APP_TITLE, "NVIDIA DLSS Frame Generation is ready. Reopen the launcher, then "
+                                               "switch it on under Display.")
+                return
+            messagebox.showinfo(APP_TITLE, "NVIDIA DLSS is ready. Reopen the launcher, then choose DLSS under "
+                                           "Anti-aliasing.")
+        self.in_background(lambda: ngx_signature_ok(source), done)
 
     def change_sharpening(self, value):
         if value == "off":
@@ -2345,6 +2375,7 @@ class Launcher:
     def start_capture(self, action, slot):
         self.stop_capture()
         self.capturing = (action, slot)
+        self.capture_armed = False
         self.refresh_bindings()
         self.root.focus_set()
         # After this click: the next key, mouse button or wheel step is the binding.
@@ -2353,16 +2384,13 @@ class Launcher:
     def arm_capture(self):
         if self.capturing is None:
             return
-        self.root.bind_all("<KeyPress>", self.capture_key)
-        self.root.bind_all("<ButtonPress>", self.capture_button)
-        self.root.bind_all("<MouseWheel>", self.capture_wheel)
+        self.capture_armed = True
 
     def stop_capture(self):
         if getattr(self, "capturing", None) is None:
             return
         self.capturing = None
-        for sequence in ("<KeyPress>", "<ButtonPress>", "<MouseWheel>"):
-            self.root.unbind_all(sequence)
+        self.capture_armed = False
         self.refresh_bindings()
 
     def capture_key(self, event):
@@ -2419,8 +2447,7 @@ class Launcher:
             text="Saved for " + self.current_game()["name"] + ". Click a slot, then press a key or a mouse button "
                  "(right-click a slot to clear it).", fg=MUTED)
         self.capturing = None
-        for sequence in ("<KeyPress>", "<ButtonPress>", "<MouseWheel>"):
-            self.root.unbind_all(sequence)
+        self.capture_armed = False
         self.refresh_bindings()
 
     def reset_controls(self):
@@ -2530,7 +2557,7 @@ class Launcher:
                                 ("Install from .pkg", self.install_game_update)),
                 "Your extracted update 1.02 folder, wherever it is, or the update's .pkg file.")
         section("TROUBLESHOOTING", (("Check for updates", lambda: self.check_updates(manual=True)),
-                                    ("Clear shader cache", self.clear_cache), ("Reset all settings", self.reset)))
+                                    ("Clear shader cache", self.clear_cache), ("Reset this game's settings", self.reset)))
         # Credits for the anti-aliasing technologies (NVIDIA's DLSS license asks for its attribution).
         tk.Label(page, text=CREDITS, font=self.f_small, bg=BG, fg=DIM, anchor="w", justify="left",
                  wraplength=self.width - 2 * self.px(40) - self.px(30)).pack(side="top", fill="x",
@@ -2977,8 +3004,11 @@ class Launcher:
         if not self.process:
             return
         self.stopping = True
-        subprocess.run(["taskkill", "/PID", str(self.process.pid), "/T", "/F"], creationflags=NO_WINDOW,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        pid = self.process.pid
+        # 24 Oct 2026: taskkill of a whole process tree can take seconds; off the Tk thread.
+        threading.Thread(target=lambda: subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"], creationflags=NO_WINDOW,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL), daemon=True).start()
         self.set_status("Stopping the game...")
 
     # -- advanced actions -------------------------------------------------------------------
@@ -3160,34 +3190,67 @@ class Launcher:
                                                "Next, install update 1.02: GAME UPDATE -> Install from .pkg.")
         poll()
 
+    def in_background(self, work, done):
+        """Runs `work` off the Tk thread (PowerShell calls take seconds); `done(result)` runs on it."""
+        found = []
+
+        def run():
+            try:
+                found.append((work(), None))
+            except Exception as error:  # raised again on the Tk thread, where report_callback_exception logs it
+                found.append((None, error))
+        threading.Thread(target=run, daemon=True).start()
+
+        def poll():
+            if not found:
+                self.root.after(200, poll)
+                return
+            result, error = found[0]
+            if error is not None:
+                raise error
+            done(result)
+        self.root.after(200, poll)
+
     def desktop_shortcut(self):
-        link, result = self.make_shortcut("Uncharted", APP_TITLE)
-        if result.returncode == 0:
-            messagebox.showinfo(APP_TITLE, f"Shortcut created:\n{link}")
-        else:
-            messagebox.showerror(APP_TITLE, f"Could not create the shortcut:\n{result.stderr.strip()}")
+        def done(made):
+            link, result = made
+            if result.returncode == 0:
+                messagebox.showinfo(APP_TITLE, f"Shortcut created:\n{link}")
+            else:
+                messagebox.showerror(APP_TITLE, f"Could not create the shortcut:\n{result.stderr.strip()}")
+        self.in_background(lambda: self.make_shortcut("Uncharted", APP_TITLE), done)
 
     def game_shortcuts(self):
         """One desktop shortcut per game: starts it directly with the launcher's settings."""
-        made, failed = [], []
-        for game in GAMES:
-            name = game["name"].replace(":", " -")
-            link, result = self.make_shortcut(name, f"{game['name']} (starts directly)", play=game["key"])
-            (made if result.returncode == 0 else failed).append(link.name if result.returncode == 0
-                                                                else result.stderr.strip())
-        if failed:
-            messagebox.showerror(APP_TITLE, "Could not create the shortcuts:\n" + "\n".join(failed))
-        else:
-            messagebox.showinfo(APP_TITLE, "Shortcuts created on the desktop:\n" + "\n".join(made) +
-                                "\n\nEach starts its game directly with the launcher's settings. From a command "
-                                "prompt: \"Uncharted Launcher.exe\" --play u1 (or u2, u3).")
+        def work():
+            made, failed = [], []
+            for game in GAMES:
+                name = game["name"].replace(":", " -")
+                link, result = self.make_shortcut(name, f"{game['name']} (starts directly)", play=game["key"])
+                (made if result.returncode == 0 else failed).append(link.name if result.returncode == 0
+                                                                    else result.stderr.strip())
+            return made, failed
+
+        def done(outcome):
+            made, failed = outcome
+            if failed:
+                messagebox.showerror(APP_TITLE, "Could not create the shortcuts:\n" + "\n".join(failed))
+            else:
+                messagebox.showinfo(APP_TITLE, "Shortcuts created on the desktop:\n" + "\n".join(made) +
+                                    "\n\nEach starts its game directly with the launcher's settings. From a command "
+                                    "prompt: \"Uncharted Launcher.exe\" --play u1 (or u2, u3).")
+        self.in_background(work, done)
 
     def reset(self):
         name = self.current_game()["name"]
         if not messagebox.askyesno(APP_TITLE, f"Reset {name}'s settings to the Medium preset?"):
             return
         self.game_settings().update(GAME_SETTING_DEFAULTS)
+        self.game_settings()["pad_controls"] = None
         self.ini.update(INI_DEFAULTS)
+        # 24 Oct 2026: the controls go back into the game's ini too; reload_ini (start, game switch)
+        # restores them from key_map/mouse_map/pad_map there, so Reset used to leave them as they were.
+        self.save_controls()
         self.refresh_controls()
         self.apply_preset("medium")
 

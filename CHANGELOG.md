@@ -6,6 +6,13 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Fixed (24 Oct 2026): launcher.** The mouse wheel no longer stops scrolling the pages after you
+  rebind a control. Reset (now "Reset this game's settings" under Advanced) also puts the
+  keyboard, mouse and controller controls back to the defaults; before, they came back the next
+  time the launcher started or you switched game. The launcher no longer freezes for seconds
+  while it checks an NVIDIA DLL you add, creates shortcuts, stops the game or looks for graphics
+  cards (the Graphics card row on Display now appears a moment after the launcher opens).
+
 - **Fixed (24 Oct 2026): in Uncharted 3, young Sully's shirt in chapter 2 (Cartagena chase) no
   longer stretches into a long strip down to his knees.** The cloth shader read and wrote past
   the shared memory the game reserves for it; the PS4 ignores such accesses, NVIDIA cards did
