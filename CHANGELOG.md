@@ -6,6 +6,10 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Uncharted 3: a rare case where the constants or bones of a crowd could stay one frame or longer
+  out of date is closed.** It could happen after a page of memory was re-protected while the GPU
+  work was being prepared. Found by code review, not seen in game, and not tested in game.
+
 - **Uncharted 3: about 1 more FPS in crowded scenes where the processor limits the frame rate.**
   The thread that records the GPU work no longer looks up and updates a large table for every
   small GPU write of the crowd's compute dispatches. Those dispatches write the same few memory

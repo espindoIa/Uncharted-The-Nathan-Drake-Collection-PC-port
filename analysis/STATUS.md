@@ -3630,3 +3630,11 @@ What would still cut the fence and fault-flush waits (not done):
 - Fault-flush commands (about 9% of stage A, 190 a second, about 480 us each) were not touched.
 
 Not verified: no 4K run, no soak run, no GOW3_READBACK_RACE run; U1 and U2; other U3 chapters (one scene measured); each number is from one run.
+
+## 24 October 2026: CpuCleanToken re-checks the change counter
+
+Mechanism: `RegionManager::CpuCleanToken` read `cpu_changes_done` and `cpu_changes_started` (equal), then the CPU bits, and returned `started + 1` without reading `started` again (a seqlock without its second check). Stage B starts a change (started = n+1, `cpu.UnsetRange(P)`, protection not yet applied). Stage A reads the bits of P as clean and gets token n+1. A guest store to P lands after the ring copy (page still writable: no fault, no StampSet). Stage B then protects P and sets done = n+1. `CpuUnsetSince(stamp < token)` later passes and the stale ring copy is reused. Only sets leave a stamp, clears do not.
+
+Fix: after `cpu.AnyInRange`, `std::atomic_thread_fence(std::memory_order_acquire)`, then reload `cpu_changes_started` and return 0 if it differs from the first read (this also covers a change that started and finished in between). The fence is needed because the bit reads are not atomic loads of that member. No other behaviour change.
+
+Not verified: no game run; GOW3_RING_REUSE_CHECK=1 was not run after the change; race never observed (found by static review).
