@@ -4228,3 +4228,27 @@ Toggle: Disabled2 bit GameFxaa = 1 << 40 (1099511627776). Bit 1 << 31 (214748364
 RingAssociative, so it could not be used. Set = the game's FXAA runs.
 
 Not verified: in-game A/B (pending), U1/U2/menu.
+
+## U3 blur suspects: jitter and DOF diagnostics (24 Oct 2026)
+
+Suspects: (A) scene draws left without the upscaler jitter, (B) the depth-of-field factor target.
+In DrawRecord the jitter goes to draws with the scene depth only when num_indices > 6 or more than
+one instance; smaller non-instanced draws (decals, quads) get none, so under DLSS they would sit
+about 1 px off the jittered scene. Three opt-in switches, all off by default (no behaviour change):
+
+- `GOW3_JITTER_STATS=1`: counts the draws with the scene depth under an upscaler (the
+  GOW3_JITTER_PS full-screen passes are left out). Every ~5 s: `Jitter stats: <frames> frames,
+  jittered x/frame, unjittered y/frame; top unjittered ps: <hash> x<count> (idx n inst m) ...`
+  (top 5, index and instance count of the last draw seen). Frames = Gow3Stats::gpu_frames delta.
+- Disabled2 bit `JitterSmallDraws` = 1 << 41 (2199023255552), inverted sense: set = those small
+  draws get the jitter too. Opt-in because a full-screen quad with the scene depth may leave an
+  edge column unwritten. Set it in disabled-optimizations.txt (second number) and A/B with the
+  stats line and a frame dump.
+- `GOW3_TARGET_DUMP_PS=<hex>[,<hex>...]` + `GOW3_TARGET_DUMP_TRIGGER=<file>`: creating the file
+  arms the next GPU frame; after each draw with a listed pixel shader (low 32 bits of the hash)
+  its colour target 0 (whole image, mip 0 layer 0) goes to `$GOW3_DUMP_DIR` (default out/dump) as
+  `target_<hash>_<frame>_<n>_<w>x<h>_<vkformat>.raw`, written when the GPU is done. At most 8 per
+  trigger. The pass ends after such a draw (the next draw begins a new one), so only use it to
+  measure.
+
+Not verified: none of the three was run (build only).

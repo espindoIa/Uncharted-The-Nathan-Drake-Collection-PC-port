@@ -242,6 +242,10 @@ enum : std::uint64_t {
     /// FXAA blurred it and the HUD a second time. Set: the game's FXAA runs (old behaviour).
     /// Not 1 << 31: that bit is RingAssociative.
     GameFxaa = 1ull << 40,
+    /// 24 Oct 2026, inverted sense, opt-in diagnostic: bit set also jitters the draws that use
+    /// the scene depth but have at most 6 indices and one instance (decals, quads; the default
+    /// leaves them unjittered). A full-screen quad with the scene depth may leave an edge column.
+    JitterSmallDraws = 1ull << 41,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

@@ -45,6 +45,7 @@
 #include "video_core/renderer_vulkan/vk_skinning_writes.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include <vk_mem_alloc.h>
 
 #include <optional>
 #include "core/platform.h"
@@ -3262,6 +3263,153 @@ static bool JitterFullScreenPass(u64 hash) {
     return std::find(listed.begin(), listed.end(), u64(u32(hash))) != listed.end();
 }
 
+// gow3 24 Oct 2026: GOW3_JITTER_STATS=1 counts, among the draws that use the scene depth while an
+// upscaler is on, those that got the jitter and those that did not (small non-instanced draws:
+// decals, quads; the full-screen passes of JitterFullScreenPass are left out). Every ~5 s one line:
+// frames, draws per frame of each kind and the top 5 pixel shaders of the unjittered ones. Only
+// read on the thread that records draws.
+static bool JitterStatsOn() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_JITTER_STATS");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+static void NoteJitterStat(bool jittered, u64 ps_hash, u32 indices, u32 instances) {
+    struct Unjittered {
+        u64 count = 0;
+        u32 indices = 0, instances = 0;
+    };
+    static u64 jittered_draws = 0, unjittered_draws = 0, last_frames = 0;
+    static std::map<u64, Unjittered> unjittered;
+    static auto last = std::chrono::steady_clock::now();
+    if (jittered) {
+        ++jittered_draws;
+    } else {
+        ++unjittered_draws;
+        auto& entry = unjittered[u32(ps_hash)];
+        ++entry.count;
+        entry.indices = indices;
+        entry.instances = instances;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(5)) {
+        return;
+    }
+    last = now;
+    const u64 total = Gow3Stats::gpu_frames.load(std::memory_order_relaxed);
+    const double frames = double(std::max<u64>(total - last_frames, 1));
+    last_frames = total;
+    std::vector<std::pair<u64, Unjittered>> top(unjittered.begin(), unjittered.end());
+    std::sort(top.begin(), top.end(),
+              [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
+    std::printf("Jitter stats: %.0f frames, jittered %.1f/frame, unjittered %.1f/frame; top "
+                "unjittered ps:",
+                frames, double(jittered_draws) / frames, double(unjittered_draws) / frames);
+    for (size_t i = 0; i < top.size() && i < 5; ++i) {
+        std::printf(" %08x x%llu (idx %u inst %u)", u32(top[i].first),
+                    static_cast<unsigned long long>(top[i].second.count), top[i].second.indices,
+                    top[i].second.instances);
+    }
+    std::printf("\n");
+    jittered_draws = unjittered_draws = 0;
+    unjittered.clear();
+}
+
+// gow3 24 Oct 2026: GOW3_TARGET_DUMP_PS=<hex>[,<hex>...] and GOW3_TARGET_DUMP_TRIGGER=<file>: when the
+// trigger file appears, in the next GPU frame (NoteFrameStart arms it, the following frame start
+// disarms it) the color target 0 of up to 8 draws with a listed pixel shader is copied right after
+// the draw to $GOW3_DUMP_DIR (default out/dump)/target_<hash>_<frame>_<n>_<w>x<h>_<vkformat>.raw
+// and written once the GPU is done (same approach as DumpRaw in vk_presenter.cpp). The draw's
+// pass ends there, so the next draw begins a new one: for measuring, not for playing.
+static std::atomic<bool> g_target_dump_armed{false};
+static std::atomic<u32> g_target_dump_left{0};
+
+static const std::vector<u64>& TargetDumpShaders() {
+    static const std::vector<u64> listed = [] {
+        std::vector<u64> list;
+        if (const char* env = std::getenv("GOW3_TARGET_DUMP_PS")) {
+            for (const char* p = env; *p;) {
+                char* end;
+                const u64 value = std::strtoull(p, &end, 16);
+                if (end == p) {
+                    break;
+                }
+                list.push_back(u64(u32(value)));
+                p = *end == ',' ? end + 1 : end;
+            }
+        }
+        return list;
+    }();
+    return listed;
+}
+
+static void NoteTargetDumpFrame() {
+    static const int trigger = TargetDumpShaders().empty()
+                                   ? -1
+                                   : Gow3TriggerFiles::Watch("GOW3_TARGET_DUMP_TRIGGER");
+    if (trigger < 0) {
+        return;
+    }
+    const bool armed = Gow3TriggerFiles::Take(trigger).has_value();
+    g_target_dump_left.store(8, std::memory_order_relaxed);
+    g_target_dump_armed.store(armed, std::memory_order_relaxed);
+}
+
+static void DumpTargetImage(const Instance& instance, Scheduler& scheduler, Runtime& runtime,
+                            VideoCore::Image& image, u64 ps_hash) {
+    const auto& list = TargetDumpShaders();
+    if (std::find(list.begin(), list.end(), u64(u32(ps_hash))) == list.end() ||
+        image.info.num_samples != 1 || image.info.num_bits < 8) {
+        return;
+    }
+    u32 left = g_target_dump_left.load(std::memory_order_relaxed);
+    if (left == 0) {
+        return;
+    }
+    g_target_dump_left.store(left - 1, std::memory_order_relaxed);
+    const u32 w = image.info.size.width, h = image.info.size.height;
+    const VkBufferCreateInfo buffer_ci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                       .size = VkDeviceSize(w) * h * (image.info.num_bits / 8),
+                                       .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    const VmaAllocationCreateInfo alloc_ci{
+        .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST};
+    VkBuffer buffer{};
+    VmaAllocation allocation{};
+    VmaAllocationInfo info{};
+    if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &buffer, &allocation,
+                        &info) != VK_SUCCESS) {
+        return;
+    }
+    scheduler.EndRendering();
+    runtime.Transit(&image, vk::ImageLayout::eTransferSrcOptimal,
+                    vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead);
+    runtime.FlushBarriers();
+    scheduler.Record([src = image.GetImage(), buffer, w, h](vk::CommandBuffer cmdbuf) {
+        cmdbuf.copyImageToBuffer(src, vk::ImageLayout::eTransferSrcOptimal, buffer,
+                                 vk::BufferImageCopy{.imageSubresource = {vk::ImageAspectFlagBits::eColor,
+                                                                          0, 0, 1},
+                                                     .imageExtent = {w, h, 1}});
+    });
+    const char* dir = std::getenv("GOW3_DUMP_DIR");
+    char path[512];
+    std::snprintf(path, sizeof(path), "%s/target_%08x_%llu_%u_%ux%u_%u.raw",
+                  dir && *dir ? dir : "out/dump", u32(ps_hash),
+                  static_cast<unsigned long long>(Gow3Stats::gpu_frames.load(std::memory_order_relaxed)),
+                  8 - left, w, h, u32(image.info.pixel_format));
+    scheduler.DeferPriorityOperation([allocator = instance.GetAllocator(), buffer, allocation, info,
+                                      size = buffer_ci.size, file = std::string{path}] {
+        vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
+        if (FILE* f = std::fopen(file.c_str(), "wb")) {
+            std::fwrite(info.pMappedData, 1, size, f);
+            std::fclose(f);
+        }
+        vmaDestroyBuffer(allocator, buffer, allocation);
+    });
+}
+
 void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                             bool is_indexed, u32 index_offset) {
     if (DispatchTraceTarget()) [[unlikely]] {
@@ -3618,19 +3766,30 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // gow3: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
     draw_jitter = {};
+    bool scene_jittered = false, pass_jittered = false;
+    // 24 Oct 2026 (JitterSmallDraws, opt-in): small non-instanced draws with the scene depth are
+    // jittered too; a full-screen quad with the scene depth may then leave an edge column.
     if (upscaler->Enabled() && JitteredDepth(db_desc.first) &&
-        (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
+        (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1 ||
+         Gow3Toggle::Disabled2(Gow3Toggle::JitterSmallDraws))) {
         draw_jitter = upscaler->Jitter();
+        scene_jittered = true;
     } else if (const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
                ps && upscaler->Enabled() && JitterFullScreenPass(ps->pgm_hash) &&
                !Gow3Toggle::Disabled(Gow3Toggle::FullScreenPassJitter)) {
         draw_jitter = upscaler->Jitter();
+        pass_jittered = true;
         static bool noted = false;
         if (!noted) {
             noted = true;
             std::printf("Upscaler: full-screen pass %08x gets the scene jitter\n",
                         u32(ps->pgm_hash));
         }
+    }
+    if (JitterStatsOn() && !pass_jittered && upscaler->Enabled() && JitteredDepth(db_desc.first)) {
+        const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+        NoteJitterStat(scene_jittered, ps ? ps->pgm_hash : 0, regs.num_indices,
+                       regs.num_instances.NumInstances());
     }
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
@@ -3662,6 +3821,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             draw();
         }
     });
+    if (g_target_dump_armed.load(std::memory_order_relaxed)) [[unlikely]] {
+        const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+        if (ps && state.num_color_attachments > 0 && cb_descs[0].first) {
+            DumpTargetImage(instance, scheduler, runtime, texture_cache.GetImage(cb_descs[0].first),
+                            ps->pgm_hash);
+        }
+    }
     // gow3: the camera of the game's velocity pass (GOW3_VELOCITY_PS, Uncharted): its constant
     // buffer, as this draw reads it, for the upscaler's motion vectors.
     if (camera_motion->VelocityMode()) {
@@ -9300,6 +9466,7 @@ void Rasterizer::NoteFrameStart() {
         profiler->BeginFrame();
     }
     const u64 frame = Gow3Stats::gpu_frames.fetch_add(1, std::memory_order_relaxed) + 1;
+    NoteTargetDumpFrame();
     // GOW3_BUFFER_STATS=1: how many earlier frames the GPU has not finished when the GPU thread
     // starts a frame — the lag that decides whether guest memory can be read in place.
     static const bool stats = [] {
