@@ -76,6 +76,15 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   while it checks an NVIDIA DLL you add, creates shortcuts, stops the game or looks for graphics
   cards (the Graphics card row on Display now appears a moment after the launcher opens).
 
+- **24 Oct 2026: Uncharted 3's Cartagena market street (chapter 2) runs about 10-12% faster.**
+  The street's crowd made the port prepare about 1,500 tiny skinning jobs a frame one by one,
+  which kept the processor, not the graphics card, as the limit. They now go to the graphics card
+  in batches. Measured at 4K, DLSS Quality, Frame Generation on (RTX 5070, Ryzen 5 5600): the
+  street went from about 78 to about 87 real FPS and the meat market gate from about 86 to about
+  97. The street is still a little slower than the gate because the game draws more there. To turn
+  it off, set `GOW3_DISPATCH_RUNS=0` (and `GOW3_STATIC_MESH_SNAPSHOTS=0`) in
+  `analysis/uncharted-user/test-env.txt`.
+
 - **Fixed (24 Oct 2026): in Uncharted 3, young Sully's shirt in chapter 2 (Cartagena chase) no
   longer stretches into a long strip down to his knees.** The cloth shader read and wrote past
   the shared memory the game reserves for it; the PS4 ignores such accesses, NVIDIA cards did
@@ -257,6 +266,58 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   Deck).** Ported from BilalReloaded's upstream commit 696bcb1. The wipe now uses the PS4's
   1920x1080 when the resolution patch is on. Tested: the patch script parses. Not tested: a
   sub-720p run (the boots did not apply the resolution patch).
+
+### From BilalReloaded's 0.6.0 (merged 24 Oct)
+
+Upstream's 0.6.0 notes (24 October 2026), in their words. The fork keeps its own defaults where
+they differ: multithreaded rendering stays on by default.
+
+- **Uncharted 3 too bright in sunny areas** (#140): the glow around bright light (bloom) was
+  drawn into a separate image the game never read, so the final picture used stale data from
+  memory instead, a haze that washed out sunlit places like Cartagena and the Chateau. The bloom
+  now goes into the right texture and shows as a soft glow.
+- **Mouse aiming and camera without the "stick" feel** (#190, #86, #141, #158, #170): aiming in
+  Uncharted 2 and 3, and the camera in Drake's Fortune, now turn directly from the mouse instead
+  of through an emulated right stick, which had a speed cap and a ramp that felt like
+  acceleration. The same mouse movement now turns the same angle, slow or fast (about 63 degrees
+  per 1,000 counts at sensitivity 1). Windows' pointer acceleration is kept out, and the
+  sensitivity goes up to 5x in the launcher (10x in the in-game menu).
+- **Uncharted 2: the most common crash, "read access to 0 at guest offset 0xd09665"** (#61 #113
+  #115 #164 #181 #187; often around trains, where particle effects are heavy): a particle routine
+  kept two loop values just below the stack pointer. When Windows handled a page fault in the
+  middle of it, it wrote over one of them, and the loop read one entry past the end of its list.
+  The routine now takes those values from registers it never changes (a 10-byte patch, also in
+  Uncharted 1 and 3, which share the routine).
+- **Save profiles** (#66): launcher Advanced -> Save profile gives each game three separate
+  save profiles, each with its own progress and in-game settings, like separate PS4 users.
+  Profile 1 holds the saves from earlier versions; switching never moves or deletes a save.
+- **Controller vibration on/off** (#166): launcher Controls and the in-game Controls tab.
+- **Games that stopped at start with update 1.02 in a separate folder** ("files.json -> not
+  found", "ASSERTION: root"; #43 #73 #139 #151 #153 #165 and others): where Windows allows
+  symbolic links (Developer Mode, a launcher run as administrator), the game read the update's
+  linked archives as empty files. The port now reads a linked file's real size, and the update
+  folder links files as hard links first.
+- **Updating keeps your own files** (#134): files you put into the port's folders (ReShade,
+  notes, a game folder) are no longer removed by the launcher's update.
+- **The update download continues after a stall** (#150) instead of failing.
+- **Mouse side buttons can be bound in the launcher** (#152).
+- A crash message now says when the game is version 1.00 without update 1.02.
+- Device-lost crash logs now include the graphics driver's fault report.
+- **Half the RAM and faster shader loading** (#186): the port no longer saves "pipeline binaries"
+  (about 2 MB for each of thousands of shader pipelines). Each pipeline loaded from one kept its
+  2 MB in memory: Uncharted 2 used 15.5 GB of RAM with them and 7.0 GB without, and shader
+  loading at the start took 40 s instead of about 10 s. The graphics driver's own shader cache
+  does the same job. The old folder (up to 20 GB) is deleted at the first start.
+- **Multi-second shader-compile freezes that 0.5.0 still had** (#144, #132, #142, #117): one
+  effect shader still built a new version for every broken buffer slot whose address is 0 or
+  whose size wraps to 0. Those slots now count as empty, as they are drawn.
+- **Uncharted 2: crash on a garbage texture with an unknown format** (#144, "pixel_format.cpp
+  NumBitsPerBlock"): such textures are now skipped like other broken ones.
+- **Temperatures in the performance counter** (#178, thanks to memeguyoffical): the graphics
+  card's temperature (NVIDIA, from its driver) and the processor's where Windows reports one,
+  next to their use. RAM shows the game's own memory.
+- **The performance counter's settings in the launcher** (#179, thanks to memeguyoffical):
+  Display tab, what it shows, its corner, layout, size and background.
 
 ### From BilalReloaded's 0.4.1 and 0.5.0 (merged 21 Oct)
 

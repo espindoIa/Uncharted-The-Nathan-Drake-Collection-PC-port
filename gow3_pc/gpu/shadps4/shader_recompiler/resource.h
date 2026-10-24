@@ -109,10 +109,19 @@ inline bool IsGarbageEffectBuffer(u64 pgm_hash, const AmdGpu::Buffer& buffer) {
         const char* env = std::getenv("GOW3_EFFECT_SHARP_FILTER");
         return !(env && env[0] == '0');
     }();
-    const u64 size = buffer.GetSize();
-    if (!enabled || buffer.base_address == 0 || size == 0) {
+    if (!enabled || buffer.num_records == 0) {
         return false;
     }
+    // gow3 24 Oct 2026 (0.5.0 logs of #144, #132, #24, #69): BindBuffers binds a V# with base 0,
+    // or whose 32-bit size (stride * num_records) wraps to 0, as null ("unbound"). Float slots of
+    // the effect shaders give exactly those (base 0 with ~1e9 records and a random format; stride
+    // 15360 x 0xbf000000 records), and each new float value built another variant: every logged
+    // 8f067540 / 7d7e7206 variant past 100 had one. They read as null here as well.
+    // Merge of upstream 0.6.0 (24 Oct): the live bit SpecGarbageSharps turns this off too.
+    if (buffer.base_address == 0 || buffer.GetSize() == 0) {
+        return !garbage_sharp_filter_on || garbage_sharp_filter_on();
+    }
+    const u64 size = buffer.GetSize();
     const bool odd =
         (buffer.base_address & 3) != 0 || buffer.stride >= 8192 || size > (u64{64} << 20);
     // Asked only for V#s this rule could call garbage (not per ordinary GetSharp).

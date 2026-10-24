@@ -254,6 +254,14 @@ public:
         return false;
     }
 
+    /// gow3 24 Oct 2026 (dispatch runs, a check): the tick of the newest GPU write over 64 KiB
+    /// into the 1 MiB window `window` (address >> 20), 0 for none.
+    [[nodiscard]] u64 GpuWriteWindowTick(u64 window) const {
+        std::shared_lock lock{gpu_ranges_mutex};
+        const auto it = gpu_write_window_tick.find(window);
+        return it != gpu_write_window_tick.end() ? it->second : 0;
+    }
+
     /// gow3 22 Oct 2026: the page tracker, for its lock-free CPU-clean queries from the GPU command
     /// thread (MemoryTracker::CpuCleanToken).
     [[nodiscard]] const MemoryTracker* GetMemoryTracker() const noexcept {

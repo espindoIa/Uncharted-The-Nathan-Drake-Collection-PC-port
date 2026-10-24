@@ -90,6 +90,38 @@ class Toggle(tk.Canvas):
         self.create_oval(x, pad + 1, x + d, pad + 1 + d, fill=knob, outline="")
 
 
+class Chip(tk.Canvas):
+    """A small on/off pill, for the performance counter's items (Display section)."""
+
+    def __init__(self, parent, scale, font, label, value, command):
+        self.s, self.label, self.command = scale, label, command
+        self.value = bool(value)
+        self.font = tkfont.Font(font=font)
+        pad_x, pad_y = int(10 * scale), int(5 * scale)
+        w = self.font.measure(label) + 2 * pad_x
+        h = self.font.metrics("linespace") + 2 * pad_y
+        # Keyboard focus as Toggle (Tab, Space/Enter).
+        super().__init__(parent, width=w, height=h, bg=parent["bg"], highlightthickness=2,
+                         highlightbackground=parent["bg"], highlightcolor=ACCENT, takefocus=1, cursor="hand2")
+        self.w, self.h = w, h
+        self.bind("<Button-1>", lambda e: self.set(not self.value, notify=True))
+        on_activate(self, lambda: self.set(not self.value, notify=True))
+        self.draw()
+
+    def set(self, value, notify=False):
+        self.value = bool(value)
+        self.draw()
+        if notify:
+            self.command(self.value)
+
+    def draw(self):
+        self.delete("all")
+        round_rect(self, 1, 1, self.w - 1, self.h - 1, self.h // 2, fill=ACCENT if self.value else PANEL,
+                   outline=ACCENT if self.value else LINE)
+        self.create_text(self.w / 2, self.h / 2, text=self.label, font=self.font,
+                         fill=INK if self.value else MUTED)
+
+
 class Segmented(tk.Frame):
     """A row of choices; the selected one is gold. One Tab stop: Left/Right change the choice, Home/End
     pick the first/last."""
