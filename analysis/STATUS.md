@@ -28,6 +28,7 @@ New entries go at the end, dated, measured numbers only.
 - U3 market stutter and CPU work (earlier 23 Oct benchmarks stood at the save's gate): `Cartagena market: stutter and lower frame rate from readback faults (23 Oct 2026)`.
 - Structural crowd experiments and exact rollback: `Structural crowd snapshots and output grouping (23 Oct 2026)`.
 - Market frame rate = Reflex sleep, pacer replaces it: `Reflex pacer: market frame rate (24 Oct 2026)`
+- Upstream merges: `21 October 2026 (night): upstream 0.5.0 merged`, `Upstream 0.6.0 merged (24 Oct 2026)`
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
@@ -4250,3 +4251,19 @@ Measured:
 Reviews: two Opus reviews and a workflow review (two reviewers) found no corruption/hang/crash; their exactness items (per-view texture invalidation, window ticks on large spans, pending_writes prune starvation, side-effect order, pool lifetime, layout limits, hull over 32 spans, tick moving before Record) are fixed.
 
 Not verified: U1 and U2 (their treasure effects also run 8f067540, with garbage V#s that runs refuse); other U3 chapters; long sessions; the re-acquisition and over-32-spans branches never ran in a session (counters only); 1080p. The feature stays opt-in until those are checked.
+
+## Upstream 0.6.0 merged (24 Oct 2026)
+
+Merge of upstream v0.6.0 (7b04bac) into claude/merge-upstream-0.6.0 (base a77e0c6 = 0.5.0, ours 92e7b85). Four files conflicted; the other 27 upstream files merged on their own. Decisions (ours = fork kept, theirs = upstream taken):
+- tools/probe_uncharted.py, the GOW3_PIPELINE_BINARIES block: both. Ours keeps GOW3_DISPATCH_RUNS=1 and GOW3_STATIC_MESH_SNAPSHOTS=1; theirs sets GOW3_PIPELINE_BINARIES=0 (both sides had 1; upstream measured U2 15.5 GB RAM with them vs 7.0 GB without, 40 s vs 9.6 s pipeline load) and deletes the old pipeline-binaries folders on a background thread. Auto-merged in the same file: RUN_GROUP_PATCH (U2 0xd09665), GOW3_USER_ID (save profiles), GOW3_MIP_TARGETS=1 for U3, UNCHARTED_COOP_OVERLAY. The fork's U1 multithreading text (U1 follows the launcher) stays; upstream did not change that block.
+- Duplicate patch check: RUN_GROUP_PATCH's signatures (`4c8b27 488b4c24f8 4a8d1c31 ...`, particle run grouping, 1.02 U1 0x5fa2f0 / U2 0xd09580 / U3 0xf6bef0) match no fork table; the fork's tables added since 0.5.0 (1 ms job-worker wait in JOB_SLEEP_PATCHES, movie pacing hook in probe.c) are at other sites. No overlap, nothing dropped. The patch is a multi-change entry, so the fork's skip-on-mismatch in apply_patches does not change it.
+- tools/apply_update.py: both. Theirs (installed-files.txt manifest, carry_over moves every player file back, update-kept-* rescue folder) is the more complete fix; ours (CARRY copies nvngx_dlss.dll / nvngx_dlssg.dll inside the install step) is kept because it still holds when carry_over has to put all of gow3_pc aside: the DLLs are then already in the new gow3_pc\out, and carry_over skips them as present.
+- launcher/uncharted_launcher.pyw: INI_DEFAULTS both (ours: preset, dlss_model, gpu_id, anisotropy, reflex, frame_gen; theirs: overlay_* keys). GAME_SETTING_DEFAULTS: ours multithreaded=True plus their save_profile="1". Display page: our anisotropy and graphics card rows plus their "Show performance counter" toggle and overlay_panel; add_ngx (ours) and OVERLAY_ITEMS / overlay_panel (theirs) both kept as methods. Dropped upstream's second `import tkinter.font as tkfont` (the fork already imports it).
+- CHANGELOG.md: the fork's "Unreleased (fork, after 0.5.0)" section stays on top; upstream's 0.6.0 notes go into it as "From BilalReloaded's 0.6.0 (merged 24 Oct)", above the 0.4.1/0.5.0 subsection (as at the 0.5.0 merge). tools/github/CHANGELOG.md: theirs (identical to v0.6.0).
+- tools/VERSION: theirs, 0.6.0. The updater reads the fork's releases (REPOSITORY espindoIa/...), and the fork now contains 0.6.0; at 0.5.0 a fork package would call any 0.6.x fork release an update for the wrong reason and misstate what it holds.
+- shader_recompiler/resource.h (no textual conflict, one edit): upstream's new "base 0 or size 0 reads as null" rule in IsGarbageEffectBuffer returned before the fork's live gate, so Disabled2 bit 1024 (SpecGarbageSharps) no longer turned the whole filter off. It now returns `!garbage_sharp_filter_on || garbage_sharp_filter_on()`. Effect on dispatch runs: such V#s were already `unbound` for ClassifyGarbageSharp, so the run planner refuses them as before (ReplaySharps); they now also make fewer 8f067540 variants.
+- runtime_coop.c: built by the existing globs (build.sh `src/runtime*.c`, CMakeLists GOW3_RUNTIME); probe.c calls runtime_coop_install, off unless GOW3_COOP_CMD / GOW3_COOP_BOOT.
+
+Toggle bits: upstream 0.6.0 adds none (no Disabled/Disabled2 use in its diff); the fork's Disabled2 bits up to 1ull<<41 are unchanged. Fork pieces checked present after the merge: DispatchRun* / StageDispatchRun (vk_rasterizer.cpp), liverpool.cpp cut hooks and RunComputeReleaseMem (liverpool.cpp not touched by upstream), static mesh snapshots, gow3_reflex.cpp, Streamline backend, LDS bounds pass (none touched by upstream), launcher Reflex / FG / Streamline options.
+
+Not verified: any game run (boots are the user's); the save profile, vibration and overlay rows in the launcher GUI; direct mouse aim with the fork's aim patches; GOW3_MIP_TARGETS with the fork's scene-resolution and upscaler paths in U3; dispatch-run counts with upstream's null-V# rule; carry_over on a real update.

@@ -199,6 +199,13 @@ INI_DEFAULTS = {
     "async_shaders": "1", "fsr1": "0", "rcas": "1", "rcas_strength": "75", "show_fps": "1",
     "upscaler": "off", "preset": "0", "dlss_model": "k", "gpu_id": "-1", "anisotropy": "16",
     "reflex": "0", "frame_gen": "0",
+    # The performance counter (Display tab): the items on its line, its corner, layout, text size
+    # and background opacity. The runtime's defaults; the in-game Overlay tab writes them too.
+    # Items as the runtime starts (DefaultItems: FPS, frame time, upscaler) until the game has
+    # written its ini once.
+    "overlay_fps": "1", "overlay_frametime": "1", "overlay_gpu": "0", "overlay_cpu": "0",
+    "overlay_ram": "0", "overlay_vram": "0", "overlay_upscaler": "1", "overlay_corner": "1",
+    "overlay_layout": "0", "overlay_scale": "100", "overlay_opacity": "50",
 }
 # FSR/DLSS quality modes (the runtime's preset key, also in the in-game menu): 0 draws the scene at
 # the render resolution (Native AA / DLAA); the others draw it smaller and rebuild it at the render
@@ -290,9 +297,10 @@ def voice_languages(game_dir):
     return ids
 GAME_KEYS = ("u1", "u2", "u3")
 GAME_SETTING_DEFAULTS = {"preset": "medium", "resolution": "1920x1080", "aspect": "16:9", "multithreaded": True,
+                         "save_profile": "1",
                          "async_readback": False, "controls": None, "mouse": True, "mouse_sens": "1.0",
                          "mouse_invert": False, "prompts": "auto", "mouse_aim_sens": "1.0",
-                         "mouse_vertical": "1.0", "mouse_invert_x": False}
+                         "mouse_vertical": "1.0", "mouse_invert_x": False, "vibration": True}
 
 # Keyboard and mouse controls (runtime_pad.c): action -> up to two bindings, "key:<SDL key name>"
 # or "mouse:<left|middle|right|x1|x2|wheel_up|wheel_down>". Stick directions take keys only.
@@ -569,7 +577,7 @@ DEFAULT_CONTROLS = {
 PROMPT_MODES = [("auto", "Auto"), ("keyboard", "Keyboard and mouse"), ("playstation", "PlayStation"),
                 ("xbox", "Xbox")]
 MOUSE_SENSITIVITIES = [("0.5", "0.5x"), ("0.75", "0.75x"), ("1.0", "1x"), ("1.5", "1.5x"), ("2.0", "2x"),
-                       ("3.0", "3x")]
+                       ("3.0", "3x"), ("4.0", "4x"), ("5.0", "5x")]
 # While aiming (times the sensitivity) and up/down compared with left/right (the in-game menu's
 # Controls tab has the same as sliders).
 MOUSE_FACTORS = [("0.5", "0.5x"), ("0.75", "0.75x"), ("1.0", "1x"), ("1.25", "1.25x"), ("1.5", "1.5x"),
@@ -675,7 +683,8 @@ def controls_to_ini(settings):
             "prompts": settings.get("prompts", "auto"),
             "mouse_aim_sens": settings.get("mouse_aim_sens", "1.0"),
             "mouse_vertical": settings.get("mouse_vertical", "1.0"),
-            "mouse_invert_x": "1" if settings.get("mouse_invert_x") else "0"}
+            "mouse_invert_x": "1" if settings.get("mouse_invert_x") else "0",
+            "vibration": "1" if settings.get("vibration", True) else "0"}
 
 
 def controls_from_ini(values, settings):
@@ -705,6 +714,8 @@ def controls_from_ini(values, settings):
             settings[key] = factor_value(values[key], options)
     if "mouse_invert_x" in values:
         settings["mouse_invert_x"] = values["mouse_invert_x"] == "1"
+    if "vibration" in values:
+        settings["vibration"] = values["vibration"] == "1"
     if "prompts" in values:
         settings["prompts"] = values["prompts"] if values["prompts"] in dict(PROMPT_MODES) else "auto"
     return True
@@ -1262,6 +1273,36 @@ class Toggle(tk.Canvas):
         self.create_oval(x, pad + 1, x + d, pad + 1 + d, fill=INK if self.value else MUTED, outline="")
 
 
+class Chip(tk.Canvas):
+    """A small on/off pill, for the performance counter's items (Display tab)."""
+
+    def __init__(self, parent, scale, font, label, value, command):
+        self.s, self.label, self.command = scale, label, command
+        self.value = bool(value)
+        self.font = tkfont.Font(font=font)
+        pad_x, pad_y = int(10 * scale), int(5 * scale)
+        w = self.font.measure(label) + 2 * pad_x
+        h = self.font.metrics("linespace") + 2 * pad_y
+        super().__init__(parent, width=w, height=h, bg=parent["bg"], highlightthickness=0, cursor="hand2")
+        self.w, self.h = w, h
+        self.bind("<Button-1>", lambda e: self.set(not self.value, notify=True))
+        self.draw()
+
+    def set(self, value, notify=False):
+        self.value = bool(value)
+        self.draw()
+        if notify:
+            self.command(self.value)
+
+    def draw(self):
+        self.delete("all")
+        fill = GOLD if self.value else PANEL
+        round_rect(self, 1, 1, self.w - 1, self.h - 1, self.h // 2, fill=fill,
+                   outline=GOLD if self.value else LINE)
+        self.create_text(self.w / 2, self.h / 2, text=self.label, font=self.font,
+                         fill=INK if self.value else MUTED)
+
+
 class Segmented(tk.Frame):
     """A row of choices; the selected one is gold."""
 
@@ -1669,6 +1710,10 @@ class Launcher:
                 widget.set(self.ini.get(key, INI_DEFAULTS[key]) == "1")
             elif isinstance(widget, Segmented):
                 widget.set(self.ini.get(key, INI_DEFAULTS[key]))
+        # The performance counter's items are Chip pills (overlay_panel): the loop above skips them.
+        for key, widget in getattr(self, "overlay_chips", {}).items():
+            if isinstance(widget, Chip):
+                widget.set(self.ini.get(key, INI_DEFAULTS[key]) == "1")
         settings = self.game_settings()
         if isinstance(self.widgets.get("resolution"), Segmented):
             self.widgets["resolution"].set(settings["resolution"])
@@ -1677,6 +1722,8 @@ class Launcher:
             self.widgets["aspect"].set(settings.get("aspect", "16:9"))
         if isinstance(self.widgets.get("multithreaded"), Toggle):
             self.widgets["multithreaded"].set(settings["multithreaded"])
+        if isinstance(self.widgets.get("save_profile"), Segmented):
+            self.widgets["save_profile"].set(str(settings.get("save_profile", "1")))
         if isinstance(self.widgets.get("mouse"), Toggle):
             self.widgets["mouse"].set(settings.get("mouse", True))
             self.widgets["mouse_sens"].set(settings.get("mouse_sens", "1.0"))
@@ -1684,6 +1731,7 @@ class Launcher:
             self.widgets["mouse_aim_sens"].set(settings.get("mouse_aim_sens", "1.0"))
             self.widgets["mouse_vertical"].set(settings.get("mouse_vertical", "1.0"))
             self.widgets["mouse_invert_x"].set(settings.get("mouse_invert_x", False))
+            self.widgets["vibration"].set(settings.get("vibration", True))
             self.widgets["prompts"].set(settings.get("prompts", "auto"))
             self.refresh_pad_slots()
         if hasattr(self, "binding_slots"):
@@ -2038,7 +2086,10 @@ class Launcher:
                         "Sharper textures on floors and walls seen at an angle (anisotropic filtering). Game's is "
                         "how the PS4 drew them.",
                         [("0", "Game's"), ("4", "4x"), ("8", "8x"), ("16", "16x")], recommended="16")
-        self.ini_toggle(page, "show_fps", "Show FPS counter", "Shows the frame rate in a corner of the screen.")
+        self.ini_toggle(page, "show_fps", "Show performance counter",
+                        "FPS, temperatures and memory in a corner of the screen. Insert, then the Overlay "
+                        "tab, changes it in the game too.")
+        self.overlay_panel(page)
         gpus = vulkan_gpus()
         if len(gpus) > 1:
             self.ini_choice(page, "gpu_id", "Graphics card",
@@ -2074,6 +2125,48 @@ class Launcher:
             return
         messagebox.showinfo(APP_TITLE, "NVIDIA DLSS is ready. Reopen the launcher, then choose DLSS under "
                                        "Anti-aliasing.")
+
+    # The performance counter's items: the ini key and the label on its pill.
+    OVERLAY_ITEMS = (("overlay_fps", "FPS"), ("overlay_frametime", "Frame time"), ("overlay_gpu", "GPU"),
+                     ("overlay_cpu", "CPU"), ("overlay_ram", "RAM"), ("overlay_vram", "VRAM"),
+                     ("overlay_upscaler", "Upscaler"))
+
+    def overlay_panel(self, page):
+        """What the performance counter shows, where and how big (Display tab; probe-u*.ini's
+        show_fps and overlay_* keys, the ones the in-game menu's Overlay tab writes). It is built
+        on its own: an error here leaves the rest of the page and the launcher working."""
+        try:
+            self._overlay_panel(page)
+        except Exception:
+            log_launcher_error(*sys.exc_info())
+            self.overlay_chips = {}
+
+    def _overlay_panel(self, page):
+        def items(parent):
+            box = tk.Frame(parent, bg=BG)
+            self.overlay_chips = {}
+            for key, label in self.OVERLAY_ITEMS:
+                chip = Chip(box, self.s, self.f_small, label,
+                            self.ini.get(key, INI_DEFAULTS[key]) == "1",
+                            lambda v, k=key: self.change(k, "1" if v else "0"))
+                chip.pack(side="left", padx=(self.px(6), 0))
+                self.overlay_chips[key] = chip
+            return box
+        self.row(page, "What it shows",
+                 "The frame rate, the frame time in milliseconds, the graphics card and the processor "
+                 "with their temperatures, and memory. Pick any; with nothing picked the counter is "
+                 "just its box.", items)
+        self.ini_choice(page, "overlay_corner", "Counter corner", "Where the counter sits.",
+                        [("0", "Top left"), ("1", "Top right"), ("2", "Bottom left"),
+                         ("3", "Bottom right")])
+        self.ini_choice(page, "overlay_layout", "Counter layout", "One line, or one item per line.",
+                        [("0", "One line"), ("1", "Stacked")])
+        self.ini_choice(page, "overlay_scale", "Counter size", "Text size of the counter.",
+                        [("75", "75%"), ("100", "100%"), ("125", "125%"), ("150", "150%"),
+                         ("200", "200%")])
+        self.ini_choice(page, "overlay_opacity", "Counter background",
+                        "How dark the counter's box is. None leaves the text on the picture.",
+                        [("0", "None"), ("25", "25%"), ("50", "50%"), ("75", "75%"), ("100", "100%")])
 
     def change_sharpening(self, value):
         if value == "off":
@@ -2179,6 +2272,13 @@ class Launcher:
         self.widgets["mouse_invert_x"] = Toggle(aim, self.s, settings.get("mouse_invert_x", False),
                                                 lambda v: self.change_game_setting("mouse_invert_x", v))
         self.widgets["mouse_invert_x"].pack(side="left", padx=(self.px(8), 0))
+        # Controller vibration (#166): off stops every rumble.
+        rumble = tk.Frame(page, bg=BG)
+        rumble.pack(side="top", fill="x", pady=(self.px(10), 0))
+        tk.Label(rumble, text="Controller vibration", font=self.f_body_bold, bg=BG, fg=TEXT).pack(side="left")
+        self.widgets["vibration"] = Toggle(rumble, self.s, settings.get("vibration", True),
+                                           lambda v: self.change_game_setting("vibration", v))
+        self.widgets["vibration"].pack(side="left", padx=(self.px(8), 0))
         icons = tk.Frame(page, bg=BG)
         icons.pack(side="top", fill="x", pady=(self.px(10), 0))
         tk.Label(icons, text="Button icons", font=self.f_body_bold, bg=BG, fg=TEXT).pack(side="left")
@@ -2383,7 +2483,9 @@ class Launcher:
         return "break"
 
     def capture_button(self, event):
-        names = {1: "left", 2: "middle", 3: "right", 4: "x1", 5: "x2"}
+        # Tk 9 (the bundled Python 3.14) numbers the side buttons 8 and 9 on Windows (#152); 4 and
+        # 5 were Tk 8's numbers.
+        names = {1: "left", 2: "middle", 3: "right", 4: "x1", 5: "x2", 8: "x1", 9: "x2"}
         if event.num in names:
             self.capture_mouse(names[event.num])
         return "break"
@@ -2430,7 +2532,7 @@ class Launcher:
         settings = self.game_settings()
         settings.update({"controls": None, "mouse": True, "mouse_sens": "1.0", "mouse_invert": False,
                          "prompts": "auto", "pad_controls": None, "mouse_aim_sens": "1.0",
-                         "mouse_vertical": "1.0", "mouse_invert_x": False})
+                         "mouse_vertical": "1.0", "mouse_invert_x": False, "vibration": True})
         self.save_controls()
         self.refresh_controls()
 
@@ -2446,6 +2548,17 @@ class Launcher:
 
     def page_advanced(self):
         page = self.page()
+
+        # Save profiles (#66): profile N plays as PS4 user N, with its saves in savedata\N.
+        def save_profile(parent):
+            return Segmented(parent, (("1", "Profile 1"), ("2", "Profile 2"), ("3", "Profile 3")),
+                             str(self.game_settings().get("save_profile", "1")),
+                             lambda v: self.change_game_setting("save_profile", v), self.f_small)
+        self.widgets["save_profile"] = self.row(
+            page, "Save profile",
+            "Separate saves for this game: each profile keeps its own progress and in-game settings, "
+            "like another PS4 user. Profile 1 has your saves from earlier versions; switching never "
+            "deletes anything.", save_profile)
 
         def language(parent):
             voices = voice_languages(self.game_dir())
@@ -2721,7 +2834,7 @@ class Launcher:
     def change_game_setting(self, key, value):
         self.game_settings()[key] = value
         if key in ("mouse", "mouse_sens", "mouse_invert", "prompts", "mouse_aim_sens", "mouse_vertical",
-                   "mouse_invert_x"):
+                   "mouse_invert_x", "vibration"):
             self.save_controls()
         else:
             write_config(self.config)
@@ -2780,6 +2893,7 @@ class Launcher:
             env[f"UNCHARTED_RESOLUTION_{key.upper()}"] = aspect_resolution(settings["resolution"],
                                                                          settings.get("aspect", "16:9"))
             env[f"UNCHARTED_MULTITHREADED_{key.upper()}"] = "1" if settings["multithreaded"] else "0"
+            env[f"UNCHARTED_SAVE_PROFILE_{key.upper()}"] = str(settings.get("save_profile", "1"))
             # Controls: in each game's settings file (save_controls), where its menu changes them.
         python = Path(sys.executable)
         if python.name.lower() == "pythonw.exe" and python.with_name("python.exe").exists():
@@ -2968,6 +3082,13 @@ class Launcher:
                             "A report was saved; see the log folder." if froze
                             else f"Exit code {code}. See the log for details.")
             if reason:
+                # 24 Oct 2026 (#148, #163, #172): crashes of a 1.00 game were reported as port bugs;
+                # most of the port's fixes are written for update 1.02.
+                version = app_version(self.game_dir())
+                if not self.update_dir() and version and version < "01.02":
+                    reason += (f"\n\nYour game is version {version.lstrip('0')} without update 1.02, so most of "
+                               "the port's crash fixes are skipped. Install update 1.02 first (Advanced -> "
+                               "GAME UPDATE).")
                 if messagebox.askyesno(APP_TITLE, f"The game stopped with an error:\n\n{reason}\n\nOpen the log folder?"):
                     self.open_logs()
         if self.direct:
