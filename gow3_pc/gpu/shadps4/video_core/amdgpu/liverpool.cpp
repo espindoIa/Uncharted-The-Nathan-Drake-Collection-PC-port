@@ -55,7 +55,12 @@ static_assert(Liverpool::NumComputeRings <= MAX_NAMES);
 
 static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
 
+// gow3 24 Oct 2026: an open run of crowd dispatches goes to the draw pipe before another queue
+// runs (Rasterizer::CutDispatchRun).
 #define YIELD(name)                                                                                \
+    if (rasterizer) {                                                                              \
+        rasterizer->CutDispatchRun(Vulkan::Rasterizer::CutYield);                                  \
+    }                                                                                              \
     FIBER_EXIT;                                                                                    \
     co_yield {};                                                                                   \
     FIBER_ENTER(name);
@@ -363,6 +368,9 @@ void Liverpool::ProcessCommands() {
     }
     // Process incoming commands with high priority
     while (num_commands) {
+        if (rasterizer) {
+            rasterizer->CutDispatchRun(Vulkan::Rasterizer::CutCommand);
+        }
         // 23 Oct 2026: repeat the stage-B experiment under measured external CPU load.
         // Off by default. Flip commands keep their original path (presenter waits).
         if (rasterizer && rasterizer->CommandsInOrder()) {
@@ -742,6 +750,34 @@ bool SkipIbDrain() {
         return value;
     }();
     return on;
+}
+
+/// gow3 24 Oct 2026: packets an open run of crowd dispatches survives (Rasterizer::CutDispatchRun):
+/// no-ops, nested buffers (their packets are checked one by one), direct dispatches (they join
+/// it or cut it themselves), compute releases (RunInOrder stages a fence write into the run or
+/// cuts it) and SET_SH_REG into the compute program registers: a dispatch joins only with its
+/// whole register image equal to the run's but the user data. runv1/runv2 (U3 Cartagena): with
+/// only user data allowed every run was cut, ~300k a 5 s, by RELEASE_MEM after each dispatch.
+bool KeepsDispatchRun(PM4ItOpcode opcode, const PM4Header* header) {
+    if (opcode == PM4ItOpcode::Nop || opcode == PM4ItOpcode::DispatchDirect ||
+        opcode == PM4ItOpcode::IndirectBuffer || opcode == PM4ItOpcode::ReleaseMem) {
+        return true;
+    }
+    if (opcode != PM4ItOpcode::SetShReg) {
+        return false;
+    }
+    const auto* set_data = reinterpret_cast<const PM4CmdSetData*>(header);
+    const u32 count = header->type3.NumWords() - 1;
+    return set_data->reg_offset >= 0x200 &&
+           set_data->reg_offset + count <= 0x200 + sizeof(ComputeProgram) / 4;
+}
+
+/// What cut a run (the "Dispatch runs" line): the opcode, and for SET_SH_REG its register.
+u32 RunCutDetail(PM4ItOpcode opcode, const PM4Header* header) {
+    const u32 reg = opcode == PM4ItOpcode::SetShReg
+                        ? reinterpret_cast<const PM4CmdSetData*>(header)->reg_offset
+                        : 0;
+    return static_cast<u32>(opcode) | reg << 8;
 }
 
 /// gow3: packets the GPU command thread handles while the draw recording thread may still
@@ -1865,6 +1901,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         case 3:
             const u32 count = header->type3.NumWords();
             const PM4ItOpcode opcode = header->type3.opcode;
+            if (rasterizer && !KeepsDispatchRun(opcode, header)) {
+                rasterizer->CutDispatchRun(Vulkan::Rasterizer::CutOpcode,
+                                           RunCutDetail(opcode, header));
+            }
             ApplyGraphicsRegisterPacket(regs, header, gfx_reg_checksum, &pipe_dirty);
             // DmaData to 0x3022C does nothing here (skipped below): no need to wait.
             if (rasterizer && !PipelinedOpcode(opcode) &&
@@ -2551,6 +2591,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             break;
         }
     }
+    if (rasterizer && dcb_depth == 0) {
+        rasterizer->CutDispatchRun(Vulkan::Rasterizer::CutQueueEnd);
+    }
 
     if (ce_task.handle) {
         while (!ce_task.handle.done()) {
@@ -2686,6 +2729,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
 
         const PM4ItOpcode opcode = header->type3.opcode;
+        if (rasterizer && !KeepsDispatchRun(opcode, header)) {
+            rasterizer->CutDispatchRun(Vulkan::Rasterizer::CutOpcode, RunCutDetail(opcode, header));
+        }
 
         // gow3: compute work uses the caches, so the draw recording thread runs dry first. Not for
         // no-ops and register writes (per-queue compute state, or SH registers the draw packets
@@ -2960,8 +3006,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
             if (rasterizer) {
                 ComputeRelease release{.packet = *release_mem, .pipe_id = queue.pipe_id};
+                // 24 Oct 2026: a fence write (not a GDS store) may follow a dispatch run.
                 if (rasterizer->RunInOrder(&RunComputeReleaseMem, &release, sizeof(release),
-                                           Gow3Toggle::PipelinedTasks, true)) {
+                                           Gow3Toggle::PipelinedTasks, true,
+                                           release_mem->data_sel.Value() != DataSelect::GdsMemStore)) {
                     // gow3 21 Oct: a GDS store writes num_dw dwords, not one label (SRT pending-write check).
                     const u64 bytes = release_mem->data_sel.Value() == DataSelect::GdsMemStore
                                           ? u64{release_mem->num_dw} * sizeof(u32)
@@ -2992,6 +3040,11 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         if constexpr (!is_indirect) {
             *queue.read_addr += next_dw_off;
             *queue.read_addr %= queue.ring_size_dw;
+        }
+    }
+    if constexpr (!is_indirect) {
+        if (rasterizer) {
+            rasterizer->CutDispatchRun(Vulkan::Rasterizer::CutQueueEnd);
         }
     }
 

@@ -25,7 +25,10 @@ void Emit(std::vector<u32>& out, Op op, std::initializer_list<u32> args) {
 std::vector<u32> MakeDispatchBatchSpirv(std::span<const u32> source, u32 capacity,
                                       u32 buffer_bindings, std::string& problem) {
     auto fail = [&](const char* why) { problem = why; return std::vector<u32>{}; };
-    if (source.size() < 5 || source[0] != spv::MagicNumber || capacity < 2 || capacity > 32) {
+    // 24 Oct 2026: up to 256 for the dispatch runs (64); above 32 only powers of two, which
+    // keeps dispatch-batch-spirv-test's rejection of 33 meaningful.
+    if (source.size() < 5 || source[0] != spv::MagicNumber || capacity < 2 || capacity > 256 ||
+        (capacity > 32 && (capacity & (capacity - 1)) != 0)) {
         return fail("invalid module or batch capacity");
     }
     std::vector<Instruction> instructions;

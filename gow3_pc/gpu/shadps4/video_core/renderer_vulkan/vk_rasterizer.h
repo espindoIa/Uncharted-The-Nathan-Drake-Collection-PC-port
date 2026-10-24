@@ -126,8 +126,11 @@ public:
     /// Returns true when the task was handed to the recording thread (not run yet).
     /// `writes_noted`: the caller passes the memory the task writes to NoteRingWrite (or
     /// NotePendingGpuWrite), so constant ring copies elsewhere stay reusable.
+    /// `after_run` (gow3 24 Oct 2026, a fence write no later dispatch reads): with a dispatch
+    /// run open the task joins it, after the dispatch before it (Gow3Toggle::DispatchRuns).
     bool RunInOrder(OrderedTask task, const void* data, u32 size,
-                    u64 toggle = Gow3Toggle::PipelinedTasks, bool writes_noted = false);
+                    u64 toggle = Gow3Toggle::PipelinedTasks, bool writes_noted = false,
+                    bool after_run = false);
     bool CommandsInOrder() const;
     void RunCommandInOrder(Common::UniqueFunction<void>&& command);
     /// Stage A: GPU work queued for the recording thread writes [address, address + size):
@@ -146,9 +149,33 @@ public:
     [[nodiscard]] bool DrawPipeReached(u64 position) const {
         return !draw_pipe || draw_pipe->Reached(position);
     }
-    /// Stage A: no draws waiting for the recording thread.
+    /// Stage A: no draws waiting for the recording thread (an open dispatch run counts).
     [[nodiscard]] bool DrawPipeIdle() const {
-        return !draw_pipe || draw_pipe->Idle();
+        return (!draw_pipe || draw_pipe->Idle()) && !dispatch_run.count;
+    }
+    /// gow3 24 Oct 2026 (Gow3Toggle::DispatchRuns): why stage A handed its open run of crowd
+    /// dispatches to stage B (statistics). The run goes first, then whatever cut it.
+    enum RunCut : u32 {
+        CutPacket,     ///< another packet (draw, other dispatch)
+        CutTask,       ///< an in-order task
+        CutDrain,      ///< a draw pipe drain
+        CutIndirect,   ///< an indirect dispatch
+        CutOpcode,     ///< a PM4 packet other than a no-op, user data or a direct dispatch
+        CutQueueEnd,   ///< a command buffer ended
+        CutYield,      ///< the command thread switches queues
+        CutCommand,    ///< a queued command runs
+        CutSubmission, ///< end of a submission
+        CutFull,       ///< 64 instances
+        CutJoin,       ///< another pipeline, queue or program registers
+        CutRefused,    ///< an instance that cannot be batched
+        NumRunCuts,
+    };
+    /// Stage A: the open run (if any) is handed to stage B first. `detail`: for CutOpcode the
+    /// PM4 opcode (and SET_SH_REG's register << 8), for the statistics.
+    void CutDispatchRun(u32 reason, u32 detail = 0) {
+        if (dispatch_run.count) {
+            FlushDispatchRun(reason, detail);
+        }
     }
     /// Stage A, end of a submission: its prepared draws stay alive until the recording thread
     /// has recorded them (instead of a drain).
@@ -815,6 +842,9 @@ private:
     bool sampler_graphics = false; ///< this BindResources call is a graphics draw's
     bool scene_debug_frame = false; ///< GOW3_SCENE_DEBUG: this frame's passes are printed
     bool PendingWriteOverlaps(VAddr address, u64 size);
+    /// Stage A: drops pending_writes stage B has done (only with no uncommitted entry); returns
+    /// how many.
+    u32 PrunePendingWrites();
     void PrunePendingLabels();
     /// gow3 21 Oct 2026: stage A waits until stage B has run the packets that write the range
     /// (`writes`; not the whole pipe: the work queued after them keeps stage B busy meanwhile).
@@ -849,6 +879,54 @@ private:
     u64 ring_seen_flush = ~0ULL;
     /// Submissions (prepared draws) kept alive until stage B reaches the position.
     std::deque<std::pair<u64, std::shared_ptr<const void>>> pipe_keepalive;
+    /// gow3 24 Oct 2026 (Gow3Toggle::DispatchRuns, GOW3_DISPATCH_RUNS=1): consecutive cs
+    /// 8f067540 dispatches staged by stage A, handed to stage B as one packet of up to 64.
+    static constexpr u32 RunMaxFlat = 256; ///< flattened user data dwords of one instance
+    /// An in-order task after an instance (a compute RELEASE_MEM): run by stage B after the
+    /// dispatches before it are recorded.
+    struct RunTask {
+        OrderedTask task;
+        u32 size;
+        std::array<u8, 64> data;
+    };
+    struct RunInstance {
+        AmdGpu::UserData ud;
+        std::array<u32, RunMaxFlat> flat;
+        boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS> rings;
+        u64 ring_end; ///< constant ring position after its copies
+        u32 num_tasks;
+        /// runv4 (24 Oct 2026): with 2, ~16k runs per 5 s ended at a third release.
+        std::array<RunTask, 4> tasks;
+    };
+    struct DispatchRun {
+        u32 count = 0;
+        u64 generation = 0;  ///< flushes so far (one inside an instance's staging moves it)
+        u32 uncommitted = 0; ///< uncommitted_indices entries of the staged instances
+        u32 labels = 0;      ///< pending_labels entries of the staged tasks
+        const ComputePipeline* pipeline = nullptr;
+        const AmdGpu::ComputeProgram* queue = nullptr; ///< the queue's compute registers
+        AmdGpu::ComputeProgram cs{}; ///< the first instance's (all equal but the user data)
+        std::array<AmdGpu::CbDbExtent, AmdGpu::NUM_COLOR_BUFFERS> cb_extent{};
+        AmdGpu::CbDbExtent db_extent{};
+        VAddr pgm_base = 0;
+        u32 ud_size = 0, flat_size = 0; ///< the stage's user data and flattened user data dwords
+        std::unique_ptr<RunInstance[]> instances; ///< capacity + 1: the one being staged
+    } dispatch_run;
+    /// Stage A: true when the dispatch joined a run or went out as a packet of its own.
+    bool StageDispatchRun(const ComputePipeline* pipeline, const AmdGpu::Buffer* sharps);
+    void FlushDispatchRun(u32 reason, u32 detail = 0);
+    void EmitRunPacket(const RunInstance* instances, u32 count);
+    /// Stage A: the first `head` uncommitted writes are the packet just committed.
+    void ResolveRunWrites(u32 head);
+    /// Stage B: a DispatchRun packet; its first instance is installed as for a dispatch,
+    /// `tail` up to `end` holds the others.
+    void DispatchRunRecord(const ComputePipeline* pipeline, const u8* tail, const u8* end);
+    struct RunPlan;
+    std::unique_ptr<RunPlan> run_plan; ///< stage B scratch
+    /// Stage B, GOW3_DISPATCH_RUN_VERIFY=1: the replayed instance DispatchRecord compares.
+    u32 run_verify_index = ~0u;
+    std::vector<std::pair<VAddr, u64>> run_verify_writes; ///< its GPU-written views
+    void VerifyRunInstance();
     std::unique_ptr<DrawPipe> draw_pipe;
 };
 

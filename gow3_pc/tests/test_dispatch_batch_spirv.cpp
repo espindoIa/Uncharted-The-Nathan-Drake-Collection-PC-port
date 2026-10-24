@@ -105,6 +105,14 @@ OpFunctionEnd
     assert(!output.empty()); // transformation includes independent SPIRV-Tools validation
     assert(Vulkan::MakeDispatchBatchSpirv(source, 1, bindings, problem).empty());
     assert(Vulkan::MakeDispatchBatchSpirv(source, 33, bindings, problem).empty());
+    // 24 Oct 2026: the dispatch runs' capacity (64) builds and validates; above 32 only powers
+    // of two up to 256.
+    const auto run = Vulkan::MakeDispatchBatchSpirv(source, 64, bindings, problem);
+    if (run.empty()) std::fprintf(stderr, "%s\n", problem.c_str());
+    assert(!run.empty());
+    assert(!Vulkan::MakeDispatchBatchSpirv(source, 256, bindings, problem).empty());
+    assert(Vulkan::MakeDispatchBatchSpirv(source, 48, bindings, problem).empty());
+    assert(Vulkan::MakeDispatchBatchSpirv(source, 512, bindings, problem).empty());
     assert(Vulkan::MakeDispatchBatchSpirv({}, 16, bindings, problem).empty());
     if (!input) assert(Vulkan::MakeDispatchBatchSpirv(source, 16, 1, problem).empty());
     if (emit_fixture) {

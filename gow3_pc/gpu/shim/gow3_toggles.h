@@ -237,6 +237,11 @@ enum : std::uint64_t {
     /// Set: Reflex uses the driver's/Streamline's sleep (old behaviour). Clear: the GPU-gated pacer
     /// (the guest waits until the GPU finished frame id - lag; default).
     ReflexPacer = 1ull << 39,
+    /// Opt-in (GOW3_DISPATCH_RUNS=1): consecutive cs 8f067540 dispatches go to stage B as one pipe
+    /// packet per run of up to 64 and are recorded as one batched dispatch (24 Oct 2026 U3
+    /// Cartagena: 1,522 a frame, ~3.7 ms of stage A and ~4.4 ms of stage B). Set: one packet and
+    /// one dispatch each, read live on both stages (vk_rasterizer.cpp, DispatchRunRecord).
+    DispatchRuns = 1ull << 40,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

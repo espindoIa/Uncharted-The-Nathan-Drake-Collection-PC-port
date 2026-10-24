@@ -4225,3 +4225,28 @@ Parallelizing stage B (design review, code reading only, estimates not measured)
 Skinning write grouping (GOW3_SKINNING_WRITE_BATCH=1, Disabled2 bit 36), measured: C:/dev/bench/opt_ab.py (new: reflex_ab.py at the player's probe-u3.ini and 1080p, live toggle of one Disabled2 bit, 8 windows of 8 s ON/OFF/OFF/ON/ON/OFF/OFF/ON), Cartagena street after mkt_back, FG and Reflex on. The path ran: 640-750k groups and 1.28-1.50M acquisitions saved per 5 s, 0 refused. Result: on 81.3 vs off 80.9 real FPS (+0.4); per window 78.6-84.6, rising through the session; p99 15.3 vs 15.2 ms; external load 1.35-2.57 cores. Inside the noise: not turned on by default.
 
 Not verified: the player's exact worst spot (the bench street is lighter: ~80 FPS against his 48-55); U1 and U2; a second replicate of the A/B. Note: two other Claude sessions ran U3 benches on the same analysis/uncharted-user folder during this work (14:09-14:35); a first A/B attempt collided with them and was discarded. The profile at ~13:50 may have shared the CPU with them; its stage B 88% busy matches the player's capture.
+
+## Crowd skinning dispatch runs (24 Oct 2026, opt-in)
+
+Player report: in U3 chapter 2 Cartagena, crossing a line from the meat market gate into the crowded street drops the frame rate; the user wants the street to run like the rest. Tests at 4K output, DLSS Quality, Frame Generation + Reflex (pacer) on, RTX 5070, Ryzen 5 5600, bench save backup_ch2meat (gate) and route mkt_back (street).
+
+What the street adds (measured; C:/dev/bench/line1.*, line2.* with GOW3_DISPATCH_STATS=1, old build):
+- Gate 86 real FPS at 700 draws/frame, street 78 at 1,290 draws/frame. Both CPU-bound on the draw pipe (~400k pipe items/s; stage B 78-86% busy).
+- Both sides: crowd skinning cs 8f067540 = 1,522 dispatches/frame, 1x1x1, one consecutive run (max run 1,524), stage A 2.4 us + stage B 2.9 us each: ~3.7 ms of stage A and ~4.4 ms of stage B per 12-13 ms frame. The street only adds draws (stage B draw time 1.8 -> 3.3 ms/frame).
+
+Change (GOW3_DISPATCH_RUNS=1, Disabled2 bit 40 DispatchRuns, bit set = old path, read live; vk_rasterizer.cpp/.h, liverpool.cpp cut hooks, vk_compute_pipeline.cpp/.h, vk_dispatch_batch_spirv.cpp, vk_skinning_writes.h):
+- Stage A stages consecutive 8f067540 instances (same pipeline, queue, dims except dim_x grouping, unchanged registers, all read slots in the constant ring or static mesh snapshots, written views valid) into one PacketKind::DispatchRun packet of up to 64, with up to 4 RELEASE_MEM per instance staged into the run (their labels pending until the packet is committed). Any other packet, queued command, drain, yield, submission retire, end of queue or a refused instance cuts the run first, so stream order is unchanged.
+- Stage B records one vkCmdDispatch(dim_x, count, 1) with the batch SPIR-V (workgroup Y = instance; per-instance descriptor arrays, capacity 64, own descriptor pools recycled by tick, layout support checked). Written views are joined into exact spans (no gap becomes GPU-written); spans over 64 KiB are acquired as chunks in (32 KiB, 64 KiB] so no 1 MiB window tick is stamped (views over 64 KiB and views of 4 KiB or less are acquired one by one, as before); texture invalidation stays per view; write side effects run once the batch is certain; more than 32 spans, a moved tick that does not settle, metadata writes or anything unproven replays the instances through the unchanged DispatchRecord. pending_writes is pruned after every run flush.
+- GOW3_DISPATCH_RUN_VERIFY=1: stage B replays every run (frame on the old path) and compares the batch plan with the old bindings. It checks stage B's binding plan only, not stage A's staging or the bookkeeping side effects.
+- "Dispatch runs (5 s)" line with packets, instances, replays and cuts by reason, chunked spans, window-tick changes, re-acquisitions, pending_writes size and prunes.
+
+Measured:
+- Verify (runv5/runv6): ~500-560k dispatches compared per 5 s; descriptor, push data, tracked range and written byte mismatches 0 in every line; window-tick changes 0; no ASSERT/device lost/VK_ERROR.
+- Runs only (runv8): ~32.8k run packets of 18.6 dispatches per 5 s, 610k dispatches batched; replays 0 (over 32 spans 0, tick moved 0); window-tick changes 0. Pipe items ~396k -> ~182k/s.
+- Live A/B, C:/dev/bench/opt_ab.py with OPT_RES=3840x2160 (player's probe-u3.ini at 4K, 8 windows of 8 s alternating the bit, street after mkt_back): first build 80.7 vs 76.9 real FPS (runab4k); after the review fixes 84.4 vs 78.6 real FPS, +7.4%, every on window above every off window, p99 15.7 vs 16.1 ms (runab4k2).
+- With runs on in the street, PresentMon: GPU busy 9.9 of 12.3 ms (79%), still CPU-bound; GpuCommandProcessor (stage A) 91%, DrawRec 90%, VkRecorder 83%. Stage A is now the limit (profile C:/dev/bench/prof_runs: CollectRingBindings 26%, DrainDrawPipe 19.7%, LandDeferredFenceFor 11.7%, RefreshComputeKey 10.9%).
+- GOW3_STATIC_MESH_SNAPSHOTS=1 on top of runs (bit 35 A/B, meshab4k): 84.4 vs 83.1 real FPS, small but every on window at or above every off window.
+
+Reviews: two Opus reviews and a workflow review (two reviewers) found no corruption/hang/crash; their exactness items (per-view texture invalidation, window ticks on large spans, pending_writes prune starvation, side-effect order, pool lifetime, layout limits, hull over 32 spans, tick moving before Record) are fixed.
+
+Not verified: U1 and U2 (their treasure effects also run 8f067540, with garbage V#s that runs refuse); other U3 chapters; long sessions; the re-acquisition and over-32-spans branches never ran in a session (counters only); 1080p. The feature stays opt-in until those are checked.
