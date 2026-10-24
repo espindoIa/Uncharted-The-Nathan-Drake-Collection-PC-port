@@ -17,6 +17,7 @@
 #endif
 #include <time.h>
 #include "gow3_copy.h"
+#include "gow3_pipe_stats.h"
 #include "gow3_toggles.h"
 #include "gow3_watch_range.h"
 #include <cstdio>
@@ -594,12 +595,23 @@ void Liverpool::ProcessLoop(std::stop_token stoken) {
                     }
                 }
             }
+            // GOW3_PIPE_STATS: the idle time split into the poll loop above and the sleep below.
+            const bool pipe_stats = Gow3PipeStats::Active();
+            const auto poll_end = pipe_stats ? std::chrono::steady_clock::now() : idle_start;
             Common::CondvarWait(submit_cv, lk, stoken,
                                 [this] { return num_commands || num_submits || submit_done; });
+            const auto idle_end = std::chrono::steady_clock::now();
             Gow3Stats::gpu_idle_ns.fetch_add(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - idle_start).count(),
+                std::chrono::duration_cast<std::chrono::nanoseconds>(idle_end - idle_start)
+                    .count(),
                 std::memory_order_relaxed);
+            if (pipe_stats) [[unlikely]] {
+                using std::chrono::duration_cast, std::chrono::nanoseconds;
+                Gow3PipeStats::stage_a.idle_poll_ns.Add(
+                    duration_cast<nanoseconds>(poll_end - idle_start).count());
+                Gow3PipeStats::stage_a.idle_block_ns.Add(
+                    duration_cast<nanoseconds>(idle_end - poll_end).count());
+            }
         }
         if (stoken.stop_requested()) {
             break;
@@ -1835,6 +1847,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     // special NOP packets. For convenience lets assume that it does.
                     // gow3: after the writes before it (the buffer label: WriteData, which
                     // may still be queued on the draw recording thread).
+                    // Stage A numbers the guest flip (a_seq, gow3_pipe_stats.h).
+                    Gow3PipeStats::NoteFlipPacket();
                     if (rasterizer) {
                         Vulkan::SubmitLog::Event("N");
                         rasterizer->RunInOrder(&SignalFlip, header, sizeof(u32),

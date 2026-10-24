@@ -40,6 +40,15 @@ elseif (GOW3_PGO STREQUAL "use")
                         -fprofile-correction -Wno-missing-profile -Wno-coverage-mismatch)
 endif()
 
+# gow3: GOW3_PIPE_STATS per-frame collector (shim/gow3_pipe_stats.h). OFF: the hooks are not
+# compiled (release builds, team ADR-0004). ON for measurement builds:
+# GOW3_PIPE_STATS_BUILD=ON ./build.sh. One value for every target: the header's inline variables
+# differ between 0 and 1.
+option(GOW3_PIPE_STATS_BUILD "Compile the GOW3_PIPE_STATS collector" OFF)
+if (GOW3_PIPE_STATS_BUILD)
+    add_compile_definitions(GOW3_PIPE_STATS_BUILD=1)
+endif()
+
 find_package(Vulkan REQUIRED)
 find_package(fmt REQUIRED)
 find_package(Boost REQUIRED)
@@ -373,6 +382,36 @@ set_source_files_properties(../tests/test_taa_shader.cpp PROPERTIES
 target_link_libraries(taa-shader-test PRIVATE gow3gpu)
 add_dependencies(taa-shader-test host_shaders)
 
+# gow3: GOW3_PIPE_STATS (shim/gow3_pipe_stats.h): the CSV header names the commit configured.
+execute_process(COMMAND git rev-parse --short=12 HEAD WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE GOW3_GIT_REV OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if (NOT GOW3_GIT_REV)
+    set(GOW3_GIT_REV unknown)
+endif()
+set_property(SOURCE shim/gow3_pipe_stats.cpp APPEND PROPERTY
+    COMPILE_DEFINITIONS GOW3_GIT_REV="${GOW3_GIT_REV}")
+add_executable(pipe-stats-test EXCLUDE_FROM_ALL ../tests/test_pipe_stats.cpp shim/gow3_pipe_stats.cpp)
+target_include_directories(pipe-stats-test PRIVATE shim shadps4)
+target_compile_options(pipe-stats-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+# The test is the collector itself: always built in, whatever the game build uses.
+target_compile_definitions(pipe-stats-test PRIVATE GOW3_PIPE_STATS_BUILD=1)
+target_link_libraries(pipe-stats-test PRIVATE -pthread)
+# The real DrawPipe (vk_draw_pipe.h) with a synthetic handler: run with and without
+# GOW3_PIPE_STATS set, and with `slow` under sanitizers (tests/test_draw_pipe.cpp).
+add_executable(draw-pipe-test EXCLUDE_FROM_ALL ../tests/test_draw_pipe.cpp shim/gow3_pipe_stats.cpp)
+target_include_directories(draw-pipe-test PRIVATE ../tests/stubs/draw_pipe ../tests/stubs shim shadps4)
+target_compile_options(draw-pipe-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_compile_definitions(draw-pipe-test PRIVATE GOW3_PIPE_STATS_BUILD=1 DRAW_PIPE_TEST_EXPECT_BUILD=1)
+target_link_libraries(draw-pipe-test PRIVATE -pthread)
+# The same test with the hooks compiled out (the release default): the ring must behave the same
+# and the stats API must be the no-op stubs. -U drops the =1 a GOW3_PIPE_STATS_BUILD=ON
+# configure adds to every target (options come after definitions on the command line), so the
+# header default 0 applies; the test's static_assert checks it. gow3_pipe_stats.cpp is not linked.
+add_executable(draw-pipe-test-off EXCLUDE_FROM_ALL ../tests/test_draw_pipe.cpp)
+target_include_directories(draw-pipe-test-off PRIVATE ../tests/stubs/draw_pipe ../tests/stubs shim shadps4)
+target_compile_options(draw-pipe-test-off PRIVATE -UNDEBUG -UGOW3_PIPE_STATS_BUILD -Wall -Wextra -Werror)
+target_compile_definitions(draw-pipe-test-off PRIVATE DRAW_PIPE_TEST_EXPECT_BUILD=0)
+target_link_libraries(draw-pipe-test-off PRIVATE -pthread)
 add_executable(flat-camera-test EXCLUDE_FROM_ALL ../tests/test_flat_camera.cpp)
 target_compile_options(flat-camera-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(flat-camera-test PRIVATE shadps4)

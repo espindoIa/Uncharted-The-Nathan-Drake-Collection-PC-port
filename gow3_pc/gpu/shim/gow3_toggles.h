@@ -169,6 +169,10 @@ enum : std::uint64_t {
     /// map (its find/assign were 3.5% of stage B; cs 8f067540 writes the same ~3 pages per
     /// dispatch every frame). GOW3_PAGETICK_VERIFY=1 checks each cached read against the map.
     PageTickCache = 4194304,
+    /// Diagnostic, not an optimization: bit set pauses GOW3_PIPE_STATS collection (rows keep
+    /// coming with stats_paused=1), to A/B the instrumentation's own cost. 23 Oct 2026: 8388608
+    /// is left out because the dropped FencePositionWait used it (analysis/STATUS.md:3610).
+    PipeStats = 16777216,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;
