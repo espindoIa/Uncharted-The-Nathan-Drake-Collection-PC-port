@@ -164,6 +164,7 @@ class Dropdown(tk.Label):
         self.set(value)
         self.bind("<Button-1>", lambda e: self.open())
         on_keys(self, {sequence: self.open for sequence in ("<space>", "<Return>", "<KP_Enter>", "<Down>")})
+        on_keys(self, {"<Left>": lambda: self.move(-1), "<Right>": lambda: self.move(1)})
         self.bind("<Enter>", lambda e: self.enabled and self.config(bg=PANEL_HI))
         self.bind("<Leave>", lambda e: self.config(bg=PANEL))
 
@@ -179,6 +180,16 @@ class Dropdown(tk.Label):
         self.config(text=f"{label}   \u25be")
         if notify:
             self.command(value)
+
+    def move(self, by):
+        """The keyboard and the controller: `by` options on from the current one, clamped at the ends."""
+        if not self.enabled:
+            return
+        values = [option for option, _ in self.options]
+        current = values.index(self.value) if self.value in values else 0
+        new = values[min(max(current + by, 0), len(values) - 1)]
+        if new != self.value:
+            self.set(new, notify=True)
 
     def open(self):
         if not self.enabled:
@@ -389,20 +400,26 @@ def copy_text(root, text):
     try:
         kernel32, user32 = ctypes.windll.kernel32, ctypes.windll.user32
         kernel32.GlobalAlloc.restype = kernel32.GlobalLock.restype = ctypes.c_void_p
-        kernel32.GlobalLock.argtypes = kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalLock.argtypes = kernel32.GlobalUnlock.argtypes = kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
         user32.OpenClipboard.argtypes = [ctypes.c_void_p]
         user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        user32.GetParent.restype = ctypes.c_void_p
+        user32.GetParent.argtypes = [ctypes.c_void_p]
+        window = root.winfo_id()
+        owner = user32.GetParent(window) or window
         data = (text.replace("\r\n", "\n").replace("\n", "\r\n") + "\0").encode("utf-16-le")
         handle = kernel32.GlobalAlloc(0x2, len(data))  # GMEM_MOVEABLE
         ctypes.memmove(kernel32.GlobalLock(handle), data, len(data))
         kernel32.GlobalUnlock(handle)
-        if user32.OpenClipboard(None):  # 24 Oct 2026: owned by the Tk window, the text was gone once it was destroyed
+        # 24 Oct 2026: owned by the Tk window: with a null owner SetClipboardData fails after EmptyClipboard
+        if user32.OpenClipboard(owner):
             try:
                 user32.EmptyClipboard()
                 if user32.SetClipboardData(13, handle):  # CF_UNICODETEXT; Windows owns the memory now
                     return
             finally:
                 user32.CloseClipboard()
+        kernel32.GlobalFree(handle)  # not taken by the clipboard
     except (AttributeError, OSError, ctypes.ArgumentError):
         pass
     root.clipboard_clear()
@@ -489,6 +506,9 @@ class Dialog(tk.Toplevel):
         self.default_button = self.buttons[default] if buttons else None
         self.bind("<Return>", lambda e: self.default_button and self.default_button.invoke())
         self.bind("<Escape>", lambda e: self.finish(cancel))
+        # Left/Right/Tab walk the buttons, so every one is reachable without a controller
+        for sequence, by in (("<Left>", -1), ("<Right>", 1), ("<Tab>", 1), ("<Shift-Tab>", -1), ("<ISO_Left_Tab>", -1)):
+            self.bind(sequence, lambda e, by=by: (self.step_button(by), "break")[1])
         self.protocol("WM_DELETE_WINDOW", lambda: self.finish(cancel))
 
     def copy_detail(self):
@@ -550,6 +570,12 @@ class Dialog(tk.Toplevel):
         except tk.TclError:  # the root was destroyed under the dialog
             pass
         Dialog.current = previous
+        if previous is not None:  # a dialog over a dialog: the first one gets its grab back
+            try:
+                if previous.winfo_exists():
+                    previous.grab_set()
+            except tk.TclError:
+                pass
         return self.result
 
     @classmethod

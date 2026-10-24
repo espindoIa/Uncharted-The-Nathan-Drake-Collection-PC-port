@@ -675,7 +675,8 @@ class PadNav:
                 launcher.play_button.focus_set()
             return
         if name == "a":
-            focus.event_generate("<Return>")  # the same path as the keyboard
+            if not isinstance(focus, Dropdown):  # its popup menu cannot be driven by the pad (left/right change it)
+                focus.event_generate("<Return>")  # the same path as the keyboard
         elif name == "b":
             target = launcher.tab_buttons[launcher.section][0]
             if focus is target:
@@ -690,7 +691,7 @@ class PadNav:
                 if focus.enabled and focus.value != (step > 0):
                     focus.set(step > 0, notify=True)
             elif horizontal and isinstance(focus, Dropdown):
-                pass
+                focus.move(step)  # its popup menu is native: the pad steps through the options instead
             else:
                 target = focus.tk_focusNext() if step > 0 else focus.tk_focusPrev()
                 if target is not None:
@@ -1821,6 +1822,10 @@ class Launcher:
         if key not in self.cards:
             key = "u1"
         changed = key != self.config.get("game")
+        if changed:  # a pending key or pad capture belongs to the game it started in
+            self.stop_capture()
+            if getattr(self, "pad_capture", None) is not None:
+                self.stop_pad_capture()
         self.config["game"] = key
         for k in self.cards:
             self.draw_card(k)
@@ -3250,8 +3255,9 @@ class Launcher:
     # -- game -------------------------------------------------------------------------------
 
     def play_or_stop(self):
-        if self.process:
-            self.stop()
+        if self.process:  # Space/Enter/A on the focused button must not kill the game unasked
+            if self.ask_yesno("The game is still running. Stop it? Unsaved progress is lost."):
+                self.stop()
         else:
             self.play()
 

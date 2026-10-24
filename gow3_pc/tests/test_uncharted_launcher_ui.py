@@ -265,6 +265,37 @@ class LauncherUiTest(unittest.TestCase):
         self.assertEqual(called[0][:2], ["taskkill", "/PID"])
         self.assertIn("4242", called[0])
 
+    def test_play_or_stop_asks_before_killing_a_running_game(self):
+        launcher = self.launcher
+        launcher.process = SimpleNamespace(pid=1, poll=lambda: None)
+        self.addCleanup(setattr, launcher, "process", None)
+        for answer in (False, True):
+            with mock.patch.object(launcher, "ask_yesno", return_value=answer) as ask, \
+                    mock.patch.object(launcher, "stop") as stop:
+                launcher.play_or_stop()
+            ask.assert_called_once()
+            self.assertEqual(stop.called, answer)
+
+    def test_dropdown_move_clamps_and_notifies(self):
+        calls = []
+        dropdown = uncharted_launcher.Dropdown(self.root, [("a", "A"), ("b", "B"), ("c", "C")], "b", calls.append,
+                                               ("Segoe UI", 9))
+        dropdown.move(1)
+        dropdown.move(1)  # already the last: nothing
+        dropdown.move(-1)
+        dropdown.move(-5)
+        dropdown.move(-1)
+        self.assertEqual(calls, ["c", "b", "a"])
+        self.assertEqual(dropdown.value, "a")
+
+    def test_selecting_another_game_cancels_a_pending_capture(self):
+        launcher = self.launcher
+        launcher.select_game("u1", save=False)
+        launcher.start_capture("cross", 0)
+        self.assertIsNotNone(launcher.capturing)
+        launcher.select_game("u2", save=False)
+        self.assertIsNone(launcher.capturing)
+
     def test_crash_report_and_dialog_buttons(self):
         launcher = self.launcher
         reason = "Fault: access violation\nhost #0 foo\n\nPlease attach boot.log."
