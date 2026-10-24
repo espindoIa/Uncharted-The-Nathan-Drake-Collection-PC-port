@@ -605,6 +605,9 @@ bool BufferCache::DiscardCpuWritePage(VAddr page) {
             return false;
         }
         gpu_modified_ranges.Subtract(page, 4096);
+        // 24 Oct 2026, static review: gpu_add_cache entries over the page would still hit and
+        // skip the next GPU write of the same address and size.
+        GpuAddCacheDrop(page, 4096);
         ErasePageTick(page >> 12);
         page_tick_memo = {};
         // Window ticks and the ever-written window bits still cover neighboring pages.

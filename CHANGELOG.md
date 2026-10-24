@@ -6,6 +6,9 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Uncharted: after a file read replaced a page that held GPU data, a later GPU write to the same
+  place could be forgotten, so the old bytes could be shown.** Found by code review, not seen in
+  game, not tested in game.
 - **Uncharted 3: a rare case where the constants or bones of a crowd could stay one frame or longer
   out of date is closed.** It could happen after a page of memory was re-protected while the GPU
   work was being prepared. Found by code review, not seen in game, and not tested in game.

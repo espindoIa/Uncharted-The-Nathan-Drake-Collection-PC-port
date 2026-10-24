@@ -3638,3 +3638,11 @@ Mechanism: `RegionManager::CpuCleanToken` read `cpu_changes_done` and `cpu_chang
 Fix: after `cpu.AnyInRange`, `std::atomic_thread_fence(std::memory_order_acquire)`, then reload `cpu_changes_started` and return 0 if it differs from the first read (this also covers a change that started and finished in between). The fence is needed because the bit reads are not atomic loads of that member. No other behaviour change.
 
 Not verified: no game run; GOW3_RING_REUSE_CHECK=1 was not run after the change; race never observed (found by static review).
+
+## 24 October 2026: DiscardCpuWritePage clears gpu_add_cache
+
+Mechanism: `GpuRangesAdd` returns early on a `gpu_add_cache` hit (same address and size) without adding to `gpu_modified_ranges`. `GpuRangesSubtract` clears the entries overlapping the range, but `DiscardCpuWritePage` (21 Oct file-read path) called `gpu_modified_ranges.Subtract(page, 4096)` directly and left them. A later GPU write with the same address and size hit the stale entry, was not added back, and later downloads of that page skipped the GPU bytes. These were the only two Subtract call sites.
+
+Fix: the entry-clearing loop of `GpuRangesSubtract` is now `GpuAddCacheDrop(address, size)` (caller holds `gpu_ranges_mutex`). `GpuRangesSubtract` calls it after Subtract; `DiscardCpuWritePage` calls it with `(page, 4096)` right after its Subtract, inside the same lock block. No other behaviour change.
+
+Not verified: no game run; never observed (found by static review).
