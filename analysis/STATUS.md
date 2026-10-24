@@ -4229,6 +4229,17 @@ RingAssociative, so it could not be used. Set = the game's FXAA runs.
 
 Not verified: in-game A/B (pending), U1/U2/menu.
 
+Measured (24 Oct 2026, 14:14-14:16):
+
+- U3 bar after Continue, 2560x1440 DLAA, model K, frame dumps (GOW3_FRAME_DUMP_TRIGGER, display
+  buffer), Laplacian variance x1e4 of luma; wall crop 1100-1353 x 373-547 (the 21 Oct 4K crop
+  scaled to 1440p).
+- One valid pair (same pose): FXAA skipped wall 2.27 / frame 10.13; FXAA on wall 1.51 / frame
+  8.35 (+50% wall, +21% frame; run-to-run noise ~9% from 21 Oct).
+- Rounds 2-3 are not usable: Nate turned between dumps, then the game paused and the window was
+  closed by the player mid-run.
+- Not verified: more pairs, the player's DLSS Quality 3840x2160 setup, U1, U2, the menu, motion.
+
 ## U3 blur suspects: jitter and DOF diagnostics (24 Oct 2026)
 
 Suspects: (A) scene draws left without the upscaler jitter, (B) the depth-of-field factor target.
@@ -4252,3 +4263,13 @@ about 1 px off the jittered scene. Three opt-in switches, all off by default (no
   measure.
 
 Not verified: none of the three was run (build only).
+
+Measured (24 Oct 2026, same run):
+
+- GOW3_JITTER_STATS: ~336 jittered and 5.0 unjittered scene-depth draws per frame; all unjittered
+  are 6-index single-instance draws of ps c11d3e2c (2/frame), 0bae6524, ab30daa9, f76d1599
+  (1/frame each). Not A/B'd with JitterSmallDraws; whether they are full-screen quads is not
+  checked.
+- DOF factor (ps 4c610459 target, 2560x1440 R8): 0 in every pixel of the gameplay frame, so the
+  tonemap's DOF blend is 0 there: suspect ruled out for this scene (aiming and cutscenes not
+  checked).
