@@ -27,7 +27,7 @@ from tkinter import font as tkfont, messagebox
 from PIL import Image, ImageDraw, ImageOps, ImageTk
 
 import updater  # launcher/updater.py: updates from the GitHub releases
-from widgets import (ACCENT, ACCENT_HI, BG, DIM, HERO_DARK, HERO_GRID, HERO_LIGHT, HOVER_LINE, INK, LINE, MUTED, PANEL, PANEL_HI, STOP_RED, TEXT, Dropdown, ScrollBar, Segmented, Toggle, round_rect)  # launcher/widgets.py
+from widgets import (ACCENT, ACCENT_HI, BG, DIM, GOOD, HERO_DARK, HERO_GRID, HERO_LIGHT, HOVER_LINE, INK, LINE, MUTED, PANEL, PANEL_HI, STOP_RED, TEXT, Dropdown, ScrollBar, Segmented, Toggle, round_rect)  # launcher/widgets.py
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "launcher" / "assets"
@@ -1231,6 +1231,58 @@ def write_config(config):
     write_text_safely(CONFIG_FILE, json.dumps(config, indent=2))
 
 
+def readiness(game_ok, game_version, game_dir, update_found, update_version, update_problems, bridge_present,
+              dlss_present, fg_present, slow_drive, release_version):
+    """Home's "Ready to play" checklist (24 Oct 2026) from plain facts, so it is testable without Tk:
+    a list of dicts (key, state ok|warn|missing|optional, title, detail, actions [(label, action key)]).
+    Without a valid game folder the first-run steps (game, update, optional DLLs) are numbered."""
+    items = []
+
+    def add(key, state, title, detail, actions=()):
+        items.append({"key": key, "state": state, "title": title, "detail": detail, "actions": list(actions)})
+    if game_ok:
+        add("game", "ok", "Game files", f"Version {game_version or '?'}  -  {game_dir}")
+    else:
+        add("game", "missing", "Choose your game folder",
+            "The folder of your own copy of the Collection (CUSA02320 or CUSA02344), or install it from its .pkg.",
+            [("Choose folder", "choose_game_dir"), ("Install from .pkg", "install_game_pkg")])
+    fix_update = [("Choose update folder", "choose_update_folder"), ("Install from .pkg", "install_game_update")]
+    if update_problems:
+        more = " ..." if len(update_problems) > 3 else ""
+        add("update", "warn", "Game update 1.02", "Missing or damaged files: " + "; ".join(update_problems[:3]) + more
+            + ". Extract the update again, or install it from its .pkg.", fix_update)
+    elif update_found:
+        add("update", "ok", "Game update 1.02", f"Version {update_version or '?'} is used")
+    elif game_version and game_version >= "01.02":
+        add("update", "ok", "Game update 1.02", f"Version {game_version} (the update is in the game folder)")
+    else:
+        add("update", "warn" if game_ok else "missing", "Game update 1.02",
+            "Most of the port's fixes, crash fixes among them, are written for update 1.02. Choose your extracted "
+            "update folder, or install it from its .pkg.", fix_update)
+    get = ("Get from NVIDIA", "get_nvidia")
+    if bridge_present and not dlss_present:
+        add("dlss", "optional", "NVIDIA DLSS",
+            f"Optional, for NVIDIA RTX cards: adds DLSS to Anti-aliasing. Needs NVIDIA's {NGX_DLL}, not included.",
+            [get, (f"Add {NGX_DLL}...", "add_dlss")])
+    elif bridge_present:
+        add("dlss", "ok", "DLSS ready", f"{NGX_DLL} is installed: choose DLSS under Anti-aliasing (Display).")
+        if not fg_present:
+            add("framegen", "optional", "NVIDIA DLSS Frame Generation",
+                f"Optional, for RTX 40 or newer. Needs NVIDIA's {NGX_FG_DLL}, not included.",
+                [get, (f"Add {NGX_FG_DLL}...", "add_framegen")])
+    if slow_drive:
+        add("drive", "warn", "Slow drive", f"{slow_drive}. Copy the port and the game to an internal SSD: on this "
+            "drive the games freeze again and again while the port writes its shader cache, logs and saves.")
+    if release_version:
+        add("launcher", "warn", f"Launcher update {release_version} is available",
+            "Saves and settings are kept; the launcher restarts.", [("Install", "install_update")])
+    if not game_ok:
+        steps = [item for item in items if item["key"] in ("game", "update", "dlss", "framegen")]
+        for number, item in enumerate(steps, 1):
+            item["title"] = f"{number}. {item['title']}"
+    return items
+
+
 class Launcher:
     def __init__(self, root, direct=None):
         self.root = root
@@ -1542,6 +1594,7 @@ class Launcher:
             # Each game keeps its own settings: show the selected game's.
             self.reload_ini()
             self.refresh_controls()
+        self.refresh_home()
         if hasattr(self, "status") and not self.process:
             self.set_status(f"Ready to play {self.current_game()['name']}.")
 
@@ -1634,6 +1687,7 @@ class Launcher:
         if hasattr(self, "game_dir_label"):
             self.game_dir_label.config(text=f"Game files: {folder}")
             self.update_label.config(text=self.update_text())
+        self.refresh_home()
         return True
 
     def chosen_update(self):
@@ -1835,6 +1889,18 @@ class Launcher:
 
     def page_setup(self):
         page = self.page()
+        # 24 Oct 2026: the readiness checklist (what the game needs, with the buttons that fix it)
+        # above the presets; refresh_home fills it.
+        self.home_checks, self.home_busy, self.home_again, self.home_shown = None, False, False, None
+        panel = tk.Frame(page, bg=BG, highlightthickness=1, highlightbackground=LINE)
+        panel.pack(side="top", fill="x", pady=(0, self.px(14)))
+        head = tk.Frame(panel, bg=BG)
+        head.pack(side="top", fill="x", padx=self.px(14), pady=(self.px(10), self.px(6)))
+        tk.Label(head, text="READY TO PLAY", font=self.f_caption, bg=BG, fg=MUTED).pack(side="left")
+        self.home_status = tk.Label(head, text="", font=self.f_body_bold, bg=BG, fg=GOOD)
+        self.home_status.pack(side="left", padx=(self.px(12), 0))
+        self.home_list = tk.Frame(panel, bg=BG)
+        self.home_list.pack(side="top", fill="x", padx=self.px(14), pady=(0, self.px(4)))
         self.setup_intro = self.wrap(tk.Label(page, text="", font=self.f_body, bg=BG, fg=MUTED, anchor="w",
                                               justify="left"))
         self.setup_intro.pack(side="top", fill="x", pady=(0, self.px(12)))
@@ -1901,6 +1967,91 @@ class Launcher:
         self.custom_note.config(text=f"{name}: custom settings (changed by hand)." if custom
                                 else f"Settings are kept per game: these are {name}'s.")
 
+    def home_items(self):
+        """The checklist from the state now. The checks that read archives or ask the drive's bus
+        (update files, slow drive) come from the last background run (refresh_home), shown only
+        while they are for the same folders."""
+        game = self.game_dir()
+        game_ok = is_game_dir(game)
+        update = self.update_dir()
+        key = (str(update), str(game))
+        checks = self.home_checks if self.home_checks and self.home_checks[0] == key else (key, [], None)
+        release = getattr(self, "update_release", None)
+        return readiness(game_ok, app_version(game) if game_ok else None, str(game), bool(update),
+                         app_version(update) if update else None, checks[1], dlss_bridge_present(),
+                         dlss_available(), frame_gen_available(), checks[2],
+                         updater.version_text(release["version"]) if release else None)
+
+    def refresh_home(self):
+        """Shows the checklist at once and runs the slow checks in the background (one at a time;
+        asked again if state changed meanwhile). Call it after anything that changes the game folder,
+        the update, an NVIDIA DLL or the launcher version."""
+        if self.direct:
+            return
+        self.render_home()
+        if self.home_busy:
+            self.home_again = True
+            return
+        self.home_busy = True
+        game, update = self.game_dir(), self.update_dir()
+
+        def work():
+            problems = []
+            if update:
+                try:
+                    problems = self.update_installer().check_update(update)
+                except Exception:  # the check must never break the launcher
+                    problems = []
+            places = []
+            for label, folder in (("This port", ROOT), ("The game", game)):
+                try:
+                    reason = slow_drive_reason(folder) if folder.exists() else None
+                except (OSError, ValueError, ctypes.ArgumentError):
+                    reason = None
+                if reason:
+                    places.append(f"{label}: {reason}")
+            return (str(update), str(game)), problems, "; ".join(places) or None
+
+        def done(result):
+            self.home_checks, self.home_busy = result, False
+            self.render_home()
+            if self.home_again:
+                self.home_again = False
+                self.refresh_home()
+        self.in_background(work, done)
+
+    def render_home(self):
+        items = self.home_items()
+        if items == self.home_shown:
+            return
+        self.home_shown = items
+        for child in self.home_list.winfo_children():
+            child.destroy()
+        attention = sum(item["state"] in ("missing", "warn") for item in items)
+        self.home_status.config(text=f"{attention} to fix" if attention else "✓  Ready to play",
+                                fg=ACCENT if attention else GOOD)
+        colors = {"ok": GOOD, "warn": ACCENT, "missing": STOP_RED, "optional": MUTED}
+        actions = {"choose_game_dir": self.choose_game_dir, "install_game_pkg": self.install_game_pkg,
+                   "choose_update_folder": self.choose_update_folder, "install_game_update": self.install_game_update,
+                   "get_nvidia": lambda: webbrowser.open(NGX_DOWNLOAD_URL), "install_update": self.install_update,
+                   "add_dlss": lambda: self.add_ngx(NGX_DLL), "add_framegen": lambda: self.add_ngx(NGX_FG_DLL)}
+        for item in items:
+            row = tk.Frame(self.home_list, bg=BG)
+            row.pack(side="top", fill="x", pady=(0, self.px(8)))
+            tk.Label(row, text="●", font=self.f_small, bg=BG, fg=colors[item["state"]]).pack(
+                side="left", anchor="n", padx=(0, self.px(10)), pady=(self.px(2), 0))
+            if item["actions"]:
+                buttons = tk.Frame(row, bg=BG)
+                buttons.pack(side="right", anchor="n", padx=(self.px(12), 0))
+                for label, key in item["actions"]:
+                    self.flat_button(buttons, label, actions[key]).pack(side="left", padx=(self.px(8), 0))
+            text = tk.Frame(row, bg=BG)
+            text.pack(side="left", fill="x", expand=True)
+            tk.Label(text, text=item["title"], font=self.f_body_bold, bg=BG, fg=TEXT, anchor="w").pack(
+                side="top", fill="x")
+            self.wrap(tk.Label(text, text=item["detail"], font=self.f_small, bg=BG, fg=MUTED, anchor="w",
+                               justify="left", wraplength=self.px(420))).pack(side="top", fill="x")
+
     def apply_preset(self, name):
         settings = self.game_settings()
         settings["resolution"] = PRESETS[name]["resolution"]
@@ -1962,7 +2113,7 @@ class Launcher:
         self.ini_choice(page, "frame_gen", "DLSS Frame Generation",
                         "Adds one AI-generated frame between every two: about twice the frames shown, with a "
                         "little more input delay. Needs an RTX 40 or newer, an anti-aliasing mode (TAA, FSR or "
-                        "DLSS) and NVIDIA's nvngx_dlssg.dll (add it below). The frame rate limit counts the "
+                        "DLSS) and NVIDIA's nvngx_dlssg.dll (add it under Ready to play on Home). The frame rate limit counts the "
                         "frames shown. Frames are only added while the game window has the focus, and it "
                         "turns Reflex on. Also in the in-game menu.",
                         [("0", "Off"), ("1", "On")], recommended="0")
@@ -1973,29 +2124,6 @@ class Launcher:
                                                "Recommended on.")
         self.ini_toggle(page, "fsr1", "Upscale with FSR 1",
                         "When the game draws below your screen's resolution, makes the scaled-up picture sharper.")
-        if dlss_bridge_present() and not dlss_available():
-            def dlss(parent):
-                holder = tk.Frame(parent, bg=BG)
-                self.flat_button(holder, "Get from NVIDIA", lambda: webbrowser.open(NGX_DOWNLOAD_URL)).pack(
-                    side="left", padx=(0, self.px(8)))
-                self.flat_button(holder, f"Add {NGX_DLL}...", self.add_ngx).pack(side="left")
-                return holder
-            self.row(
-                page, "NVIDIA DLSS",
-                "NVIDIA RTX GPUs. Needs NVIDIA's nvngx_dlss.dll, which is not included: get it from NVIDIA's "
-                "DLSS page (nvngx_dlss.dll in lib/Windows_x86_64/rel), then add it here. DLSS is then listed "
-                "under Anti-aliasing.", dlss)
-        elif dlss_available() and not (ROOT / "gow3_pc" / "out" / NGX_FG_DLL).is_file():
-            def dlssg(parent):
-                holder = tk.Frame(parent, bg=BG)
-                self.flat_button(holder, "Get from NVIDIA", lambda: webbrowser.open(NGX_DOWNLOAD_URL)).pack(
-                    side="left", padx=(0, self.px(8)))
-                self.flat_button(holder, f"Add {NGX_FG_DLL}...", lambda: self.add_ngx(NGX_FG_DLL)).pack(side="left")
-                return holder
-            self.row(
-                page, "NVIDIA DLSS Frame Generation",
-                "NVIDIA RTX 40 or newer. Needs NVIDIA's nvngx_dlssg.dll, which is not included: get it from "
-                "NVIDIA's DLSS page (nvngx_dlssg.dll in lib/Windows_x86_64/rel), then add it here.", dlssg)
 
         def sharpening(parent):
             value = self.ini.get("rcas_strength", "75") if self.ini.get("rcas", "1") == "1" else "off"
@@ -2047,13 +2175,28 @@ class Launcher:
             except OSError as error:
                 messagebox.showerror(APP_TITLE, f"Could not copy {dll}: {error}")
                 return
+            # 24 Oct 2026: the lists that gain entries (DLSS, the 144-240 FPS limits) are built again
+            # in place; before, the launcher had to be reopened.
+            self.rebuild_sections()
+            self.refresh_home()
             if dll == NGX_FG_DLL:
-                messagebox.showinfo(APP_TITLE, "NVIDIA DLSS Frame Generation is ready. Reopen the launcher, then "
-                                               "switch it on under Display.")
+                messagebox.showinfo(APP_TITLE, "NVIDIA DLSS Frame Generation is ready. Switch it on under Display.")
                 return
-            messagebox.showinfo(APP_TITLE, "NVIDIA DLSS is ready. Reopen the launcher, then choose DLSS under "
-                                           "Anti-aliasing.")
+            messagebox.showinfo(APP_TITLE, "NVIDIA DLSS is ready. DLSS is now listed under Anti-aliasing (Display).")
         self.in_background(lambda: ngx_signature_ok(source), done)
+
+    def rebuild_sections(self):
+        """Display and Performance built again from the current state, keeping the section shown
+        (their option lists depend on the DLLs beside the runtime)."""
+        for name, build in (("display", self.page_display), ("performance", self.page_performance)):
+            holder = self.pages[name].holder
+            self.scroll_canvases -= {str(w) for w in holder.winfo_children() if isinstance(w, tk.Canvas)}
+            holder.destroy()
+            self.widgets = {k: w for k, w in self.widgets.items() if w.winfo_exists()}
+            self.pages[name] = build()  # page_display also points self.display_page at the new page
+        self.add_gpu_row(_VULKAN_GPUS or [])
+        self.refresh_controls()
+        self.show_tab(self.section, save=False)
 
     def change_sharpening(self, value):
         if value == "off":
@@ -2599,6 +2742,7 @@ class Launcher:
             version = updater.version_text(release["version"])
             self.update_button.config(text=f"UPDATE TO {version}")
             self.update_button.pack(side="right", padx=(0, self.px(14)), before=self.status.master)
+            self.refresh_home()
             if not self.process:
                 self.set_status(f"Version {version} is available.",
                                 "UPDATE installs it: saves and settings are kept, the launcher restarts.")
@@ -3039,6 +3183,7 @@ class Launcher:
         self.config["update_dir"] = str(update)
         write_config(self.config)
         self.update_label.config(text=self.update_text())
+        self.refresh_home()
         messagebox.showinfo(APP_TITLE, f"Game update {app_version(update) or '?'} is used from now on:\n{update}")
 
     def install_game_update(self):
@@ -3083,6 +3228,7 @@ class Launcher:
                 self.config["update_dir"] = str(state["path"])
                 write_config(self.config)
             self.update_label.config(text=self.update_text())
+            self.refresh_home()
             if "error" in state:
                 messagebox.showerror(APP_TITLE, f"The update was not installed:\n{state['error']}")
             else:
@@ -3133,6 +3279,7 @@ class Launcher:
                 write_config(self.config)
             self.game_dir_label.config(text=f"Game files: {self.game_dir()}")
             self.update_label.config(text=self.update_text())
+            self.refresh_home()
             if "error" in state:
                 messagebox.showerror(APP_TITLE, f"The game was not installed:\n{state['error']}")
             else:

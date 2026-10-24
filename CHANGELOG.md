@@ -6,6 +6,15 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **New (24 Oct 2026): Home checks that you are ready to play.** A "Ready to play" list at the top
+  of Home checks the game files, update 1.02 (and whether its files are intact), the NVIDIA DLSS
+  and Frame Generation files, the drive speed and whether a new launcher version is out. Each
+  line that needs attention has the buttons to fix it (choose or install the game and the update,
+  get or add the NVIDIA files, install the launcher update); on a first start it reads as the
+  steps to follow. The NVIDIA file buttons moved here from Display. Adding an NVIDIA file no
+  longer needs a restart: DLSS shows up under Anti-aliasing and the 144-240 FPS limits under
+  Performance (with Frame Generation) at once.
+
 - **Changed (24 Oct 2026): launcher layout.** The games and the settings sections are now in a
   sidebar on the left, with the selected game's name in a smaller banner and PLAY always at the
   bottom right. The sections were renamed: Quick Setup is now Home, Cheats is now Gameplay and

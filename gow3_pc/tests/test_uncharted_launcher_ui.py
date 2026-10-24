@@ -32,6 +32,59 @@ except ImportError as error:  # no tkinter or Pillow here
     IMPORT_ERROR = error
 
 
+def ready(**changes):
+    """readiness() with everything fine, except `changes`."""
+    facts = dict(game_ok=True, game_version="01.02", game_dir="D:/game", update_found=True, update_version="01.02",
+                 update_problems=[], bridge_present=False, dlss_present=False, fg_present=False, slow_drive=None,
+                 release_version=None)
+    facts.update(changes)
+    return uncharted_launcher.readiness(**facts)
+
+
+@unittest.skipIf(uncharted_launcher is None, f"launcher needs tkinter and Pillow: {IMPORT_ERROR}")
+class ReadinessTest(unittest.TestCase):
+    def test_no_game_folder_is_numbered_first_run_steps(self):
+        items = ready(game_ok=False, game_version=None, update_found=False, update_version=None, bridge_present=True)
+        self.assertEqual([i["key"] for i in items], ["game", "update", "dlss"])
+        self.assertEqual(items[0]["state"], "missing")
+        self.assertEqual([i["title"][:2] for i in items], ["1.", "2.", "3."])
+        self.assertEqual([a[1] for a in items[0]["actions"]], ["choose_game_dir", "install_game_pkg"])
+        self.assertNotEqual(items[1]["state"], "ok")
+
+    def test_game_without_update_is_not_ready(self):
+        items = ready(game_version="01.00", update_found=False, update_version=None)
+        self.assertEqual([i["state"] for i in items], ["ok", "warn"])
+        self.assertEqual([a[1] for a in items[1]["actions"]], ["choose_update_folder", "install_game_update"])
+        self.assertFalse(items[1]["title"][0].isdigit())  # numbered only without a game folder
+        # 1.02 merged into the game folder, or a damaged update folder:
+        self.assertEqual(ready(game_version="01.02", update_found=False)[1]["state"], "ok")
+        self.assertEqual(ready(update_problems=["u3data/build/main/bin.psarc (damaged)"])[1]["state"], "warn")
+
+    def test_everything_present_is_all_ok(self):
+        items = ready()
+        self.assertEqual([i["key"] for i in items], ["game", "update"])
+        self.assertTrue(all(i["state"] == "ok" for i in items))
+        items = ready(bridge_present=True, dlss_present=True, fg_present=True)
+        self.assertEqual([i["key"] for i in items], ["game", "update", "dlss"])
+        self.assertTrue(all(i["state"] == "ok" for i in items))
+
+    def test_dll_rows_follow_the_bridge_and_the_dlls(self):
+        items = ready(bridge_present=True)
+        self.assertEqual((items[2]["key"], items[2]["state"]), ("dlss", "optional"))
+        self.assertEqual([a[1] for a in items[2]["actions"]], ["get_nvidia", "add_dlss"])
+        items = ready(bridge_present=True, dlss_present=True)
+        self.assertEqual([i["key"] for i in items[2:]], ["dlss", "framegen"])
+        self.assertEqual([a[1] for a in items[3]["actions"]], ["get_nvidia", "add_framegen"])
+
+    def test_slow_drive_and_launcher_release_add_warnings(self):
+        items = ready(slow_drive="E: is a USB drive", release_version="0.6.0")
+        self.assertEqual([(i["key"], i["state"]) for i in items[2:]], [("drive", "warn"), ("launcher", "warn")])
+        self.assertIn("E: is a USB drive", items[2]["detail"])
+        self.assertIn("SSD", items[2]["detail"])
+        self.assertIn("0.6.0", items[3]["title"])
+        self.assertEqual(items[3]["actions"], [("Install", "install_update")])
+
+
 @unittest.skipIf(uncharted_launcher is None, f"launcher needs tkinter and Pillow: {IMPORT_ERROR}")
 class LauncherUiTest(unittest.TestCase):
     def setUp(self):
@@ -71,6 +124,36 @@ class LauncherUiTest(unittest.TestCase):
             self.launcher.show_tab(name, save=False)
             self.root.update()
             self.assertEqual(self.launcher.section, name)
+
+    def test_refresh_home_with_a_folder_that_is_not_a_game(self):
+        launcher, mod = self.launcher, uncharted_launcher
+        fake = Path(self.tmp.name) / "game"
+        fake.mkdir()
+        (fake / "eboot.bin").write_bytes(b"x")  # no sce_sys/param.sfo: not a game folder
+        launcher.config["game_dir"] = str(fake)
+        self.assertFalse(mod.is_game_dir(fake))
+        launcher.refresh_home()
+        self.assertTrue(self.pump(lambda: launcher.home_checks is not None and not launcher.home_busy))
+        self.assertEqual(launcher.home_shown[0]["state"], "missing")
+        self.assertIn("1.", launcher.home_shown[0]["title"])
+        self.assertTrue(launcher.home_list.winfo_children())
+
+    def test_rebuild_sections_keeps_widgets_and_the_shown_section(self):
+        launcher, mod = self.launcher, uncharted_launcher
+        launcher.show_tab("display", save=False)
+        old_page = launcher.pages["display"]
+        with mock.patch.object(mod, "anti_aliasing_options", lambda: [("off", "Off"), ("dlss", "DLSS")]):
+            launcher.rebuild_sections()
+        self.root.update()
+        self.assertIsNot(launcher.pages["display"], old_page)
+        self.assertIs(launcher.display_page, launcher.pages["display"])
+        self.assertFalse(old_page.winfo_exists())
+        self.assertTrue(launcher.widgets["upscaler"].winfo_exists())
+        self.assertIn("dlss", launcher.widgets["upscaler"].labels)
+        self.assertTrue(launcher.widgets["fps_limit"].winfo_exists())
+        self.assertEqual(launcher.section, "display")
+        self.assertEqual(launcher.pages["display"].holder.winfo_manager(), "pack")  # packed = shown (root is withdrawn)
+        self.assertEqual(launcher.pages["home"].holder.winfo_manager(), "")
 
     def test_old_tab_names_map_to_sections(self):
         mod = uncharted_launcher
