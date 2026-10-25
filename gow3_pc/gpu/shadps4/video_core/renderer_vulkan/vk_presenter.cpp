@@ -6,6 +6,7 @@
 #include "common/io_file.h"
 #include "common/path_util.h"
 #include "common/singleton.h"
+#include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "sdl_window.h"
@@ -13,7 +14,10 @@
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "gow3_overlay.h"
+#include "gow3_reflex.h"
 #include "gow3_settings.h"
+#include "gow3_streamline.h"
+#include "gow3_toggles.h"
 #include "gow3_graphics.h"
 #include "gow3_trigger_files.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
@@ -170,12 +174,13 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
         frame.present_done = fence;
         free_queue.push(&frame);
     }
+    rasterizer->GetUpscaler().SetFrameGenRing(num_images + 1);
 
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
     Gow3Overlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
 
-    const bool binary_cache = EmulatorSettingsImpl::Flag("GOW3_PIPELINE_BINARIES", true) &&
+    const bool binary_cache = EmulatorSettingsImpl::Flag("GOW3_PIPELINE_BINARIES", false) &&
                               EmulatorSettings.IsPipelineCacheEnabled();
     const bool capture_only = EmulatorSettingsImpl::Flag("GOW3_PIPELINE_BINARY_ISOLATED", false) &&
                               EmulatorSettingsImpl::Flag("GOW3_PIPELINE_CAPTURE_ONLY", false);
@@ -642,6 +647,11 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     SubmitLog::Event("F0", "%llx", static_cast<unsigned long long>(cpu_address));
     Frame* frame = GetRenderFrame();
     SubmitLog::Event("F1", "%u", frame->id);
+    // gow3 22 Oct 2026: the frame's Reflex id is its flip's ordinal (the guest counts the same
+    // flips when it asks for them, Gow3Reflex::GuestFlipRequest).
+    frame->serial = Gow3Reflex::PreparedFlip();
+    // gow3 22 Oct 2026: the upscale this flip shows recorded them before (same command stream).
+    frame->frame_gen = rasterizer->GetUpscaler().TakeFrameGenInputs(frame->frame_gen_inputs);
 
     const auto frame_subresources = vk::ImageSubresourceRange{
         .aspectMask = vk::ImageAspectFlagBits::eColor,
@@ -874,6 +884,12 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     draw_scheduler.Flush(info);
     WatchGpuDone(draw_scheduler.GetWorkSemaphore(), frame->ready_tick);
     SubmitLog::Event("F2", "%u %llu", frame->id, static_cast<unsigned long long>(frame->ready_tick));
+    // gow3 22 Oct 2026: the frame's last submission is out, before the wait below: that one is the
+    // GPU's (up to a frame when it is the bottleneck), and counted as render submit time it would
+    // tell the driver the CPU needs that long, so Reflex would release the game that much earlier.
+    Gow3Reflex::RenderSubmitEnd(frame->serial);
+    Gow3Reflex::FrameQueued(frame->serial, instance.GetDevice(), frame->ready_semaphore,
+                            frame->ready_tick);
 
     // gow3: the GPU command thread runs at most GOW3_FRAMES_AHEAD (default 1) guest frames
     // ahead of the GPU: it waits here for the frame that many flips back. When the GPU is the
@@ -1095,6 +1111,10 @@ static void WatchGpuDone(Semaphore* semaphore, u64 tick) {
 Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     // Request a free presentation frame.
     Frame* frame = GetRenderFrame();
+    // gow3 22 Oct 2026: a blank frame the guest flipped (buffer -1, not the present thread's black
+    // frame) is a flip like any other for Reflex: the guest counted it (GuestFlipRequest).
+    frame->serial = present_thread ? 0 : Gow3Reflex::PreparedFlip();
+    frame->frame_gen = false;
 
     auto& scheduler = present_thread ? present_scheduler : draw_scheduler;
     scheduler.EndRendering();
@@ -1213,6 +1233,10 @@ void Presenter::PresentLoadingFrame() {
     info.AddWait(swapchain.GetImageAcquiredSemaphore());
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     present_scheduler.Flush(info);
+    if (const Dlss* dlss = Dlss::Get(); dlss && dlss->ViaStreamline()) {
+        Gow3Streamline::FrameGenSetMode(false, 1); // a loading frame has nothing to interpolate
+        frame_gen_active.store(false, std::memory_order_relaxed);
+    }
     {
         std::scoped_lock present_lock{PresentLock(instance)};
         swapchain.Present();
@@ -1247,6 +1271,20 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
 
+    // gow3 22 Oct 2026: DLSS Frame Generation presents its frame first. Any frame without one
+    // (frame generation off or skipped, black, loading or repeated frames) makes the next
+    // evaluation a reset: the two frames it would interpolate between are not neighbours.
+    // gow3 23 Oct 2026: through Streamline its swapchain hooks generate and present the frame
+    // inside the present below; this only hands it the frame's inputs and the mode.
+    if (const Dlss* dlss = Dlss::Get(); dlss && dlss->ViaStreamline()) {
+        UpdateStreamlineFrameGenLoad();
+        frame_gen_active.store(
+            StreamlineFrameGen(frame, is_game_frame && !is_reusing_frame), std::memory_order_relaxed);
+    } else if (!is_game_frame || is_reusing_frame || !PresentGenerated(frame)) {
+        frame_gen_reset = true;
+        frame_gen_active.store(false, std::memory_order_relaxed);
+    }
+
     const bool acquired = swapchain.AcquireNextImage();
     SubmitLog::Event("A1", "%u", frame->id);
     if (!acquired) {
@@ -1254,6 +1292,10 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         if (!swapchain.AcquireNextImage()) {
             // User resizes the window too fast and GPU can't keep up. Skip this frame.
             LOG_WARNING(Render_Vulkan, "Skipping frame!");
+            // 22 Oct review: PresentGenerated may have submitted an evaluation reading
+            // frame->image and the ring slot, and present_done is still the old signaled fence,
+            // so GetRenderFrame would not wait for it. Rare path: wait for the present queue.
+            present_scheduler.Finish();
             free_frame();
             return;
         }
@@ -1267,7 +1309,6 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                "Unexpected error resetting present done fence: {}", vk::to_string(reset_result));
 
     // gow3: the game frame is blitted (letterboxed) straight into the swapchain image.
-    const vk::Image swapchain_image = swapchain.Image();
     auto& scheduler = present_scheduler;
     const auto cmdbuf = scheduler.CommandBuffer();
 
@@ -1280,6 +1321,56 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     {
         const vk::Extent2D extent = swapchain.GetExtent();
         SetExpectedGameSize(s32(extent.width), s32(extent.height));
+        BlitToSwapchain(cmdbuf, frame->image, frame->width, frame->height);
+    }
+    if (EmulatorSettings.IsVkHostMarkersEnabled()) {
+        cmdbuf.endDebugUtilsLabelEXT();
+    }
+
+    // Flush vulkan commands.
+
+    SubmitInfo info{};
+    info.AddWait(swapchain.GetImageAcquiredSemaphore());
+    info.AddWait(frame->ready_semaphore, frame->ready_tick);
+    info.AddSignal(swapchain.GetPresentReadySemaphore());
+    info.AddSignal(frame->present_done);
+    scheduler.Flush(info);
+    SubmitLog::Event("A2", "%u", frame->id);
+    if (is_game_frame && !is_reusing_frame && !instance.HasPresentWait()) {
+        WatchDisplay(instance.GetDevice(), frame->present_done);
+    }
+
+    // Present to swapchain.
+    // gow3 22 Oct 2026: Reflex's present markers, for game frames only (not the redraw of the last
+    // frame, nor the black or loading frames), outside the present lock: markers are driver calls.
+    // With the present queue shared with the graphics queue the start marker comes before the wait
+    // for the submit lock, so it also counts that wait.
+    const bool reflex_frame = is_game_frame && !is_reusing_frame && frame->serial != 0;
+    if (reflex_frame) {
+        Gow3Reflex::PresentStart(frame->serial);
+    }
+    {
+        std::scoped_lock present_lock{PresentLock(instance)};
+        if (!swapchain.Present() && window.GetWidth() != 0 && window.GetHeight() != 0) {
+            swapchain.Recreate(window.GetWidth(), window.GetHeight());
+        }
+    }
+    if (reflex_frame) {
+        Gow3Reflex::PresentEnd(frame->serial);
+    }
+    SubmitLog::Event("A3", "%u", frame->id);
+
+    free_frame();
+    if (!is_reusing_frame && is_game_frame) {
+        DebugState.IncFlipFrameNum();
+    }
+}
+
+void Presenter::BlitToSwapchain(vk::CommandBuffer cmdbuf, vk::Image source, u32 width,
+                                u32 height) {
+    const vk::Image swapchain_image = swapchain.Image();
+    {
+        const vk::Extent2D extent = swapchain.GetExtent();
         const vk::ImageSubresourceRange color_range{
             .aspectMask = vk::ImageAspectFlagBits::eColor,
             .baseMipLevel = 0,
@@ -1305,15 +1396,14 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                 .newLayout = vk::ImageLayout::eTransferSrcOptimal,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = frame->image,
+                .image = source,
                 .subresourceRange = color_range,
             },
         };
         cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
                                vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
                                {}, {}, pre_barriers);
-        const vk::ImageBlit blit =
-            MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height);
+        const vk::ImageBlit blit = MakeImageBlitFit(width, height, extent.width, extent.height);
         // 20 Oct audit: the 4K clear cost GPU time every present; only letterbox bars need it.
         const bool covers = blit.dstOffsets[0].x == 0 && blit.dstOffsets[0].y == 0 &&
                             blit.dstOffsets[1].x == s32(extent.width) &&
@@ -1330,7 +1420,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                    vk::PipelineStageFlagBits::eTransfer,
                                    vk::DependencyFlagBits::eByRegion, clear_done, {}, {});
         }
-        cmdbuf.blitImage(frame->image, vk::ImageLayout::eTransferSrcOptimal, swapchain_image,
+        cmdbuf.blitImage(source, vk::ImageLayout::eTransferSrcOptimal, swapchain_image,
                          vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
         // gow3: the settings menu / FPS counter over the frame, at display resolution.
         const bool overlay = Gow3Overlay::Visible();
@@ -1355,7 +1445,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                 .newLayout = vk::ImageLayout::eGeneral,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = frame->image,
+                .image = source,
                 .subresourceRange = color_range,
             },
         };
@@ -1379,36 +1469,428 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                    vk::DependencyFlagBits::eByRegion, {}, {}, to_present);
         }
     }
-    if (EmulatorSettings.IsVkHostMarkersEnabled()) {
-        cmdbuf.endDebugUtilsLabelEXT();
+}
+
+namespace {
+
+// gow3 22 Oct 2026: DLSS Frame Generation pacing (swap thread only): the real frame half the last
+// real interval after the generated present returns. A deadline pacer (absolute deadlines half a
+// filtered period apart) was measured and removed the same day (U3 chapter 2, 1080p DLAA, limit
+// 160): it took the real rate from 80 to 52-65 FPS and put 37-48% of displayed intervals above
+// 1.5x the median (3% with this sleep), because its period came from arrival intervals it shaped
+// itself and could only ratchet up (period_ms 19.3, wait_ms 17.7 of 19).
+using FgClock = std::chrono::steady_clock;
+
+double FgMs(FgClock::duration d) {
+    return std::chrono::duration<double, std::milli>(d).count();
+}
+
+/// Sleeps until `deadline` on common/thread.cpp's high-resolution waitable timer (libc++'s
+/// sleep_until rounds up to whole milliseconds on Windows: up to ~1 ms late, driver.cpp's note of
+/// 20 Oct). Returns the milliseconds slept.
+double FgSleepUntil(FgClock::time_point deadline) {
+    const auto now = FgClock::now();
+    if (deadline <= now) {
+        return 0.0;
+    }
+    Common::AccurateSleep(std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - now),
+                          nullptr, false);
+    return FgMs(FgClock::now() - now);
+}
+
+/// 5 s of samples: the mean of all, the p99 of the last 512.
+struct FgSamples {
+    std::array<float, 512> ring{};
+    u32 count{};
+    double sum{};
+    void Add(double ms) {
+        ring[count % ring.size()] = float(ms);
+        ++count;
+        sum += ms;
+    }
+    double Mean() const {
+        return count ? sum / count : 0.0;
+    }
+    double P99() {
+        const u32 n = std::min<u32>(count, u32(ring.size()));
+        if (n == 0) {
+            return 0.0;
+        }
+        const auto it = ring.begin() + (n - 1) * 99 / 100;
+        std::nth_element(ring.begin(), it, ring.begin() + n);
+        return *it;
+    }
+};
+
+/// Statistics, printed every 5 s: eval = evaluate+flush, present = acquire..present return,
+/// gap = the slept time before the real present, interval = the raw real interval it halves.
+struct FgStats {
+    FgClock::time_point stats_at{};
+    u32 real{}, gen{}, menu{}, noinput{}, hdr{}, acquire{}, cuts{};
+    FgSamples eval, present, gap, interval;
+
+    void Print(bool std_sleep) {
+        std::printf("FrameGen: real=%u gen=%u skipped(menu=%u noinput=%u hdr=%u acquire=%u) "
+                    "eval_ms=%.2f/%.2f present_ms=%.2f gap_ms=%.2f/%.2f real_interval_ms=%.2f "
+                    "std_sleep=%d cuts=%u\n",
+                    real, gen, menu, noinput, hdr, acquire, eval.Mean(), eval.P99(),
+                    present.Mean(), gap.Mean(), gap.P99(), interval.Mean(), std_sleep ? 1 : 0,
+                    cuts);
+        std::fflush(stdout);
+        *this = FgStats{.stats_at = stats_at};
+    }
+};
+FgStats fg_stats;
+
+} // namespace
+
+bool Presenter::PresentGenerated(Frame* frame) {
+    auto& settings = Gow3Settings::Get();
+    if (settings.frame_gen_supported) {
+        // 22 Oct 2026: the inputs are the upscaler's depth and motion vectors; with anti-aliasing
+        // off there are none.
+        settings.frame_gen_problem =
+            settings.frame_gen && settings.upscaler == Gow3Settings::UpscalerOff
+                ? "needs anti-aliasing (TAA, FSR or DLSS) for its depth and motion vectors"
+                : nullptr;
+    }
+    // Not for frames without an upscale (menus, movies, loading), with the in-game menu open (it
+    // is drawn over both frames and would smear), or right after an HDR switch (the frame image
+    // and the feature still have the other format).
+    if (!Dlss::FrameGenWanted()) {
+        return false; // frame generation off: no pacing, no statistics
+    }
+    auto& stats = fg_stats;
+    const bool std_sleep = Gow3Toggle::Disabled2(Gow3Toggle::FrameGenStdSleep);
+    {
+        const auto now = FgClock::now();
+        if (stats.stats_at == FgClock::time_point{}) {
+            stats.stats_at = now;
+        } else if (now - stats.stats_at >= std::chrono::seconds(5)) {
+            stats.stats_at = now;
+            stats.Print(std_sleep);
+        }
+    }
+    ++stats.real;
+    if (!frame->frame_gen) {
+        ++stats.noinput;
+        return false;
+    }
+    if (Gow3Overlay::CapturesInput()) {
+        ++stats.menu;
+        return false;
+    }
+    if (frame->is_hdr != swapchain.GetHDR()) {
+        ++stats.hdr;
+        return false;
+    }
+    Dlss* dlss = Dlss::Get();
+    const auto& inputs = frame->frame_gen_inputs;
+    const vk::Format format = swapchain.GetSurfaceFormat().format;
+    const Dlss::FrameGenDesc desc{frame->width, frame->height, inputs.depth.width,
+                                  inputs.depth.height, format};
+    if (frame_gen_failed == desc) {
+        return false;
+    }
+    static const bool storable = [&] {
+        const auto features = instance.GetPhysicalDevice().getFormatProperties(format);
+        const bool ok = bool(features.optimalTilingFeatures & vk::FormatFeatureFlagBits::eStorageImage);
+        if (!ok) {
+            std::printf("Frame generation: off (%s cannot be a storage image)\n",
+                        vk::to_string(format).c_str());
+        }
+        return ok;
+    }();
+    if (!storable) {
+        return false;
+    }
+    auto& scheduler = present_scheduler;
+    const vk::Device device = instance.GetDevice();
+    if (!frame_gen_output || frame_gen_width != frame->width ||
+        frame_gen_height != frame->height || frame_gen_format != format ||
+        !dlss->HasFrameGenFeature(desc)) {
+        // The previous output and feature may still be in use by submitted presents (a window
+        // resize, an HDR switch or a new render size: rare).
+        scheduler.Finish();
+        if (!frame_gen_output || frame_gen_width != frame->width ||
+            frame_gen_height != frame->height || frame_gen_format != format) {
+            frame_gen_output_view.reset();
+            frame_gen_output = VideoCore::UniqueImage(device, instance.GetAllocator());
+            frame_gen_output.Create(vk::ImageCreateInfo{
+                .imageType = vk::ImageType::e2D,
+                .format = format,
+                .extent = {frame->width, frame->height, 1},
+                .mipLevels = 1,
+                .arrayLayers = 1,
+                .samples = vk::SampleCountFlagBits::e1,
+                .tiling = vk::ImageTiling::eOptimal,
+                .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
+                         vk::ImageUsageFlagBits::eTransferSrc,
+                .initialLayout = vk::ImageLayout::eUndefined,
+            });
+            frame_gen_output_view = Check(device.createImageViewUnique({
+                .image = vk::Image(frame_gen_output),
+                .viewType = vk::ImageViewType::e2D,
+                .format = format,
+                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+            }));
+            frame_gen_width = frame->width;
+            frame_gen_height = frame->height;
+            frame_gen_format = format;
+        }
+        if (!dlss->HasFrameGenFeature(desc)) {
+            if (!dlss->FrameGenCreate(scheduler.CommandBuffer(), desc)) {
+                std::printf("Frame generation: feature creation failed (%ux%u, depth and motion "
+                            "%ux%u); off for this size\n",
+                            desc.width, desc.height, desc.render_width, desc.render_height);
+                frame_gen_failed = desc;
+                return false;
+            }
+            std::printf("Frame generation: feature created (%ux%u, depth and motion %ux%u, %s)\n",
+                        desc.width, desc.height, desc.render_width, desc.render_height,
+                        vk::to_string(format).c_str());
+            frame_gen_reset = true;
+        }
     }
 
-    // Flush vulkan commands.
+    // The real frames' interval, for the pacing below.
+    const auto start = std::chrono::steady_clock::now();
+    const auto real_interval = start - frame_gen_last_real;
+    frame_gen_last_real = start;
 
-    SubmitInfo info{};
-    info.AddWait(swapchain.GetImageAcquiredSemaphore());
-    info.AddWait(frame->ready_semaphore, frame->ready_tick);
-    info.AddSignal(swapchain.GetPresentReadySemaphore());
-    info.AddSignal(frame->present_done);
-    scheduler.Flush(info);
-    SubmitLog::Event("A2", "%u", frame->id);
-    if (is_game_frame && !is_reusing_frame && !instance.HasPresentWait()) {
-        WatchDisplay(instance.GetDevice(), frame->present_done);
+    // 22 Oct 2026: a camera cut resets NGX (U3 cutscenes with the development nvngx_dlssg.dll
+    // warned "Scene change detected without Reset flag"). Not counted when a reset is pending anyway.
+    const bool camera_cut = Vulkan::IsCameraCut(frame_gen_prev_camera, inputs.camera);
+    frame_gen_prev_camera = inputs.camera;
+    if (camera_cut && !frame_gen_reset) {
+        ++stats.cuts;
     }
 
-    // Present to swapchain.
+    const vk::Image output = vk::Image(frame_gen_output);
+    const vk::ImageSubresourceRange color{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+    const auto cmdbuf = scheduler.CommandBuffer();
+    // The last blit read the output: its contents are not needed.
+    const vk::ImageMemoryBarrier2 to_write{
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eNone,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eGeneral,
+        .image = output,
+        .subresourceRange = color,
+    };
+    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_write});
+    // The backbuffer is the frame image as Present shows it (game HUD included; the overlay is
+    // drawn after, on both frames). No hudless image: the upscaled scene the port has is before
+    // the game's post, tonemap or the presenter's sharpening, and NGX needs it equal to the
+    // backbuffer outside the HUD (DLSS-FG guide, pHudless).
+    const bool ok = dlss->FrameGenEvaluate(
+        cmdbuf, {
+                    .backbuffer = {frame->image, frame->image_view, format,
+                                   vk::ImageAspectFlagBits::eColor, frame->width, frame->height},
+                    .depth = inputs.depth,
+                    .motion = inputs.motion,
+                    .output = {output, *frame_gen_output_view, format,
+                               vk::ImageAspectFlagBits::eColor, frame->width, frame->height},
+                    .camera = inputs.camera,
+                    .jitter_x = inputs.jitter[0],
+                    .jitter_y = inputs.jitter[1],
+                    .reset = frame_gen_reset || inputs.reset || camera_cut,
+                    .hdr = frame->is_hdr,
+                });
+    // NGX may leave Vulkan state changed (DLSS guide 5.2.5).
+    scheduler.GetDynamicState().Invalidate();
+    if (!ok) {
+        static bool printed = false;
+        if (!printed) {
+            printed = true;
+            std::printf("Frame generation: evaluation failed; real frames only\n");
+        }
+        return false; // the barrier above goes out with the real frame's present
+    }
+    frame_gen_reset = false;
+    const vk::MemoryBarrier2 written{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                                     .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                                     .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                                     .dstAccessMask = vk::AccessFlagBits2::eTransferRead};
+    cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &written});
+    // A submission of its own: its first wait (the frame's rendering) covers all stages, NGX's
+    // compute included (Scheduler::Flush: the second wait covers color output only).
+    {
+        SubmitInfo info{};
+        info.AddWait(frame->ready_semaphore, frame->ready_tick);
+        scheduler.Flush(info);
+    }
+    stats.eval.Add(FgMs(FgClock::now() - start));
+    const auto present_start = FgClock::now();
+    if (!swapchain.AcquireNextImage()) {
+        ++stats.acquire;
+        // 22 Oct review: eSuboptimalKHR still acquires an image and signals the semaphore, but
+        // frame_index does not advance; Present would acquire again on the same semaphore
+        // (VUID 01286) and leak the image. Recreate here as Present does. The output and the
+        // feature follow the frame and format checks above on the next call; Present resets.
+        if (window.GetWidth() != 0 && window.GetHeight() != 0) {
+            swapchain.Recreate(window.GetWidth(), window.GetHeight());
+        }
+        return false;
+    }
+    BlitToSwapchain(scheduler.CommandBuffer(), output, frame->width, frame->height);
+    {
+        SubmitInfo info{};
+        info.AddWait(swapchain.GetImageAcquiredSemaphore());
+        info.AddSignal(swapchain.GetPresentReadySemaphore());
+        scheduler.Flush(info);
+    }
+    // 22 Oct 2026: out-of-band present markers with the real frame's id (VK_NV_low_latency2
+    // revision 2: a present without markers counts as a new application frame).
+    const bool reflex_marked = frame->serial != 0;
+    if (reflex_marked) {
+        Gow3Reflex::GeneratedPresentStart(frame->serial);
+    }
+    bool present_failed = false;
     {
         std::scoped_lock present_lock{PresentLock(instance)};
         if (!swapchain.Present() && window.GetWidth() != 0 && window.GetHeight() != 0) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
+            present_failed = true;
         }
     }
-    SubmitLog::Event("A3", "%u", frame->id);
-
-    free_frame();
-    if (!is_reusing_frame && is_game_frame) {
-        DebugState.IncFlipFrameNum();
+    if (reflex_marked) {
+        Gow3Reflex::GeneratedPresentEnd(frame->serial);
     }
+    if (present_failed) {
+        return false;
+    }
+    frame_gen_active.store(true, std::memory_order_relaxed);
+    ++stats.gen;
+    stats.present.Add(FgMs(FgClock::now() - present_start));
+    // The real frame half a real interval after the generated one (DLSS-FG guide 7: equal
+    // spacing). The first frame after a pause (an interval over 100 ms) does not wait.
+    if (real_interval < std::chrono::milliseconds(100)) {
+        stats.interval.Add(FgMs(real_interval));
+        const auto slept_from = FgClock::now();
+        if (std_sleep) {
+            std::this_thread::sleep_until(slept_from + real_interval / 2);
+            stats.gap.Add(FgMs(FgClock::now() - slept_from));
+        } else {
+            stats.gap.Add(FgSleepUntil(slept_from + real_interval / 2));
+        }
+    }
+    return true;
+}
+
+void Presenter::UpdateStreamlineFrameGenLoad() {
+    if (!Gow3Streamline::FrameGenReady()) {
+        return;
+    }
+    const bool wanted = Dlss::FrameGenWanted();
+    if (wanted == Gow3Streamline::FrameGenLoaded()) {
+        return;
+    }
+    // Streamline's DLSS-G guide 18: loaded, the plugin presents through its own queue from
+    // off-screen copies, which costs a copy and a queue hand-over per frame even with the mode
+    // off; it acts at swapchain creation, so the swapchain is made again around the change.
+    Gow3Streamline::FrameGenSetMode(false, 1);
+    present_scheduler.Finish();
+    swapchain.RecreateAround([wanted] { Gow3Streamline::SetFrameGenLoaded(wanted); });
+    frame_gen_reset = true;
+    std::printf("Frame generation (Streamline): %s; swapchain recreated\n",
+                wanted ? "loaded" : "unloaded");
+}
+
+bool Presenter::StreamlineFrameGen(Frame* frame, bool game_frame) {
+    static auto stats_at = std::chrono::steady_clock::now();
+    static auto undoubled_since = std::chrono::steady_clock::time_point{};
+    static bool undoubled_reported = false;
+    static u32 real = 0, generated = 0, doubled = 0;
+    if (!Dlss::FrameGenWanted() || !Gow3Streamline::FrameGenLoaded()) {
+        frame_gen_reset = true;
+        return false; // unloaded (UpdateStreamlineFrameGenLoad): nothing to hand over
+    }
+    // 23 Oct 2026: Streamline decides per present whether it really interpolates. Its log says
+    // "DLSS-G disabled: window not focused" while another window has the focus (2 of 3 automated
+    // U3 sessions: 60 real and 60 shown FPS, the limiter halving real frames for nothing). The
+    // frames it presented for the last real one (2 when it added one, 1 when not) decide whether
+    // the limiter counts shown frames (Presenter::FrameGenActive), one frame late.
+    const auto fg_state = Gow3Streamline::FrameGenGetState();
+    const bool last_doubled = fg_state.presented >= 2;
+    const auto off = [&] {
+        frame_gen_reset = true;
+        if (game_frame && frame->serial != 0) {
+            Gow3Streamline::FrameGenSetFrame(frame->serial, nullptr);
+        }
+        Gow3Streamline::FrameGenSetMode(false, 1);
+        return false;
+    };
+    if (const auto now = std::chrono::steady_clock::now();
+        now - stats_at >= std::chrono::seconds(5)) {
+        // with_inputs: frames handed over with the mode on; doubled: frames Streamline presented
+        // with a generated one.
+        std::printf("FrameGen (Streamline): real=%u with_inputs=%u doubled=%u status=0x%x\n", real,
+                    generated, doubled, fg_state.status);
+        std::fflush(stdout);
+        stats_at = now;
+        real = generated = doubled = 0;
+    }
+    ++real;
+    doubled += last_doubled ? 1 : 0;
+    // As PresentGenerated: game frames with an upscale's inputs, not under the in-game menu and
+    // not right after an HDR switch.
+    if (!game_frame || frame->serial == 0 || !frame->frame_gen || Gow3Overlay::CapturesInput() ||
+        frame->is_hdr != swapchain.GetHDR()) {
+        return off();
+    }
+    const auto& inputs = frame->frame_gen_inputs;
+    const bool camera_cut = Vulkan::IsCameraCut(frame_gen_prev_camera, inputs.camera);
+    frame_gen_prev_camera = inputs.camera;
+    // Where the letterboxed game image lands in the backbuffer (BlitToSwapchain).
+    const vk::Extent2D extent = swapchain.GetExtent();
+    const vk::ImageBlit blit = MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height);
+    const bool covers = blit.dstOffsets[0].x == 0 && blit.dstOffsets[0].y == 0 &&
+                        blit.dstOffsets[1].x == s32(extent.width) &&
+                        blit.dstOffsets[1].y == s32(extent.height);
+    const auto image = [](const Dlss::Resource& r) {
+        return Gow3Streamline::Image{static_cast<VkImage>(r.image), static_cast<VkImageView>(r.view),
+                                     static_cast<VkFormat>(r.format), r.width, r.height,
+                                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                     VK_IMAGE_LAYOUT_GENERAL};
+    };
+    Gow3Streamline::FgFrame fg{
+        .depth = image(inputs.depth),
+        .motion = image(inputs.motion),
+        .camera = inputs.camera,
+        .jitter = {inputs.jitter[0], inputs.jitter[1]},
+        .reset = frame_gen_reset || inputs.reset || camera_cut,
+    };
+    if (!covers) {
+        fg.sub_x = u32(blit.dstOffsets[0].x);
+        fg.sub_y = u32(blit.dstOffsets[0].y);
+        fg.sub_w = u32(blit.dstOffsets[1].x - blit.dstOffsets[0].x);
+        fg.sub_h = u32(blit.dstOffsets[1].y - blit.dstOffsets[0].y);
+    }
+    if (!Gow3Streamline::FrameGenSetFrame(frame->serial, &fg)) {
+        return off();
+    }
+    Gow3Streamline::FrameGenSetMode(true, 1);
+    frame_gen_reset = false;
+    ++generated;
+    // Said once per stretch: on, but not interpolating for 2 s (Streamline's own reason is in its
+    // log with GOW3_SL_LOG=2, usually the window focus).
+    const auto now = std::chrono::steady_clock::now();
+    if (last_doubled) {
+        undoubled_since = {};
+        undoubled_reported = false;
+    } else if (undoubled_since == std::chrono::steady_clock::time_point{}) {
+        undoubled_since = now;
+    } else if (!undoubled_reported && now - undoubled_since >= std::chrono::seconds(2)) {
+        undoubled_reported = true;
+        const bool focused = Gow3Streamline::WindowFocused(window.GetWindowInfo().render_surface);
+        std::printf("Frame generation (Streamline): on but not interpolating for 2 s (game window "
+                    "%s); the limiter counts real frames meanwhile\n",
+                    focused ? "has the focus" : "does not have the focus");
+    }
+    return last_doubled;
 }
 
 Frame* Presenter::GetRenderFrame() {

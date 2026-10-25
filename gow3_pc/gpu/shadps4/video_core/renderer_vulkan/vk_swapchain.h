@@ -28,6 +28,15 @@ public:
     /// Recreates the swapchain with a given size and current surface.
     void Recreate(u32 width, u32 height);
 
+    /// gow3 23 Oct 2026: Recreate with `between` run after the old swapchain is gone and before
+    /// the new one exists (Streamline's DLSS-G guide 18: load or unload frame generation there).
+    template <typename F>
+    void RecreateAround(F&& between) {
+        Destroy();
+        between();
+        Create(width, height);
+    }
+
     /// Acquires the next image in the swapchain.
     bool AcquireNextImage();
 

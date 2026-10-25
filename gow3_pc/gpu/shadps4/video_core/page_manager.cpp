@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <boost/container/small_vector.hpp>
 #include "gow3_toggles.h"
@@ -116,11 +117,31 @@ struct PageManager::Impl {
 
     virtual void Protect(VAddr address, size_t size, Core::MemoryPermission perms) = 0;
 
+    // An early false-sharing open leaves watcher counts intact until the queued unwatch.
+    // A new readback must restore protection even if its count goes from 1 to 2, not 0 to 1.
+    // Page lock first, then this mutex, on every path. The atomic keeps the common path cheap.
+    std::mutex early_reads_mutex;
+    std::unordered_set<size_t> early_reads;
+    std::atomic<size_t> early_read_count{0};
+
+    bool TakeEarlyRead(size_t page) {
+        if (!early_read_count.load(std::memory_order_acquire)) {
+            return false;
+        }
+        std::scoped_lock lock{early_reads_mutex};
+        const bool found = early_reads.erase(page) != 0;
+        early_read_count.store(early_reads.size(), std::memory_order_release);
+        return found;
+    }
+
     // gow3: GOW3_FAULT_STATS=1 prints, every 5 s, the CPU read faults on GPU-modified pages
     // (each one waits for the GPU and downloads a window): count and time by thread kind, and the
     // hottest faulting instructions and 64 KiB windows. Input for frame drops (Uncharted temple).
+    // kind (23 Oct 2026, Rasterizer::GuestReadFault): 1 a false-sharing read opened on the guest
+    // thread, 2 a read of GPU bytes the guest thread waited for itself, 0 neither.
     static void NoteReadFault(void* context, VAddr addr, bool gpu_thread,
-                              std::chrono::steady_clock::duration took, bool write = false) {
+                              std::chrono::steady_clock::duration took, bool write = false,
+                              u32 kind = 0) {
         static const bool enabled = [] {
             const char* env = std::getenv("GOW3_FAULT_STATS");
             return env && env[0] == '1';
@@ -129,22 +150,52 @@ struct PageManager::Impl {
             return;
         }
         u64 rip = 0;
+        bool via_library = false;
 #ifdef _WIN32
-        rip = static_cast<EXCEPTION_POINTERS*>(context)->ContextRecord->Rip;
+        const auto* record = static_cast<EXCEPTION_POINTERS*>(context)->ContextRecord;
+        rip = record->Rip;
         // Runtime code: as an offset in the executable (symbolize with llvm-symbolizer at
         // 0x140000000 + offset); guest code stays absolute.
         static const u64 exe_base = reinterpret_cast<u64>(GetModuleHandleW(nullptr));
         if (rip >= exe_base && rip < exe_base + 0x20000000) {
             rip = rip - exe_base + 0x140000000;
+        } else if (rip >= 0x7ff000000000ULL) {
+            // A system library (the C runtime's memcpy the guest's imports reach): unwound to
+            // its first caller outside system libraries (the guest, or the runtime's import stub).
+            CONTEXT unwound = *record;
+            const auto host_code = [&](u64 at) {
+                return at >= 0x7ff000000000ULL || (at >= exe_base && at < exe_base + 0x20000000);
+            };
+            for (int depth = 0; depth < 8 && host_code(unwound.Rip); ++depth) {
+                DWORD64 image_base = 0;
+                if (auto* entry = RtlLookupFunctionEntry(unwound.Rip, &image_base, nullptr)) {
+                    void* handler_data = nullptr;
+                    DWORD64 establisher = 0;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, unwound.Rip, entry, &unwound,
+                                     &handler_data, &establisher, nullptr);
+                } else {
+                    std::memcpy(&unwound.Rip, reinterpret_cast<const void*>(unwound.Rsp), 8);
+                    unwound.Rsp += 8;
+                }
+            }
+            if (unwound.Rip && !host_code(unwound.Rip)) {
+                rip = unwound.Rip;
+                via_library = true;
+            }
         }
 #endif
         static std::mutex mutex;
         static std::unordered_map<u64, u32> by_rip, by_window;
-        static u64 count[2], ns[2], write_count, write_ns;
+        static u64 count[2], ns[2], write_count, write_ns, kind_count[3], kind_ns[3];
         static auto last = std::chrono::steady_clock::now();
         std::scoped_lock lock{mutex};
-        // Write faults that had to download GPU data are keyed separately (top bit).
-        ++by_rip[rip | (write ? 1ULL << 63 : 0)];
+        if (!write && kind < 3) {
+            ++kind_count[kind];
+            kind_ns[kind] += std::chrono::duration_cast<std::chrono::nanoseconds>(took).count();
+        }
+        // Write faults that had to download GPU data are keyed separately (top bit); bits 60-61
+        // hold the kind, bit 59 a library function's caller.
+        ++by_rip[rip | (write ? 1ULL << 63 : 0) | (u64{kind & 3} << 60) | (via_library ? 1ULL << 59 : 0)];
         ++by_window[(addr >> 16) | (write ? 1ULL << 47 : 0)];
         const u64 took_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(took).count();
         if (write) {
@@ -178,9 +229,21 @@ struct PageManager::Impl {
                     (unsigned long long)g_range_prepare_pages.exchange(0),
                     (unsigned long long)g_range_prepare_discarded.exchange(0),
                     g_range_prepare_ns.exchange(0) / 1e6);
+        std::printf("  read faults by kind: usual path %llu (%.1f ms), shared page opened here %llu "
+                    "(%.1f ms), GPU bytes waited here %llu (%.1f ms)\n",
+                    (unsigned long long)kind_count[0], kind_ns[0] / 1e6,
+                    (unsigned long long)kind_count[1], kind_ns[1] / 1e6,
+                    (unsigned long long)kind_count[2], kind_ns[2] / 1e6);
+        for (u32 k = 0; k < 3; ++k) {
+            kind_count[k] = kind_ns[k] = 0;
+        }
         for (const auto& [n, key] : top(by_rip)) {
-            std::printf("  %s rip %#llx: %u\n", key >> 63 ? "write" : "read",
-                        (unsigned long long)(key & ~(1ULL << 63)), n);
+            static constexpr const char* kinds[4] = {"", " (shared page, opened here)",
+                                                     " (GPU bytes, waited here)", ""};
+            std::printf("  %s rip %#llx%s%s: %u\n", key >> 63 ? "write" : "read",
+                        (unsigned long long)(key & ((1ULL << 59) - 1)),
+                        (key >> 59) & 1 ? " (caller of a library function)" : "",
+                        kinds[(key >> 60) & 3], n);
         }
         for (const auto& [n, key] : top(by_window)) {
             std::printf("  %s window %#llx: %u\n", (key >> 47) & 1 ? "write" : "read",
@@ -330,11 +393,41 @@ struct PageManager::Impl {
             Gow3Stats::read_faults.fetch_add(1, std::memory_order_relaxed);
             Gow3Stats::Timer timer{Gow3Stats::t_read_faults};
             const auto start = std::chrono::steady_clock::now();
+            // gow3 23 Oct 2026: a guest thread first settles what it can alone (false sharing,
+            // or waiting for the GPU bytes' submission itself; Rasterizer::GuestReadFault).
+            const int guest = is_gpu_thread ? 0 : rasterizer->GuestReadFault(addr);
+            if (guest == 1) {
+                NoteReadFault(context, addr, false, std::chrono::steady_clock::now() - start, false, 1);
+                return true;
+            }
             const bool handled = rasterizer->ReadMemory(addr, 8, is_gpu_thread);
-            NoteReadFault(context, addr, is_gpu_thread, std::chrono::steady_clock::now() - start);
+            NoteReadFault(context, addr, is_gpu_thread, std::chrono::steady_clock::now() - start, false,
+                          guest == 2 ? 2 : 0);
             return handled;
         }
         return false;
+    }
+
+    bool OpenForReads(VAddr addr, u32 max_watchers) {
+        const size_t page = addr >> PM_PAGE_BITS;
+        if (page >= NUM_ADDRESS_PAGES) {
+            return false;
+        }
+        std::scoped_lock lk{locks[page / PAGES_PER_LOCK]};
+        const PageState& state = cached_pages[page];
+        if (state.num_read_watchers == 0 || state.num_read_watchers > max_watchers) {
+            return false;
+        }
+        {
+            std::scoped_lock lock{early_reads_mutex};
+            early_reads.insert(page);
+            early_read_count.store(early_reads.size(), std::memory_order_release);
+        }
+        // As the page will be once unwatched (BufferCache::UnwatchPage): a write the guest makes
+        // meanwhile is kept by the readback guard when the GPU data lands, and does not fault
+        // into LandWatchedReadback (a wait for the GPU) before the unwatch runs.
+        Protect(page << PM_PAGE_BITS, PM_PAGE_SIZE, Core::MemoryPermission::Read | state.WritePerm());
+        return true;
     }
 
     template <bool track, bool is_read>
@@ -378,6 +471,14 @@ struct PageManager::Impl {
 
             // Apply the change to the page state
             const u8 new_count = state.AddDelta<track ? 1 : -1, is_read>();
+
+            if constexpr (is_read) {
+                if ((track || new_count == 0) && TakeEarlyRead(page)) {
+                    // Flush a preceding range before the exceptional page's explicit protect.
+                    release_pending();
+                    Protect(page << PM_PAGE_BITS, PM_PAGE_SIZE, state.Perms());
+                }
+            }
 
             if (auto new_perms = state.Perms(); new_perms != perms) [[unlikely]] {
                 // If the protection changed add pending (un)protect action
@@ -685,6 +786,10 @@ bool PageManager::IsReadWatched(VAddr addr) const {
         return false;
     }
     return __atomic_load_n(&impl->cached_pages[page].num_read_watchers, __ATOMIC_RELAXED) != 0;
+}
+
+bool PageManager::OpenForReads(VAddr addr, u32 max_watchers) const {
+    return impl->OpenForReads(addr, max_watchers);
 }
 
 template <bool track, bool is_read>

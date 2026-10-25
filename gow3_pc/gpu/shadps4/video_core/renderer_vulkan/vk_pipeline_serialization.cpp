@@ -45,8 +45,9 @@ static constexpr u32 PipelineKeyVersion = 5u; // gow3: Info layout (ImageResourc
 /// gow3: the cache name of a shader's SPIR-V. Shaders that gained multi-wave LDS barriers get a
 /// new name, so binaries cached before the fix are not found and only those shaders recompile.
 static std::string ShaderBinaryName(u64 pgm_hash, size_t perm_idx) {
-    return fmt::format("{:#018x}_{}{}", pgm_hash, perm_idx,
-                       Shader::Optimization::MultiwaveLdsBarriers(pgm_hash) ? "_lds4" : "");
+    return fmt::format("{:#018x}_{}{}{}", pgm_hash, perm_idx,
+                       Shader::Optimization::MultiwaveLdsBarriers(pgm_hash) ? "_lds4" : "",
+                       Shader::Optimization::LdsBoundsEnabled(pgm_hash) ? "_ldsb" : "");
 }
 } // namespace Serialization
 
@@ -737,6 +738,21 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
     Storage::DataBase::Instance().Save(Storage::BlobType::ShaderBinary,
                                        Serialization::ShaderBinaryName(pgm_hash, perm_idx),
                                        std::move(spv));
+}
+
+std::vector<u32> LoadBatchComputeBinary(u64 pgm_hash, u64 compute_key) {
+    // Opt-in crowd prototype only. Resolve the cached permutation once per host pipeline;
+    // never invent a shader binary or modify the persistent shader/pipeline cache.
+    std::vector<u32> binary;
+    if (pgm_hash != 0x8f067540 || !Storage::DataBase::Instance().IsOpened()) return binary;
+    for (u64 permutation = 0; permutation < 4096; ++permutation) {
+        if (HashCombine(pgm_hash, permutation) == compute_key) {
+            Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
+                Serialization::ShaderBinaryName(pgm_hash, permutation), binary);
+            break;
+        }
+    }
+    return binary;
 }
 
 // gow3 21 Oct 2026: a cache entry that cannot be read (truncated by a game that ended during a

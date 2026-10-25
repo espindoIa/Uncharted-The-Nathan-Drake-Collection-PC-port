@@ -16,7 +16,7 @@ How to play
 3. On first Play, select your game folder (CUSA02320 or CUSA02344). The launcher remembers it.
    Recommended: the 1.02 update (stability and visual fixes). Extract it next to the game folder,
    named like it plus "-patch" (e.g. CUSA02320-patch, with or without its uroot folder). The
-   launcher shows the version it uses under Advanced.
+   launcher shows the version it uses on Home.
 4. Pick a game card and a preset, then press PLAY.
    Low: 720p + FSR 1 at 60 FPS (weak GPUs). Medium: 1080p 60 (as on PS4).
    High: 1440p 60. Ultra: 4K at up to 120 FPS (fast GPUs; Uncharted 1
@@ -25,15 +25,15 @@ How to play
    controls); both shortcuts can be changed in its Controls tab.
 5. Keyboard and mouse work out of the box (WASD move, mouse look, right mouse aim, left mouse
    fire, Space jump, Left Ctrl cover, F melee, R reload). Change them per game in the launcher's
-   CONTROLS tab. Alt+Tab or Insert frees the mouse.
+   CONTROLS section. Alt+Tab or Insert frees the mouse.
 
 Notes
 - The first start of each game prepares files and compiles shaders: expect a slow first load
   and some stutter until the shader cache has filled.
 - Settings are kept per game. Saves and logs are kept in analysis\ next to the launcher.
-- Logs for troubleshooting: Advanced tab -> Open log folder (boot.log).
+- Logs for troubleshooting: System section -> FOLDERS -> Open log folder (boot.log).
 - Render resolutions above 1080p are new: if a game crashes there, choose Medium (1080p).
-- Low-end PCs and laptops: keep Idle game threads (Performance tab) on Sleep (the default): with
+- Low-end PCs and laptops: keep Idle game threads (Performance section) on Sleep (the default): with
   Spin the games' six job threads keep their cores busy while waiting for work and take a 4-6
   core CPU. Keep Multithreaded rendering on (per game; the default) and Frames queued at 1: the
   GPU commands then use a second CPU core. With a weak GPU also pick the Low preset or a DLSS/FSR
@@ -55,7 +55,7 @@ Known issues
 - Frames queued 2 is faster in heavy scenes, but GPU results reach the game a frame later
   (Uncharted 2's NPCs float, Nate's feet sink into the floor): keep it at 1.
 - Multithreaded rendering is on by default: keep Frames queued at 1 with it. If a game hangs
-  while loading, turn it off for that game (Performance tab).
+  while loading, turn it off for that game (Performance section).
 - Recording with OBS Game Capture: if OBS keeps losing and re-hooking the game, the game's memory
   use grows. With an NVIDIA card set NVIDIA Control Panel -> Manage 3D settings -> Program settings
   -> Uncharted.exe -> Vulkan/OpenGL present method: Prefer native, or use OBS Window Capture.
@@ -81,9 +81,12 @@ NVIDIA DLSS
 NVIDIA DLSS works on NVIDIA RTX (GeForce RTX) GPUs. NVIDIA, GeForce RTX and DLSS are trademarks
 of NVIDIA Corporation. This package does not include NVIDIA's nvngx_dlss.dll: download it from
 NVIDIA's DLSS page, https://github.com/NVIDIA/DLSS/tree/main/lib/Windows_x86_64/rel
-(nvngx_dlss.dll), then in the launcher open Display -> NVIDIA DLSS -> "Add nvngx_dlss.dll..."
+(nvngx_dlss.dll), then in the launcher open Home -> Ready to play -> "Add nvngx_dlss.dll..."
 (the launcher checks NVIDIA's signature and copies it next to the runtime). nvngx_dlss.dll is
 NVIDIA's, under NVIDIA's license; the port loads it at run time through gow3_dlss.dll (MIT,
 licenses\gow3-dlss-bridge\LICENSE.txt; it contains NVIDIA's NGX library, under
 licenses\nvidia-dlss\LICENSE.txt). Without it, or on other GPUs, the port uses its other
 upscalers.
+
+DLSS Frame Generation (RTX 40 or newer) also needs NVIDIA's nvngx_dlssg.dll, from the same NVIDIA
+page. It is not included either: in the launcher, Home -> Ready to play -> "Add nvngx_dlssg.dll...".

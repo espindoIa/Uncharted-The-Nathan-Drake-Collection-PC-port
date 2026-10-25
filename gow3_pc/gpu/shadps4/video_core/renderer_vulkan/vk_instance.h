@@ -180,6 +180,9 @@ public:
     bool IsAttachmentFeedbackLoopLayoutSupported() const {
         return attachment_feedback_loop;
     }
+    bool SupportsStorageBufferArrayIndexing() const {
+        return features.shaderStorageBufferArrayDynamicIndexing;
+    }
 
     /// Returns true when VK_EXT_custom_border_color is supported
     bool IsCustomBorderColorSupported() const {
@@ -577,6 +580,7 @@ private:
     vk::Queue present_queue;
     vk::Queue graphics_queue;
     vk::Queue copy_queue;
+    void* window_handle{}; ///< the game window (HWND), for the present queue choice
     bool present_wait{};
     vk::Queue sparse_queue;
     u32 sparse_queue_family_index{0};

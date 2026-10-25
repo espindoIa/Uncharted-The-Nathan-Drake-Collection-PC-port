@@ -12,6 +12,9 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/types.h"
+#include "gow3_display_adapter.h"
+#include "gow3_reflex.h"
+#include "gow3_streamline.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -196,6 +199,7 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
                    bool enable_validation, bool enable_crash_diagnostic)
     : instance{CreateInstance(window_info.type, enable_validation, enable_crash_diagnostic)},
       physical_devices{EnumeratePhysicalDevices(instance)} {
+    window_handle = window_info.render_surface;
     if (enable_validation) {
         debug_callback = CreateDebugCallback(*instance);
     } else if (const char* diag = std::getenv("GOW3_GPU_CHECKPOINTS"); diag && diag[0] != '0') {
@@ -300,6 +304,8 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
 }
 
 Instance::~Instance() {
+    Gow3Streamline::Shutdown(); // slShutdown before the device goes (Streamline guide 2.0)
+    Gow3Reflex::Shutdown(GetDevice());
     ImGui::Core::Shutdown(GetDevice());
     VideoCore::FlushImageReaper();
     vmaDestroyAllocator(allocator);
@@ -325,9 +331,11 @@ std::string Instance::GetDriverVersionName() {
 }
 
 namespace {
+// gow3 24 Oct 2026: off unless GOW3_PIPELINE_BINARIES=1. A pipeline made from a binary kept the
+// binary's ~2 MB in memory: Uncharted 2 used 15.5 GB of RAM with them, 7.0 GB without.
 bool PipelineBinaryCacheRequested() {
     const char* setting = std::getenv("GOW3_PIPELINE_BINARIES");
-    return !setting || *setting != '0';
+    return setting && *setting && *setting != '0';
 }
 }
 
@@ -335,7 +343,7 @@ bool InitializePipelineBinaryCache(vk::Device device, bool supported,
                                    vk::PipelineBinaryKeyKHR& global_key) {
     global_key = vk::PipelineBinaryKeyKHR{};
     if (!PipelineBinaryCacheRequested()) {
-        LOG_INFO(Render_Vulkan, "Pipeline binary cache disabled by settings; using normal compilation");
+        LOG_INFO(Render_Vulkan, "Pipeline binary cache off (GOW3_PIPELINE_BINARIES=1 turns it on); using normal compilation");
         return false;
     }
     if (!supported) {
@@ -377,7 +385,8 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE,
         vk::PhysicalDevicePipelineBinaryFeaturesKHR,
         vk::PhysicalDeviceMaintenance5FeaturesKHR, vk::PhysicalDeviceMemoryPriorityFeaturesEXT,
-        vk::PhysicalDevicePageableDeviceLocalMemoryFeaturesEXT>();
+        vk::PhysicalDevicePageableDeviceLocalMemoryFeaturesEXT,
+        vk::PhysicalDevicePresentIdFeaturesKHR>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -431,18 +440,71 @@ bool Instance::CreateDevice() {
                "Required Vulkan feature unavailable: nullDescriptor");
 
     // Optional
-    if (const char* diag=std::getenv("GOW3_GPU_CHECKPOINTS"); diag && (diag[0]=='1' || diag[0]=='2')) {
+    const char* diag=std::getenv("GOW3_GPU_CHECKPOINTS");
+    const bool diag_on=diag && (diag[0]=='1' || diag[0]=='2');
+    if (diag_on) {
         gpu_checkpoints=add_extension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
         std::printf("GPU checkpoints enabled: %d\n",int(gpu_checkpoints));
-        device_fault=add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
         address_binding_report=add_extension(VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);
-        std::printf("GPU device fault reports enabled: %d\n",int(device_fault));
+    }
+    // gow3 24 Oct 2026: players' device-loss logs (#130, #132, #142) said nothing about the
+    // fault. The report costs nothing until the device is lost: on whenever the driver has it
+    // (GOW3_DEVICE_FAULT=0: off).
+    if (const char* env=std::getenv("GOW3_DEVICE_FAULT"); diag_on || !(env && env[0]=='0')) {
+        device_fault=add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+        std::printf("GPU device fault reports: %s\n",device_fault ? "on" : "not supported");
     }
     // gow3 diagnostics (GOW3_DISPLAY_LOG): when each frame reached the screen (vk_swapchain).
+    bool present_id = false;
     if (const char* log = std::getenv("GOW3_DISPLAY_LOG"); log && log[0]) {
-        present_wait = add_extension(VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
-                       add_extension(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+        present_id = add_extension(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+        present_wait = present_id && add_extension(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
         std::printf("Display log: present wait %s\n", present_wait ? "on" : "unavailable");
+    }
+    // gow3 22 Oct 2026: NVIDIA Reflex (gow3_reflex.cpp) needs VK_NV_low_latency2 and, as its
+    // dependency, VK_KHR_present_id with its feature (the display log may have added both
+    // already: never twice). Only where the driver offers the extension, so AMD and Intel devices
+    // are created as before. GOW3_REFLEX_EXT=0 keeps it off.
+    // gow3 23 Oct 2026: with Streamline its sl.reflex adds VK_NV_low_latency2 and drives it; the
+    // port only adds VK_KHR_present_id, which the extension needs.
+    // Streamline only on NVIDIA's GPU: another one chosen on a hybrid laptop gets its device, surface
+    // and swapchain from vulkan-1 as before Streamline.
+    if (Gow3Streamline::Active() && properties.vendorID != 0x10DE) {
+        Gow3Streamline::Abandon("the chosen graphics card is not NVIDIA's");
+        auto& d = VULKAN_HPP_DEFAULT_DISPATCHER;
+        const auto proc = [&](const char* name) { return d.vkGetInstanceProcAddr(*instance, name); };
+        d.vkEnumeratePhysicalDevices =
+            reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(proc("vkEnumeratePhysicalDevices"));
+        d.vkCreateDevice = reinterpret_cast<PFN_vkCreateDevice>(proc("vkCreateDevice"));
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+        d.vkCreateWin32SurfaceKHR =
+            reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(proc("vkCreateWin32SurfaceKHR"));
+#endif
+        d.vkDestroySurfaceKHR = reinterpret_cast<PFN_vkDestroySurfaceKHR>(proc("vkDestroySurfaceKHR"));
+    }
+    const bool streamline = Gow3Streamline::Active();
+    bool low_latency = false;
+    u32 low_latency_revision = 0;
+    const bool offers_low_latency = std::any_of(
+        available_extensions.begin(), available_extensions.end(),
+        [](const std::string& name) { return name == VK_NV_LOW_LATENCY_2_EXTENSION_NAME; });
+    if (offers_low_latency && (streamline || Gow3Reflex::ExtensionWanted())) {
+        if (!present_id && feature_chain.get<vk::PhysicalDevicePresentIdFeaturesKHR>().presentId) {
+            present_id = add_extension(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+        }
+        low_latency = !streamline && present_id && add_extension(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
+        if (low_latency) {
+            // The driver's revision (2 on 616.92) decides what it does with submissions.
+            const auto [props_result, props] = physical_device.enumerateDeviceExtensionProperties();
+            if (props_result == vk::Result::eSuccess) {
+                for (const auto& prop : props) {
+                    if (std::string_view{prop.extensionName.data()} ==
+                        VK_NV_LOW_LATENCY_2_EXTENSION_NAME) {
+                        low_latency_revision = prop.specVersion;
+                    }
+                }
+            }
+        }
     }
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
     pipeline_binaries = PipelineBinaryCacheRequested() && maintenance_5 &&
@@ -601,12 +663,26 @@ bool Instance::CreateDevice() {
     // graphics queue had to hold the submit lock, and on a hybrid laptop (NVIDIA GPU renders, the
     // Radeon 780M drives the screen, the frame is copied across) a present that blocked held up
     // every submission of the GPU command thread: 0.3-0.8 s freezes in Uncharted 1 and 3, the
-    // thread neither idle nor in any counted wait. GOW3_PRESENT_QUEUE=0: presents on the
-    // graphics queue, as before.
-    static const bool present_queue_wanted = [] {
-        const char* env = std::getenv("GOW3_PRESENT_QUEUE");
-        return !(env && env[0] == '0');
-    }();
+    // thread neither idle nor in any counted wait.
+    // gow3 22 Oct 2026: only when another adapter drives the screen (or that is unknown). RTSS (MSI
+    // Afterburner's overlay) draws its OSD inside vkQueuePresentKHR with a submission of its own and
+    // no semaphore (RTSSHooks64.dll imports vkGetDeviceQueue, vkQueueSubmit and fences, no
+    // vkCreateSemaphore), so a present on another queue overtook that draw. U3 bar, 1080p, 120 FPS,
+    // RTX 5070, 120 desktop captures each: OSD in 0% (FG off) and 5-8% (FG on) of them on the third
+    // queue, 100% on the graphics queue (also with FG, Reflex off and at 60 FPS). The desktop had
+    // shown no measured gain from the third queue (20 Oct check: 60 FPS either way).
+    // GOW3_PRESENT_QUEUE=1 forces the third queue, =0 the graphics queue.
+    const char* present_queue_env = std::getenv("GOW3_PRESENT_QUEUE");
+    const auto display = Gow3DisplayAdapter::Compare(
+        window_handle, vk11_props.deviceLUIDValid ? vk11_props.deviceLUID.data() : nullptr);
+    const bool present_queue_wanted = present_queue_env && present_queue_env[0]
+                                          ? present_queue_env[0] != '0'
+                                          : display != Gow3DisplayAdapter::Result::Same;
+    const char* present_queue_reason =
+        present_queue_env && present_queue_env[0] ? "GOW3_PRESENT_QUEUE"
+        : display == Gow3DisplayAdapter::Result::Same  ? "the screen is on this GPU"
+        : display == Gow3DisplayAdapter::Result::Other ? "another adapter drives the screen"
+                                                       : "the screen's adapter is unknown";
     static constexpr std::array queue_priorities = {1.0f, 1.0f, 1.0f};
     const u32 queue_count =
         std::min<u32>(present_queue_wanted ? 3u : 2u,
@@ -686,6 +762,7 @@ bool Instance::CreateDevice() {
                 // gow3: required by the FSR 3 accumulate shaders (vk_temporal_upscaler).
                 .shaderStorageImageWriteWithoutFormat =
                     features.shaderStorageImageWriteWithoutFormat,
+                .shaderStorageBufferArrayDynamicIndexing = features.shaderStorageBufferArrayDynamicIndexing,
                 .shaderClipDistance = features.shaderClipDistance,
                 .shaderFloat64 = features.shaderFloat64,
                 .shaderInt64 = features.shaderInt64,
@@ -893,8 +970,10 @@ bool Instance::CreateDevice() {
     if (!address_binding_report) {
         device_chain.unlink<vk::PhysicalDeviceAddressBindingReportFeaturesEXT>();
     }
-    if (!present_wait) {
+    if (!present_id) {
         device_chain.unlink<vk::PhysicalDevicePresentIdFeaturesKHR>();
+    }
+    if (!present_wait) {
         device_chain.unlink<vk::PhysicalDevicePresentWaitFeaturesKHR>();
     }
     if (!memory_priority) {
@@ -912,6 +991,24 @@ bool Instance::CreateDevice() {
     device = std::move(dev);
 
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*device);
+    if (streamline) {
+        // gow3 23 Oct 2026: Streamline's hooks for the swapchain, present, acquire and device-wait
+        // entries (frame generation presents through them); every other device function stays
+        // vulkan-1's (gow3_streamline.h).
+        auto& d = VULKAN_HPP_DEFAULT_DISPATCHER;
+        const auto proc = [&](const char* name) { return Gow3Streamline::DeviceProc(*device, name); };
+        d.vkCreateSwapchainKHR = reinterpret_cast<PFN_vkCreateSwapchainKHR>(proc("vkCreateSwapchainKHR"));
+        d.vkDestroySwapchainKHR = reinterpret_cast<PFN_vkDestroySwapchainKHR>(proc("vkDestroySwapchainKHR"));
+        d.vkGetSwapchainImagesKHR =
+            reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(proc("vkGetSwapchainImagesKHR"));
+        d.vkAcquireNextImageKHR = reinterpret_cast<PFN_vkAcquireNextImageKHR>(proc("vkAcquireNextImageKHR"));
+        d.vkQueuePresentKHR = reinterpret_cast<PFN_vkQueuePresentKHR>(proc("vkQueuePresentKHR"));
+        d.vkDeviceWaitIdle = reinterpret_cast<PFN_vkDeviceWaitIdle>(proc("vkDeviceWaitIdle"));
+        Gow3Streamline::OnDevice(physical_device, *device);
+        Gow3Reflex::InitStreamline(Gow3Streamline::ReflexReady());
+    } else {
+        Gow3Reflex::Init(*device, low_latency, low_latency_revision);
+    }
     pipeline_binaries =
         InitializePipelineBinaryCache(*device, pipeline_binaries, pipeline_binary_global_key);
     if (Dlss* dlss = Dlss::Get()) {
@@ -923,10 +1020,11 @@ bool Instance::CreateDevice() {
     if (queue_count > 1) {
         copy_queue = device->getQueue(queue_family_index, 1);
     }
-    std::printf("GPU: presents on %s\n",
-                queue_count > 2 ? "their own queue (GOW3_PRESENT_QUEUE=0: the graphics queue)"
-                : present_queue_wanted ? "the graphics queue (the family has no third queue)"
-                                       : "the graphics queue (GOW3_PRESENT_QUEUE=0)");
+    std::printf("GPU: presents on %s (%s)\n",
+                queue_count > 2        ? "their own queue"
+                : present_queue_wanted ? "the graphics queue, the family has no third queue"
+                                       : "the graphics queue",
+                present_queue_reason);
     sparse_queue = sparse_queue_family_index == queue_family_index
                        ? graphics_queue
                        : device->getQueue(sparse_queue_family_index, 0);

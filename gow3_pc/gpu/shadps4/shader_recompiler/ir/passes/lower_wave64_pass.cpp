@@ -138,11 +138,13 @@ void LowerWave64BallotPass(IR::Program& program, const RuntimeInfo& runtime_info
         return;
     }
 
-    const u32 scratch_base = Common::AlignUp(runtime_info.hw.cs.shared_memory_size, sizeof(u64));
+    // gow3: starts behind scratch already reserved (SharedMemoryBoundsPass dummy slot).
+    const u32 lds_size = runtime_info.hw.cs.shared_memory_size;
+    const u32 scratch_base =
+        Common::AlignUp(lds_size + program.info.shared_memory_scratch_size, sizeof(u64));
     const u32 scratch_size =
         (Common::AlignUp(num_threads, 64) / profile.subgroup_size) * sizeof(u32);
-    program.info.shared_memory_scratch_size =
-        scratch_base + scratch_size - runtime_info.hw.cs.shared_memory_size;
+    program.info.shared_memory_scratch_size = scratch_base + scratch_size - lds_size;
 
     for (IR::Inst* inst : worklist) {
         LOG_INFO(Render_Recompiler, "Lowering {} instruction for wave64", inst->GetOpcode());

@@ -21,6 +21,10 @@ inline constexpr int MaxFpsLimit = 120;
 /// 40-55 for tests (Uncharted 3's cloth flickers at 60 FPS but not at 30, 16 Oct); 75, 90 and
 /// 100 for displays with those refresh rates (and variable refresh).
 inline constexpr std::array<int, 10> FpsLimits = {30, 40, 45, 50, 55, 60, 75, 90, 100, MaxFpsLimit};
+/// Limits above 120 count SHOWN frames: only valid with DLSS Frame Generation (real frames are
+/// half of them, so the game still steps at most 120 times a second).
+inline constexpr int MaxShownFpsLimit = 240;
+inline constexpr std::array<int, 6> ExtendedFpsLimits = {144, 160, 165, 180, 200, MaxShownFpsLimit};
 
 /// Game patch suffixes ("Resolution Patch - <name>"); "native" is no resolution patch.
 inline constexpr std::array<std::string_view, 6> Resolutions = {"native", "480p", "720p",
@@ -39,9 +43,10 @@ constexpr int IndexOf(const std::array<T, N>& values, const T& value, int fallba
 inline int ParseDisplayMode(std::string_view text) {
     return IndexOf(DisplayModeKeys, text, Windowed);
 }
-/// A listed limit; unlimited (0) and faster ones (earlier lists had 144-240) are the maximum.
+/// A listed limit (the shown-frame ones too, PresentLimit caps them without Frame Generation);
+/// unlimited (0) and other faster ones are the maximum.
 inline int ParseFpsLimit(int value) {
-    if (IndexOf(FpsLimits, value, -1) >= 0) return value;
+    if (IndexOf(FpsLimits, value, -1) >= 0 || IndexOf(ExtendedFpsLimits, value, -1) >= 0) return value;
     return value == 0 || value > MaxFpsLimit ? MaxFpsLimit : 60;
 }
 /// Index into Resolutions; unknown text is native.
@@ -83,6 +88,12 @@ inline int EffectiveFps(int limit, int engine_fps) {
 /// settings). Above 60 it needs the fast vblank (GOW3_VBLANK_HZ=0); at 60 Hz the vblank paces.
 inline int PresentLimit(int limit) {
     return limit == 0 || limit > MaxFpsLimit ? MaxFpsLimit : limit;
+}
+/// With DLSS Frame Generation active the limit counts shown frames: up to MaxShownFpsLimit,
+/// and 0 (unlimited) is that maximum. Without it, as the one-argument form.
+inline int PresentLimit(int limit, bool frame_gen) {
+    if (!frame_gen) return PresentLimit(limit);
+    return limit == 0 || limit > MaxShownFpsLimit ? MaxShownFpsLimit : limit;
 }
 
 } // namespace Gow3Graphics

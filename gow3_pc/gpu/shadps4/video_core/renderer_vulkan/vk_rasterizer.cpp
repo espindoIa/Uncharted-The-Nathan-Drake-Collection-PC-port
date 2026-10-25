@@ -42,6 +42,7 @@
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
+#include "video_core/renderer_vulkan/vk_skinning_writes.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -187,6 +188,36 @@ struct StageAMemoStats {
 StageAMemoStats g_stage_a_memos;
 } // namespace
 
+/// gow3 24 Oct 2026 (Gow3Toggle::DispatchRuns): stage B's plan for one run packet: per instance
+/// the descriptors and push data the per-dispatch path binds, and the output write spans.
+struct Rasterizer::RunPlan {
+    static constexpr u32 Capacity = ComputePipeline::RunCapacity;
+    static constexpr u32 Bindings = 11; ///< the 10 buffers, then the push data array
+    static constexpr u32 MaxSpans = Capacity;
+    static constexpr u32 MaxTracked = 32; ///< tracked ranges (bound_buffers holds 40)
+    std::array<std::array<vk::DescriptorBufferInfo, Capacity>, Bindings> infos;
+    std::array<Shader::PushData, Capacity> push;
+    std::array<SkinningWriteInstance, Capacity> writes;
+    std::array<SkinningWriteSpan, MaxSpans> spans;
+    std::array<std::pair<const VideoCore::Buffer*, u64>, MaxSpans> obtained; ///< at span.address
+    std::array<std::array<std::pair<const VideoCore::Buffer*, u64>, 3>, Capacity> view_obtained;
+    struct Tracked {
+        const VideoCore::Buffer* buffer;
+        u64 offset;
+        u64 size;
+    };
+    std::array<Tracked, MaxSpans> tracked;
+    std::array<u8, Capacity> span_of;
+    u32 num_spans = 0, num_tracked = 0;
+    /// GOW3_DISPATCH_RUN_VERIFY: what the old path bound per instance (VerifyRunInstance).
+    std::array<std::array<vk::DescriptorBufferInfo, Capacity>, Bindings - 1> replayed;
+    std::array<Shader::PushData, Capacity> replayed_push;
+    std::array<std::array<Tracked, 4>, Capacity> replayed_tracked; ///< its written ranges
+    std::array<u8, Capacity> replayed_tracked_count;
+    std::array<bool, Capacity> captured;
+    std::array<u8, Capacity * 256> push_bytes; ///< storage offset alignment is at most 256
+};
+
 Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime& runtime_,
                        AmdGpu::Liverpool* liverpool_)
     : instance{instance_}, scheduler{scheduler_}, runtime{runtime_}, page_manager{this},
@@ -259,6 +290,14 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     GpuProfiler::Init(instance, scheduler);
     if (DrawPipeWanted()) {
         constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
+        // staticmesh1/2 (23 Oct): no material FPS gain yet. Keep the structural prototype
+        // opt-in and do not allocate its 64 MiB for players until it earns its residency.
+        const char* snapshots = std::getenv("GOW3_STATIC_MESH_SNAPSHOTS");
+        if (snapshots && snapshots[0] == '1') {
+            static_mesh_buffer = std::make_unique<VideoCore::Buffer>(
+                instance, 0, StaticMeshCapacity, VideoCore::MemoryType::Stream, "static crowd snapshots");
+            ASSERT(!static_mesh_buffer->mapped_data.empty());
+        }
         draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
     }
     // gow3: this thread joins the texture binding helper before it changes image state.
@@ -273,6 +312,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
 }
 
 Rasterizer::~Rasterizer() {
+    if (draw_pipe) draw_pipe->Drain();
+    scheduler.FlushDeferredRecord(); // callback must not outlive this rasterizer
     liverpool->SetComputePrecompileHook({}); // before the pipeline cache goes
     Shader::g_srt_pre_walk = nullptr;
 }
@@ -938,6 +979,26 @@ bool PlausibleTSharp(const AmdGpu::Image& tsharp) {
     if (!tsharp.Valid() || tsharp.tiling_index > 26 || tsharp.last_level < tsharp.base_level) {
         return false; // 27-30 reserved, 31 (linear general) unhandled
     }
+    // gow3 24 Oct 2026 (GitHub #144, Uncharted 2, RTX 4090): data formats above BC7 (FMask and
+    // packed formats 44-63) have no entry in the size tables; a garbage T# with format 63 and
+    // number format 7 stopped the game in ImageInfo (pixel_format.cpp NumBitsPerBlock). No texture
+    // the games sample uses them (real FMask reads become FMaskResource, never stage.images).
+    // GOW3_TSHARP_FORMAT_CHECK=0 (tests): without these two checks.
+    static const bool format_check = [] {
+        const char* env = std::getenv("GOW3_TSHARP_FORMAT_CHECK");
+        return !(env && env[0] == '0');
+    }();
+    if (format_check && u32(tsharp.data_format) > u32(AmdGpu::DataFormat::FormatBc7)) {
+        return false;
+    }
+    // MSAA types keep log2(samples) in last_level: more than 8 samples stops the macro-tile size
+    // code (tile.h GetMacroTileExtents, ASSERT(num_samples <= 8)).
+    const auto type = static_cast<AmdGpu::ImageType>(u64(tsharp.type));
+    if (format_check &&
+        (type == AmdGpu::ImageType::Color2DMsaa || type == AmdGpu::ImageType::Color2DMsaaArray) &&
+        tsharp.last_level > 3) {
+        return false;
+    }
     for (const u32 swizzle : {u32(tsharp.dst_sel_x), u32(tsharp.dst_sel_y),
                               u32(tsharp.dst_sel_z), u32(tsharp.dst_sel_w)}) {
         if (swizzle == 2 || swizzle == 3) {
@@ -992,10 +1053,15 @@ bool PlausibleTarget(const VideoCore::ImageInfo& info, u32 max_layers, const cha
 /// the first texture bind, the next <count> T#s (default 600) become the garbage one that stopped
 /// Uncharted 2 on a laptop (BC2, number format 13, a macro-tiled mode; image_info.cpp UpdateSize
 /// asserted), to check that such a T# is dropped. Off by default.
+/// 24 Oct 2026: a third field picks another garbage kind: fmt<N> = data format N with number
+/// format 7 (fmt63 stopped Uncharted 2 in NumBitsPerBlock, GitHub #144), msaa16 = an MSAA image
+/// of 16 samples (tile.h GetMacroTileExtents asserts above 8).
 void TestGarbageTSharp(AmdGpu::Image& tsharp) {
     struct Params {
         double delay_s = -1.0;
         u32 count = 600;
+        int format = -1;
+        bool msaa16 = false;
     };
     static const Params params = [] {
         Params p;
@@ -1003,6 +1069,13 @@ void TestGarbageTSharp(AmdGpu::Image& tsharp) {
             p.delay_s = std::atof(env);
             if (const char* comma = std::strchr(env, ',')) {
                 p.count = static_cast<u32>(std::strtoul(comma + 1, nullptr, 10));
+                if (const char* mode = std::strchr(comma + 1, ',')) {
+                    if (std::strncmp(mode + 1, "fmt", 3) == 0) {
+                        p.format = static_cast<int>(std::strtol(mode + 4, nullptr, 10));
+                    } else if (std::strcmp(mode + 1, "msaa16") == 0) {
+                        p.msaa16 = true;
+                    }
+                }
             }
         }
         return p;
@@ -1017,18 +1090,33 @@ void TestGarbageTSharp(AmdGpu::Image& tsharp) {
         injected.load(std::memory_order_relaxed) >= params.count) {
         return;
     }
-    tsharp.data_format = u64(AmdGpu::DataFormat::FormatBc2);
-    tsharp.num_format = 13;
-    for (u32 index = 0; index <= 26; ++index) {
-        tsharp.tiling_index = index;
-        if (AmdGpu::IsMacroTiled(AmdGpu::GetArrayMode(tsharp.GetTileMode()))) {
-            break;
+    if (params.format >= 0) {
+        tsharp.data_format = u64(params.format);
+        tsharp.num_format = 7;
+    } else {
+        if (params.msaa16) {
+            tsharp.type = u64(AmdGpu::ImageType::Color2DMsaa);
+            tsharp.base_level = 0;
+            tsharp.last_level = 4;
+            tsharp.data_format = u64(AmdGpu::DataFormat::Format8_8_8_8);
+            tsharp.num_format = 0;
+        } else {
+            tsharp.data_format = u64(AmdGpu::DataFormat::FormatBc2);
+            tsharp.num_format = 13;
+        }
+        for (u32 index = 0; index <= 26; ++index) {
+            tsharp.tiling_index = index;
+            if (AmdGpu::IsMacroTiled(AmdGpu::GetArrayMode(tsharp.GetTileMode()))) {
+                break;
+            }
         }
     }
     const u32 n = injected.fetch_add(1, std::memory_order_relaxed) + 1;
     if (n == 1 || n == params.count) {
-        std::printf("GPU test: garbage T# %u of %u (BC2, number format 13, tile mode %u) at %#llx\n",
-                    n, params.count, u32(tsharp.tiling_index),
+        std::printf("GPU test: garbage T# %u of %u (data format %u, number format %u, type %u, "
+                    "last level %u, tile mode %u) at %#llx\n",
+                    n, params.count, u32(tsharp.data_format), u32(tsharp.num_format),
+                    u32(tsharp.type), u32(tsharp.last_level), u32(tsharp.tiling_index),
                     static_cast<unsigned long long>(tsharp.Address()));
         std::fflush(stdout);
     }
@@ -1383,8 +1471,22 @@ void Rasterizer::EliminateFastClear() {
 // gow3: two-stage draw pipeline (vk_draw_pipe.h). Packet layout, 8-byte aligned parts:
 // DrawPacket, u16 block indices, u32 block words (RegDirty::BlockWords each), then per stage a
 // PacketStage with its user data and flattened user data, then (verification) the full file.
+// gow3 24 Oct 2026: a DispatchRun packet is a Dispatch packet of its first instance followed by
+// a RunPacketHeader and the first instance's tasks, then per other instance a RunPacketInstance,
+// its ring bindings, its user data and flattened user data and its tasks (each laid out as a
+// Task packet; Rasterizer::EmitRunPacket).
 namespace {
-enum class PacketKind : u32 { Draw, Task, Dispatch, Special, Indirect, IndirectDispatch };
+enum class PacketKind : u32 { Draw, Task, Dispatch, Special, Indirect, IndirectDispatch, DispatchRun };
+struct RunPacketHeader {
+    u32 count; ///< instances, the first included
+    u32 num_tasks; ///< of the first instance
+    u64 first_ring_end;
+};
+struct RunPacketInstance {
+    u64 ring_end;
+    u32 num_ring;
+    u32 num_tasks;
+};
 struct TaskPacket {
     PacketKind kind;
     u32 size;
@@ -1458,6 +1560,7 @@ void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
     if (!draw_pipe || !OnStageA()) {
         return;
     }
+    CutDispatchRun(CutDrain);
     static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
     pipe_write_ranges.clear();
     pipe_writes_overflow = false;
@@ -1614,7 +1717,11 @@ void Rasterizer::NotePendingLabel(VAddr address, u64 size) {
         return;
     }
     PrunePendingLabels();
-    pending_labels.push_back({address, address + size, draw_pipe->Head()});
+    // A label of a task staged in the open dispatch run: pending until the run's packet is in.
+    const bool staged = dispatch_run.count != 0;
+    pending_labels.push_back({address, address + size,
+                              staged ? PendingUncommitted : draw_pipe->Head()});
+    dispatch_run.labels += staged;
     label_min = std::min(label_min, address);
     label_max = std::max(label_max, address + size);
 }
@@ -1682,21 +1789,17 @@ void Rasterizer::NewGuestEpoch() {
 }
 
 bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
+    // Unknown cache commands can land GPU results into CPU-visible memory. Never capture
+    // constants ahead of such a task; stage B binds them after the task instead.
+    if (draw_pipe && !draw_pipe->Reached(pending_task_position)) {
+        return true;
+    }
     if (pending_writes.empty() || address >= pending_max || address + size <= pending_min) {
         return false;
     }
     // Now and then drop entries whose writes the recording thread has done: the bounds shrink.
-    // (Not while PostDraw notes a packet: uncommitted_indices point into the vector.)
-    if ((++pending_checks & 63) == 0 && uncommitted_indices.empty()) {
-        std::erase_if(pending_writes, [&](const PendingWrite& write) {
-            return draw_pipe->Reached(write.position);
-        });
-        pending_min = ~VAddr{0};
-        pending_max = 0;
-        for (const auto& write : pending_writes) {
-            pending_min = std::min(pending_min, write.begin);
-            pending_max = std::max(pending_max, write.end);
-        }
+    if ((++pending_checks & 63) == 0) {
+        PrunePendingWrites();
     }
     const VAddr end = address + size;
     for (const auto& write : pending_writes) {
@@ -1705,6 +1808,24 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
         }
     }
     return false;
+}
+
+u32 Rasterizer::PrunePendingWrites() {
+    // Not while a packet or a dispatch run is noted: uncommitted_indices point into the vector.
+    if (!uncommitted_indices.empty()) {
+        return 0;
+    }
+    const size_t before = pending_writes.size();
+    std::erase_if(pending_writes, [&](const PendingWrite& write) {
+        return draw_pipe->Reached(write.position);
+    });
+    pending_min = ~VAddr{0};
+    pending_max = 0;
+    for (const auto& write : pending_writes) {
+        pending_min = std::min(pending_min, write.begin);
+        pending_max = std::max(pending_max, write.end);
+    }
+    return static_cast<u32>(before - pending_writes.size());
 }
 
 static void FixAimFocusCentre(Core::MemoryManager* memory, VideoCore::BufferCache* buffer_cache,
@@ -1771,6 +1892,7 @@ u64 Rasterizer::RingWatchToken(VAddr address, u64 size, bool probe) {
             if (!state.watched) {
                 page_manager.UpdatePageWatchers<true>(page, 4096);
                 state.watched = true;
+                state.version = ++ring_watch_version;
                 g_ring_watched.fetch_add(1, std::memory_order_relaxed);
                 ++g_ring_reuse.promoted;
             }
@@ -1823,6 +1945,105 @@ void Rasterizer::RingUnwatch(VAddr address, u64 size, bool written) {
         }
         ++it;
     }
+}
+
+// 23 Oct 2026: a per-range version rather than the global invalidation serial. Unrelated CPU
+// writes must not invalidate every mesh. A unique monotonically increasing serial is assigned
+// to each page promotion: changing any page makes the maximum newer; a missing watch refuses
+// reuse. The page-locking/CPU-fault protocol itself is the same as RingWatchToken.
+u64 Rasterizer::StaticMeshWatchVersion(VAddr address, u64 size) {
+    std::scoped_lock lock{ring_watch_mutex};
+    u64 version = 0;
+    for (VAddr page = Common::AlignDown(address, VAddr{4096}); page < address + size; page += 4096) {
+        const auto it = ring_watch_pages.find(page);
+        if (it == ring_watch_pages.end() || !it->second.watched) {
+            return 0;
+        }
+        version = std::max(version, it->second.version);
+    }
+    return version;
+}
+
+bool Rasterizer::TryStaticMeshSnapshot(
+    u32 index, VAddr address, u64 size,
+    boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out) {
+    if (!static_mesh_buffer || LateConstantsEnabled() ||
+        Gow3Toggle::Disabled(Gow3Toggle::RingReuse) ||
+        Gow3Toggle::Disabled2(Gow3Toggle::StaticMeshSnapshots) ||
+        Gow3Toggle::Disabled2(Gow3Toggle::RingDurableReuse)) {
+        return false;
+    }
+    const VAddr lo = Common::AlignDown(address, VAddr{4096});
+    const VAddr hi = Common::AlignUp(address + size, VAddr{4096});
+    if (Core::MemoryManager::BackingWritten(address, size) ||
+        buffer_cache.MayBeGpuWritten(lo, hi - lo) || PendingWriteOverlaps(address, size)) {
+        return false;
+    }
+    const u64 key = address ^ (size << 48);
+    const u64 generation = ring_watch_gen.load(std::memory_order_acquire);
+    auto it = static_mesh_copies.find(key);
+    if (it != static_mesh_copies.end() &&
+        (it->second.address != address || it->second.size != size)) {
+        // The compact hash is not a range identity. A collision can evict a lookup only;
+        // the old immutable allocation remains alive for packets already using it.
+        static_mesh_copies.erase(it);
+        it = static_mesh_copies.end();
+    }
+    u64 version = 0;
+    if (it != static_mesh_copies.end()) {
+        auto& copy = it->second;
+        if (copy.observed_gen != generation) {
+            ++static_mesh_rechecks;
+            version = StaticMeshWatchVersion(address, size);
+            if (!version || version != copy.version) {
+                static_mesh_copies.erase(it);
+                it = static_mesh_copies.end();
+            } else {
+                copy.observed_gen = generation;
+            }
+        }
+    }
+    if (it == static_mesh_copies.end()) {
+        if (!version) {
+            version = StaticMeshWatchVersion(address, size);
+        }
+        if (!version) {
+            return false; // let the existing ring's repeated-use heuristic establish watches
+        }
+        const u64 alignment = std::max<u64>(instance.StorageMinAlignment(), instance.UniformMinAlignment());
+        const u64 offset = Common::AlignUp(static_mesh_position, alignment);
+        if (offset > StaticMeshCapacity || size > StaticMeshCapacity - offset) {
+            ++static_mesh_full;
+            return false;
+        }
+        memory->CopySparseMemory(address, static_mesh_buffer->mapped_data.data() + offset, size);
+        static_mesh_buffer->Flush(offset, size);
+        static_mesh_position = offset + size;
+        it = static_mesh_copies.emplace(key, StaticMeshCopy{address, size, offset, version, generation}).first;
+        ++static_mesh_uploads;
+    } else {
+        ++static_mesh_hits;
+    }
+    const u64 offset = it->second.offset;
+    // Keep sampled verification separate from RingReuseCheck (which copies every transient
+    // reuse). This can accompany a short performance check without restoring all ring copies.
+    static const bool check = [] {
+        const char* env = std::getenv("GOW3_STATIC_MESH_CHECK");
+        return env && env[0] == '1';
+    }();
+    if ((check || RingReuseCheck()) && ((static_mesh_hits + static_mesh_uploads) & 255) == 0) {
+        thread_local std::vector<u8> bytes;
+        bytes.resize(size);
+        memory->CopySparseMemory(address, bytes.data(), size);
+        ++static_mesh_checks;
+        if (std::memcmp(bytes.data(), static_mesh_buffer->mapped_data.data() + offset, size) != 0) {
+            ++static_mesh_mismatches;
+            static_mesh_copies.erase(it);
+            return false; // refuse stale input; original ring path takes a fresh snapshot
+        }
+    }
+    out.push_back({index, static_cast<u32>(size), offset | StaticMeshOffsetFlag, address});
+    return true;
 }
 
 void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
@@ -1881,6 +2102,13 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
                         (unsigned long long)ring_size_buckets[0], (unsigned long long)ring_size_buckets[1],
                         (unsigned long long)ring_size_buckets[2], (unsigned long long)ring_size_buckets[3]);
             std::fflush(stdout);
+            std::printf("Static mesh snapshots (5 s): %llu hits, %llu uploads, %llu full, %.1f MiB "
+                        "resident, %llu range rechecks; verify %llu checks, %llu mismatches\n",
+                        static_mesh_hits, static_mesh_uploads, static_mesh_full,
+                        static_mesh_position / 1048576.0, static_mesh_rechecks,
+                        static_mesh_checks, static_mesh_mismatches);
+            static_mesh_hits = static_mesh_uploads = static_mesh_full = static_mesh_rechecks = 0;
+            static_mesh_checks = static_mesh_mismatches = 0;
             ring_copy_count = ring_copy_bytes = ring_repeat_count = ring_repeat_bytes = 0;
             ring_size_buckets = {};
         }
@@ -1906,6 +2134,21 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
             // in-order memory write or a GPU write over a copied range starts a new epoch.
             const u64 key = address ^ (size << 48);
             cached = &ring_copies[(key * 0x9E3779B97F4A7C15ull) >> (64 - RingCopyBits)];
+            if (!Gow3Toggle::Disabled2(Gow3Toggle::RingAssociative)) {
+                auto& set = ring_copy_sets[(key * 0x9E3779B97F4A7C15ull) >> (64 - RingSetBits)];
+                cached = &set[0];
+                for (auto& entry : set) {
+                    if (entry.key == key) {
+                        cached = &entry;
+                        break;
+                    }
+                    // Prefer an empty/old snapshot. Positions increase monotonically; eviction
+                    // affects only reuse, never whether the ring retains an allocation.
+                    if (!entry.key || (cached->key && entry.position < cached->position)) {
+                        cached = &entry;
+                    }
+                }
+            }
             if (cached->key == key && constant_ring->Reusable(cached->position)) {
                 const bool later = cached->epoch != ring_epoch;
                 if (later && (cached->cpu_token || cached->watch_token) && tracker) {
@@ -2039,6 +2282,15 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         }
         const VAddr address = vsharp.base_address;
         if (address == 0 || vsharp.GetSize() == 0) {
+            continue;
+        }
+        // Resident immutable inputs already have page-watch/mapping lifetime validation. On a
+        // hit do not repeat ClampRangeSize and the buffer tracker's locked dirty-page lookup
+        // for every tiny skinning dispatch. Pending/GPU/backing writes are checked by the pool.
+        const u64 requested = vsharp.GetSize();
+        if (stage.pgm_hash == 0x8f067540 && index < 5 && !desc.is_written &&
+            requested >= RingWatchMinBytes && requested <= VideoCore::BufferCache::STREAM_THRESHOLD &&
+            TryStaticMeshSnapshot(index, address, requested, out)) {
             continue;
         }
         const u64 size = memory->ClampRangeSize(address, vsharp.GetSize());
@@ -2502,6 +2754,7 @@ void DispatchTraceDispatch(const Shader::Info& cs, const AmdGpu::ComputeProgram&
 void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_prepared,
                           bool is_indexed, u32 index_offset, const AmdGpu::ComputeProgram* cs,
                           const IndirectDraw* indirect, const AmdGpu::Buffer* cs_sharps) {
+    CutDispatchRun(CutPacket);
     auto& dirty = liverpool->pipe_dirty;
     if (!pipe_synced) {
         // Stage B has not run yet: its register copy starts as this one.
@@ -2643,6 +2896,7 @@ void Rasterizer::RetireSubmission() {
     if (!draw_pipe || !OnStageA()) {
         return;
     }
+    CutDispatchRun(CutSubmission);
     while (!pipe_keepalive.empty() && draw_pipe->Reached(pipe_keepalive.front().first)) {
         pipe_keepalive.pop_front();
     }
@@ -2652,7 +2906,7 @@ void Rasterizer::RetireSubmission() {
 }
 
 bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 toggle,
-                            bool writes_noted) {
+                            bool writes_noted, bool after_run) {
     // gow3 18 Oct 2026: the ring has one producer, the GPU command thread. On the draw recording
     // thread (an EOP flip: SignalFlip -> SubmitFlipInternal queues the flip from there) every
     // earlier packet has run already, so the task runs here, in stream order; pushed from both
@@ -2664,6 +2918,27 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
         task(*this, static_cast<const u8*>(data));
         return false;
     }
+    // gow3 24 Oct 2026: runv2 (U3 Cartagena) cut every run at the compute RELEASE_MEM after each
+    // crowd dispatch (~300k cuts per 5 s, 0 run packets). Such a fence joins the run and is
+    // written once the dispatches before it are recorded: for the ones in a batch, after the
+    // whole batch (later than before, never earlier). Nothing the run's dispatches read.
+    if (after_run && writes_noted && dispatch_run.count && size <= RunTask{}.data.size()) {
+        auto& last = dispatch_run.instances[dispatch_run.count - 1];
+        if (last.num_tasks < last.tasks.size()) {
+            auto& staged = last.tasks[last.num_tasks++];
+            staged.task = task;
+            staged.size = size;
+            std::memcpy(staged.data.data(), data, size);
+            if (Gow3Toggle::Disabled2(Gow3Toggle::RingPreciseWrites)) {
+                NextRingEpoch(EpochTask);
+            }
+            return true;
+        }
+    }
+    // Statistics: 0 not a fence that may follow a run, 1 its instance's slots full, 2 too large.
+    CutDispatchRun(CutTask, !(after_run && writes_noted)          ? 0
+                            : size > RunTask{}.data.size()       ? 2
+                                                                 : 1);
     // Memory it writes may be bound later: constant ring copies made before are not reused.
     // gow3 19 Oct 2026: unless the caller passes what it writes to NoteRingWrite (labels,
     // WRITE_DATA, DMA): U3 runs ~1,000 such tasks a frame, and each ended the ring's reuse.
@@ -2679,6 +2954,27 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
         pending_task_position = draw_pipe->Head();
     }
     return true;
+}
+
+bool Rasterizer::CommandsInOrder() const {
+    static const bool experimental = [] {
+        const char* env = std::getenv("GOW3_COMMANDS_STAGE_B");
+        return env && env[0] == '1';
+    }();
+    return experimental && UseDrawPipe() && OnStageA() &&
+           !Gow3Toggle::Disabled2(Gow3Toggle::CommandsOnStageB) &&
+           !Gow3Toggle::Disabled(Gow3Toggle::PipelinedTasks);
+}
+
+void Rasterizer::RunCommandInOrder(Common::UniqueFunction<void>&& command) {
+    auto* heap = new Common::UniqueFunction<void>(std::move(command));
+    const OrderedTask task = [](Rasterizer&, const u8* data) {
+        Common::UniqueFunction<void>* function = nullptr;
+        std::memcpy(&function, data, sizeof(function));
+        std::unique_ptr<Common::UniqueFunction<void>> owned{function};
+        (*owned)();
+    };
+    RunInOrder(task, &heap, sizeof(heap));
 }
 
 void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
@@ -2720,9 +3016,15 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     Shader::Info::num_ud_snapshots = packet.num_stages;
     self.num_ring_stages = packet.num_stages;
     const AmdGpu::ComputeProgram* cs = nullptr;
-    if (packet.kind == PacketKind::Dispatch || packet.kind == PacketKind::IndirectDispatch) {
+    if (packet.kind == PacketKind::Dispatch || packet.kind == PacketKind::IndirectDispatch ||
+        packet.kind == PacketKind::DispatchRun) {
         cs = reinterpret_cast<const AmdGpu::ComputeProgram*>(in);
         in += AlignPacket(sizeof(AmdGpu::ComputeProgram));
+    }
+    const u8* run_tail = nullptr; // the run's other instances (DispatchRunRecord)
+    if (packet.kind == PacketKind::DispatchRun) {
+        run_tail = in;
+        in = data + size;
     }
     const IndirectDraw* indirect = nullptr;
     if (packet.kind == PacketKind::Indirect || packet.kind == PacketKind::IndirectDispatch) {
@@ -2800,7 +3102,9 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     } else if (cs) {
         stage_cs = cs;
         const auto* pipeline = static_cast<const ComputePipeline*>(packet.pipeline);
-        if (indirect) {
+        if (run_tail) {
+            self.DispatchRunRecord(pipeline, run_tail, data + size);
+        } else if (indirect) {
             self.DispatchIndirectRecord(pipeline, indirect->args, indirect->stride);
         } else {
             self.DispatchRecord(pipeline);
@@ -2818,12 +3122,16 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
                            std::chrono::steady_clock::now() - ds_t0)
                            .count();
         const bool dispatch = cs != nullptr;
-        DispatchStatsRecordB(dispatch,
-                             dispatch ? static_cast<const ComputePipeline*>(packet.pipeline)
-                                            ->GetStage(Shader::SwStage::Compute)
-                                            .pgm_hash
-                                      : 0,
-                             ns);
+        // A run packet counts each of its dispatches (B us/each stays per dispatch).
+        const u32 items = run_tail ? reinterpret_cast<const RunPacketHeader*>(run_tail)->count : 1;
+        for (u32 item = 0; item < items; ++item) {
+            DispatchStatsRecordB(dispatch,
+                                 dispatch ? static_cast<const ComputePipeline*>(packet.pipeline)
+                                                ->GetStage(Shader::SwStage::Compute)
+                                                .pgm_hash
+                                          : 0,
+                                 ns / items);
+        }
     }
     Shader::Info::num_ud_snapshots = 0;
     self.num_ring_stages = 0;
@@ -3782,6 +4090,282 @@ static void RecordFullBarrier(vk::CommandBuffer cmdbuf) {
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
 }
 
+static bool TracedShader(u64 hash);
+
+namespace {
+/// The bytes of a bound buffer the barrier tracker sees (BindBuffers, 17 Oct 2026).
+u64 TrackedBufferSize(const Shader::BufferResource& desc, const AmdGpu::Buffer& vsharp, u64 size) {
+    static const bool exact = [] {
+        const char* env = std::getenv("GOW3_EXACT_STRIDED_RANGES");
+        return !(env && env[0] == '0');
+    }();
+    const u32 extent = desc.access_extent;
+    if (exact && extent != 0 && extent != ~0u && vsharp.stride != 0 && extent < vsharp.stride &&
+        vsharp.num_records != 0 && !vsharp.swizzle_enable && !vsharp.add_tid_enable) {
+        return std::min<u64>(size, u64(vsharp.num_records - 1) * vsharp.stride + extent);
+    }
+    return size;
+}
+
+/// GOW3_READBACK_SKIP=<hex hash>: a shader whose writes are not read back (BindBuffers).
+u64 ReadbackSkipShader() {
+    static const u64 hash = [] {
+        const char* env = std::getenv("GOW3_READBACK_SKIP");
+        return env ? std::strtoull(env, nullptr, 16) : 0ULL;
+    }();
+    return hash;
+}
+
+// gow3 24 Oct 2026 (GOW3_DISPATCH_RUNS=1, Gow3Toggle::DispatchRuns): U3 Cartagena at 4K DLSS
+// Quality (GOW3_DISPATCH_STATS=1): stage B 78-86% busy at ~400k pipe items/s is the frame limit,
+// and cs 8f067540 is 1,522 dispatches a frame, 100% consecutive (runs up to 1,524), stage A
+// 2.4 us + stage B 2.9 us each: ~3.7 ms of A and ~4.4 ms of B per 12-13 ms frame. The opt-in
+// fusion (AppendSkinningBatch) cannot shorten B: it runs after BindResources, and every
+// Scheduler::Record() flushes its batch, so its batches were singletons. A run is staged by
+// stage A instead and goes to stage B as one packet of up to 64, recorded there as one
+// vkCmdDispatch(dim_x, count, 1) with the bindings each dispatch would get; whatever stage B
+// cannot prove exact is replayed through DispatchRecord one dispatch at a time.
+bool DispatchRunsRequested() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_DISPATCH_RUNS");
+        if (!env || env[0] != '1') {
+            return false;
+        }
+        const auto set = [](const char* name) {
+            const char* value = std::getenv(name);
+            return value && value[0];
+        };
+        const char* upscale = std::getenv("GOW3_UPSCALE_BEFORE_CS");
+        // Diagnostics that look at every dispatch on its own.
+        const char* off = set("GOW3_SKIP_FILE")                      ? "GOW3_SKIP_FILE"
+                          : DispatchTraceTarget()                    ? "GOW3_DISPATCH_TRACE"
+                          : set("GOW3_DUMP_CS_CONST")                ? "GOW3_DUMP_CS_CONST"
+                          : set("GOW3_TRACKER_CAP")                  ? "GOW3_TRACKER_CAP"
+                          : set("GOW3_TRACE_BIND_RANGE")             ? "GOW3_TRACE_BIND_RANGE"
+                          : FullBarriersEnabled()                    ? "GOW3_FULL_BARRIERS"
+                          : LateConstantsEnabled()                   ? "GOW3_LATE_CONSTANTS"
+                          : VerifyInterval()                         ? "GOW3_PIPE_VERIFY"
+                          : !PipeWriteEnd()                          ? "GOW3_PIPE_WRITE_END=0"
+                          : BarrierStatsEnabled()                    ? "GOW3_BARRIER_STATS"
+                          : ClothTraceEnabled()                      ? "GOW3_CLOTH_TRACE/PEEK"
+                          : TracedShader(0x8f067540)                 ? "GOW3_TRACE_PS"
+                          : upscale && std::strtoull(upscale, nullptr, 16) == 0x8f067540
+                              ? "GOW3_UPSCALE_BEFORE_CS"
+                              : nullptr;
+        if (off) {
+            std::printf("Dispatch runs: off (%s is set)\n", off);
+            return false;
+        }
+        if (const char* fusion = std::getenv("GOW3_DISPATCH_FUSION"); fusion && fusion[0] == '1') {
+            std::printf("Dispatch runs: GOW3_DISPATCH_FUSION=1 is ignored (runs replace it)\n");
+        }
+        std::printf("Dispatch runs: on (Disabled2 bit 40 turns them off live)\n");
+        std::fflush(stdout);
+        return true;
+    }();
+    return on;
+}
+
+/// GOW3_DISPATCH_RUN_VERIFY=1: stage B replays every run and compares the batch plan with it.
+bool RunVerifyEnabled() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_DISPATCH_RUN_VERIFY");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+/// Read slots of cs 8f067540 that must be ring (or static mesh) bindings: 0-5 and the
+/// flattened user data (9).
+constexpr u32 RunReadSlots = 0x3f | 1u << 9;
+
+enum RunRefusal : u32 {
+    RefusedState,     ///< toggle bit, ring off, capture or profiler, DMA
+    RefusedShape,     ///< dims, user data, buffers
+    RefusedRegisters, ///< registers changed since the last packet
+    RefusedPipeline,  ///< no batch pipeline
+    RefusedReads,     ///< a read slot is not in the constant ring
+    RefusedWrites,    ///< an output view is null or not the +0/+12/+20 layout
+    NumRunRefusals,
+};
+enum RunReplay : u32 {
+    ReplayToggle,
+    ReplayPipeline,
+    ReplayCapture,
+    ReplayVerify,
+    ReplayReads,
+    ReplaySharps, ///< an output V# null, garbage or clamped on stage B
+    ReplayMeta,
+    ReplaySpans,
+    ReplayManySpans, ///< more spans than tracked ranges (RunPlan::MaxTracked)
+    ReplayTickMoved, ///< acquisitions could not be made at the batch's tick
+    NumRunReplays,
+};
+
+/// The "Dispatch runs (5 s)" line, printed by stage A whenever GOW3_DISPATCH_RUNS=1. Stage A's
+/// counters are reset per line; stage B's are written by stage B only and printed as differences.
+struct RunStats {
+    u64 packets = 0, packet_instances = 0, singles = 0, tasks = 0;
+    u64 prunes = 0, pruned = 0, pending_max = 0; ///< pending_writes after run flushes
+    std::array<u64, NumRunRefusals> refused{};
+    std::array<u64, Rasterizer::NumRunCuts> cuts{};
+    std::unordered_map<u32, u64> opcode_cuts; ///< opcode | SET_SH_REG register << 8
+    u32 calls = 0;
+    std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+    /// Stage B: dispatches batched, dispatch calls, dispatches verified, verify mismatches
+    /// (descriptors, push data, tracked ranges, written bytes), spans acquired in pieces, and
+    /// window ticks a run's acquisitions changed (bookkeeping the views would not have changed).
+    std::atomic<u64> batched{0}, batches{0}, verified{0}, bad_descriptors{0}, bad_push{0},
+        bad_tracking{0}, bad_written{0}, chunked{0}, bad_bookkeeping{0}, reacquired{0};
+    std::array<std::atomic<u64>, NumRunReplays> replays{};
+    /// ReplaySpans by SkinningSpanRefusal (layout, overflow, overlap, window, too many), then
+    /// spans in more than one buffer.
+    std::array<std::atomic<u64>, 7> span_refusals{};
+    std::array<u64, 5> task_cuts{}; ///< not a fence, fence slots full, fence too large
+    std::array<u64, 4> join_cuts{}; ///< pipeline, queue, groups (dim_x), other registers
+    /// Stage B's counters at the last line (10 counters, the replays, the span refusals).
+    std::array<u64, 10 + NumRunReplays + 7> seen{};
+};
+RunStats g_run_stats;
+/// GOW3_RUN_RELEASE_VERIFY: fences signalled in checked batches, batches whose writes or IRQs
+/// differed from what was staged (any thread: the batches signal on the recorder or copy threads).
+std::atomic<u64> g_release_verify_fences{0}, g_release_verify_mismatches{0};
+
+void RunCount(std::atomic<u64>& counter, u64 add = 1) {
+    counter.store(counter.load(std::memory_order_relaxed) + add, std::memory_order_relaxed);
+}
+
+void PrintRunStats() {
+    auto& s = g_run_stats;
+    if ((++s.calls & 63) != 0) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - s.window < std::chrono::seconds(5)) {
+        return;
+    }
+    s.window = now;
+    constexpr u32 Replays = 10, Spans = Replays + NumRunReplays; // first replay, span refusal
+    std::array<u64, Spans + 7> values = {
+        s.batched.load(std::memory_order_relaxed),      s.batches.load(std::memory_order_relaxed),
+        s.verified.load(std::memory_order_relaxed),     s.bad_descriptors.load(std::memory_order_relaxed),
+        s.bad_push.load(std::memory_order_relaxed),     s.bad_tracking.load(std::memory_order_relaxed),
+        s.bad_written.load(std::memory_order_relaxed),  s.chunked.load(std::memory_order_relaxed),
+        s.bad_bookkeeping.load(std::memory_order_relaxed), s.reacquired.load(std::memory_order_relaxed)};
+    for (u32 i = 0; i < NumRunReplays; ++i) {
+        values[Replays + i] = s.replays[i].load(std::memory_order_relaxed);
+    }
+    for (u32 i = 0; i < 7; ++i) {
+        values[Spans + i] = s.span_refusals[i].load(std::memory_order_relaxed);
+    }
+    std::array<u64, Spans + 7> d{};
+    for (size_t i = 0; i < values.size(); ++i) {
+        d[i] = values[i] - s.seen[i];
+    }
+    s.seen = values;
+    const auto& r = s.refused;
+    const auto& c = s.cuts;
+    std::printf("Dispatch runs (5 s): %llu run packets of %.1f dispatches, %llu single packets; "
+                "stage B batched %llu dispatches in %llu dispatch calls, replayed runs: toggle "
+                "%llu, no pipeline %llu, capture %llu, verify %llu, reads %llu, V#s %llu, metadata "
+                "%llu, spans %llu, over 32 spans %llu, tick moved %llu; not staged: state %llu, "
+                "shape %llu, registers %llu, pipeline "
+                "%llu, reads %llu, writes %llu; cuts: packet %llu, task %llu, drain %llu, indirect "
+                "%llu, opcode %llu, queue end %llu, yield %llu, command %llu, submission %llu, full "
+                "%llu, join %llu, refused %llu; staged fences %llu; run descriptor pools created "
+                "so far %llu",
+                (unsigned long long)s.packets,
+                s.packets ? double(s.packet_instances) / s.packets : 0.0,
+                (unsigned long long)s.singles, (unsigned long long)d[0], (unsigned long long)d[1],
+                (unsigned long long)d[Replays + ReplayToggle],
+                (unsigned long long)d[Replays + ReplayPipeline],
+                (unsigned long long)d[Replays + ReplayCapture],
+                (unsigned long long)d[Replays + ReplayVerify],
+                (unsigned long long)d[Replays + ReplayReads],
+                (unsigned long long)d[Replays + ReplaySharps],
+                (unsigned long long)d[Replays + ReplayMeta],
+                (unsigned long long)d[Replays + ReplaySpans],
+                (unsigned long long)d[Replays + ReplayManySpans],
+                (unsigned long long)d[Replays + ReplayTickMoved],
+                (unsigned long long)r[RefusedState], (unsigned long long)r[RefusedShape],
+                (unsigned long long)r[RefusedRegisters], (unsigned long long)r[RefusedPipeline],
+                (unsigned long long)r[RefusedReads], (unsigned long long)r[RefusedWrites],
+                (unsigned long long)c[Rasterizer::CutPacket], (unsigned long long)c[Rasterizer::CutTask],
+                (unsigned long long)c[Rasterizer::CutDrain], (unsigned long long)c[Rasterizer::CutIndirect],
+                (unsigned long long)c[Rasterizer::CutOpcode], (unsigned long long)c[Rasterizer::CutQueueEnd],
+                (unsigned long long)c[Rasterizer::CutYield], (unsigned long long)c[Rasterizer::CutCommand],
+                (unsigned long long)c[Rasterizer::CutSubmission], (unsigned long long)c[Rasterizer::CutFull],
+                (unsigned long long)c[Rasterizer::CutJoin], (unsigned long long)c[Rasterizer::CutRefused],
+                (unsigned long long)s.tasks,
+                (unsigned long long)ComputePipeline::RunPoolsCreated());
+    if (!s.opcode_cuts.empty()) {
+        std::vector<std::pair<u64, u32>> top;
+        for (const auto& [detail, n] : s.opcode_cuts) {
+            top.emplace_back(n, detail);
+        }
+        std::ranges::sort(top, std::greater{});
+        std::printf("; opcode cuts:");
+        for (size_t i = 0; i < std::min<size_t>(top.size(), 6); ++i) {
+            const u32 detail = top[i].second;
+            std::printf(" %s", magic_enum::enum_name(AmdGpu::PM4ItOpcode(detail & 0xff)).data());
+            if (detail >> 8) {
+                std::printf("@%#x", detail >> 8);
+            }
+            std::printf("=%llu", (unsigned long long)top[i].first);
+        }
+        s.opcode_cuts.clear();
+    }
+    const auto& t = s.task_cuts;
+    const auto& j = s.join_cuts;
+    std::printf("; task cuts: other %llu, fence slots full %llu, fence too large %llu; join cuts: "
+                "pipeline %llu, queue %llu, groups %llu, registers %llu; span refusals: layout "
+                "%llu, overflow %llu, overlap %llu, 1 GiB line %llu, too many %llu, buffers %llu",
+                (unsigned long long)t[0], (unsigned long long)t[1], (unsigned long long)t[2],
+                (unsigned long long)j[0], (unsigned long long)j[1], (unsigned long long)j[2],
+                (unsigned long long)j[3], (unsigned long long)d[Spans + 1],
+                (unsigned long long)d[Spans + 2], (unsigned long long)d[Spans + 3],
+                (unsigned long long)d[Spans + 4], (unsigned long long)d[Spans + 5],
+                (unsigned long long)d[Spans + 6]);
+    std::printf("; chunked spans %llu, window-tick changes %llu, re-acquisitions (tick moved) "
+                "%llu; pending writes at most %llu, %llu prunes dropped %llu",
+                (unsigned long long)d[7], (unsigned long long)d[8], (unsigned long long)d[9],
+                (unsigned long long)s.pending_max, (unsigned long long)s.prunes,
+                (unsigned long long)s.pruned);
+    s.task_cuts = {};
+    s.join_cuts = {};
+    if (Rasterizer::RunReleaseVerify()) {
+        std::printf("; release verify (totals): %llu fences, %llu batch mismatches",
+                    (unsigned long long)g_release_verify_fences.load(std::memory_order_relaxed),
+                    (unsigned long long)g_release_verify_mismatches.load(std::memory_order_relaxed));
+    }
+    if (RunVerifyEnabled()) {
+        std::printf("; verify: %llu dispatches compared, mismatches: descriptors %llu, push data "
+                    "%llu, tracked ranges %llu, written bytes %llu",
+                    (unsigned long long)d[2], (unsigned long long)d[3], (unsigned long long)d[4],
+                    (unsigned long long)d[5], (unsigned long long)d[6]);
+    }
+    std::printf("\n");
+    std::fflush(stdout);
+    s.packets = s.packet_instances = s.singles = s.tasks = 0;
+    s.prunes = s.pruned = s.pending_max = 0;
+    s.refused = {};
+    s.cuts = {};
+}
+} // namespace
+
+bool Rasterizer::RunReleaseVerify() {
+    static const bool on = [] {
+        const char* env = std::getenv("GOW3_RUN_RELEASE_VERIFY");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+void Rasterizer::NoteReleaseVerify(u64 fences, bool mismatch) {
+    g_release_verify_fences.fetch_add(fences, std::memory_order_relaxed);
+    g_release_verify_mismatches.fetch_add(mismatch, std::memory_order_relaxed);
+}
+
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
     Gow3Stats::dispatches.fetch_add(1, std::memory_order_relaxed);
@@ -3852,10 +4436,399 @@ void Rasterizer::DispatchDirect() {
                 pipe_writes_overflow = true;
             }
         }
+        if (DispatchRunsRequested() && StageDispatchRun(pipeline, sharps)) {
+            return;
+        }
         PostDraw(pipeline, nullptr, false, 0, &CsRegs(), nullptr, sharps);
         return;
     }
     DispatchRecord(pipeline);
+}
+
+bool Rasterizer::StageDispatchRun(const ComputePipeline* pipeline, const AmdGpu::Buffer* sharps) {
+    auto& stats = g_run_stats;
+    PrintRunStats();
+    const auto& info = pipeline->GetStage(Shader::SwStage::Compute);
+    if (info.pgm_hash != 0x8f067540) {
+        return false; // PostDraw hands the open run over first
+    }
+    auto& run = dispatch_run;
+    const auto& cs = CsRegs();
+    const auto refuse = [&](RunRefusal why) {
+        ++stats.refused[why];
+        CutDispatchRun(CutRefused);
+        return false;
+    };
+    if (Gow3Toggle::Disabled2(Gow3Toggle::DispatchRuns) || !constant_ring ||
+        Gow3Toggle::Disabled(Gow3Toggle::ConstantRing) || !pipe_synced || FrameCapture::Active() ||
+        GpuProfiler::Get() || info.uses_dma) {
+        return refuse(RefusedState);
+    }
+    if (cs.dim_x == 0 || cs.dim_y != 1 || cs.dim_z != 1 || info.buffers.size() != 10 ||
+        info.user_data.size() != cs.user_data.size() || info.flattened_ud_buf.empty() ||
+        info.flattened_ud_buf.size() > RunMaxFlat) {
+        return refuse(RefusedShape);
+    }
+    // Run packets carry no register blocks: a dispatch after a register change goes out with them
+    // as before, and a run starts with the next one.
+    const auto& dirty = liverpool->pipe_dirty;
+    if (dirty.reset || std::ranges::any_of(dirty.blocks, [](u64 bits) { return bits != 0; })) {
+        return refuse(RefusedRegisters);
+    }
+    if (!pipeline->EnsureRunPipeline()) {
+        return refuse(RefusedPipeline);
+    }
+    if (run.count &&
+        (run.pipeline != pipeline || run.queue != &cs ||
+         std::memcmp(&run.cs, &cs, offsetof(AmdGpu::ComputeProgram, user_data)) != 0)) {
+        FlushDispatchRun(CutJoin, run.pipeline != pipeline ? 0
+                                  : run.queue != &cs       ? 1
+                                  : run.cs.dim_x != cs.dim_x ? 2
+                                                           : 3);
+    }
+    if (!run.instances) {
+        run.instances = std::make_unique<RunInstance[]>(ComputePipeline::RunCapacity + 1);
+    }
+    // What PostDraw serializes for a dispatch, staged: its constant ring copies are made now and
+    // its written buffers pending until the run's packet is committed (uncommitted_indices).
+    const u64 generation = run.generation;
+    const u32 slot = run.count;
+    {
+        auto& staged = run.instances[slot];
+        staged.rings.clear();
+        staged.num_tasks = 0;
+        noting_packet = true;
+        CollectRingBindings(info, nullptr, staged.rings, sharps);
+        noting_packet = false;
+        constant_ring->EndPacket();
+        staged.ring_end = constant_ring->Position();
+        std::memcpy(staged.ud.data(), info.user_data.data(), info.user_data.size_bytes());
+        std::memcpy(staged.flat.data(), info.flattened_ud_buf.data(),
+                    info.flattened_ud_buf.size() * sizeof(u32));
+    }
+    // A drain while staging (a fault on this thread) handed the run over: this one starts anew.
+    u32 index = slot;
+    if (run.generation != generation) {
+        if (slot != 0) {
+            run.instances[0] = run.instances[slot];
+        }
+        index = 0;
+    }
+    if (index == 0) {
+        run.pipeline = pipeline;
+        run.queue = &cs;
+        std::memcpy(&run.cs, &cs, sizeof(cs)); // the raw image the join compares
+        run.cb_extent = liverpool->last_cb_extent;
+        run.db_extent = liverpool->last_db_extent;
+        run.pgm_base = info.pgm_base;
+        run.ud_size = static_cast<u32>(info.user_data.size());
+        run.flat_size = static_cast<u32>(info.flattened_ud_buf.size());
+    }
+    const auto& staged = run.instances[index];
+    u32 reads = 0;
+    for (const auto& ring : staged.rings) {
+        reads |= ring.index < 32 ? 1u << ring.index : 0;
+    }
+    std::array<SkinningWriteView, 3> views{};
+    for (u32 v = 0; v < 3; ++v) {
+        const auto sharp = sharps ? sharps[6 + v] : info.buffers[6 + v].GetSharp(info);
+        views[v] = {sharp.base_address, sharp.GetSize()};
+    }
+    // Stage B checks the V#s again (garbage, mapping, metadata) and replays what fails.
+    const bool writes_ok = SkinningWriteLayout(views) != 0;
+    if (reads != RunReadSlots || !writes_ok) {
+        ++stats.refused[reads != RunReadSlots ? RefusedReads : RefusedWrites];
+        if (index != 0) {
+            FlushDispatchRun(CutRefused); // this one's writes stay pending for its own packet
+        }
+        EmitRunPacket(&staged, 1);
+        ResolveRunWrites(static_cast<u32>(uncommitted_indices.size()));
+        ++stats.singles;
+        PrintPipeStats();
+        return true;
+    }
+    run.count = index + 1;
+    run.uncommitted = static_cast<u32>(uncommitted_indices.size());
+    if (run.count == ComputePipeline::RunCapacity) {
+        FlushDispatchRun(CutFull);
+    }
+    return true;
+}
+
+void Rasterizer::FlushDispatchRun(u32 reason, u32 detail) {
+    auto& run = dispatch_run;
+    const u32 count = run.count;
+    run.count = 0;
+    ++run.generation;
+    EmitRunPacket(run.instances.get(), count);
+    ResolveRunWrites(run.uncommitted);
+    run.uncommitted = 0;
+    // The staged tasks' labels (the newest pending ones) are written once the packet has run.
+    const u64 end = draw_pipe->Head();
+    for (auto it = pending_labels.rbegin(); run.labels && it != pending_labels.rend(); ++it) {
+        if (it->position == PendingUncommitted) {
+            it->position = end;
+            --run.labels;
+        }
+    }
+    run.labels = 0;
+    auto& stats = g_run_stats;
+    for (u32 k = 0; k < count; ++k) {
+        stats.tasks += run.instances[k].num_tasks;
+    }
+    ++stats.cuts[std::min<u32>(reason, NumRunCuts - 1)];
+    if (reason == CutOpcode) {
+        ++stats.opcode_cuts[detail];
+    } else if (reason == CutTask) {
+        ++stats.task_cuts[std::min<u32>(detail, stats.task_cuts.size() - 1)];
+    } else if (reason == CutJoin) {
+        ++stats.join_cuts[std::min<u32>(detail, stats.join_cuts.size() - 1)];
+    }
+    if (count > 1) {
+        ++stats.packets;
+        stats.packet_instances += count;
+    } else {
+        ++stats.singles;
+    }
+    PrintPipeStats();
+}
+
+void Rasterizer::ResolveRunWrites(u32 head) {
+    // 24 Oct 2026 review: PendingWriteOverlaps prunes only with no uncommitted entry, which an
+    // open run always has: without this the list grew and NotePendingGpuWrite's merge scan was
+    // 2.6% of stage A.
+    const auto prune = [&] {
+        auto& stats = g_run_stats;
+        stats.pending_max = std::max<u64>(stats.pending_max, pending_writes.size());
+        if (uncommitted_indices.empty() && pending_writes.size() > 32) {
+            ++stats.prunes;
+            stats.pruned += PrunePendingWrites();
+        }
+    };
+    // As PostDraw after its commit: the writes noted for the packet are done past its end.
+    if (uncommitted_indices.empty()) {
+        prune();
+        return;
+    }
+    const u64 end = draw_pipe->Head();
+    head = std::min<u32>(head, static_cast<u32>(uncommitted_indices.size()));
+    for (u32 i = 0; i < head; ++i) {
+        auto& write = pending_writes[uncommitted_indices[i]];
+        if (write.position == PendingUncommitted) {
+            write.position = end;
+        }
+    }
+    // An instance still being staged: its writes (also those merged into the packet's ranges)
+    // stay pending until its own packet.
+    for (u32 i = head; i < uncommitted_indices.size(); ++i) {
+        pending_writes[uncommitted_indices[i]].position = PendingUncommitted;
+    }
+    uncommitted_indices.erase(uncommitted_indices.begin(), uncommitted_indices.begin() + head);
+    prune();
+}
+
+void Rasterizer::EmitRunPacket(const RunInstance* instances, u32 count) {
+    const auto& run = dispatch_run;
+    const auto& info = run.pipeline->GetStage(Shader::SwStage::Compute);
+    const u32 words = AlignPacket((run.ud_size + run.flat_size) * sizeof(u32));
+    const auto instance_bytes = [&](const RunInstance& staged) {
+        return static_cast<u32>(staged.rings.size() * sizeof(RingBinding)) + words;
+    };
+    const auto task_bytes = [](const RunInstance& staged) {
+        u32 bytes = 0;
+        for (u32 t = 0; t < staged.num_tasks; ++t) {
+            bytes += sizeof(TaskPacket) + AlignPacket(staged.tasks[t].size);
+        }
+        return bytes;
+    };
+    // The tasks after each instance, laid out as Task packets are.
+    const auto write_tasks = [](u8*& at, const RunInstance& staged) {
+        for (u32 t = 0; t < staged.num_tasks; ++t) {
+            const auto& task = staged.tasks[t];
+            *reinterpret_cast<TaskPacket*>(at) = {PacketKind::Task, task.size, task.task};
+            std::memcpy(at + sizeof(TaskPacket), task.data.data(), task.size);
+            at += sizeof(TaskPacket) + AlignPacket(task.size);
+        }
+    };
+    u32 size = sizeof(DrawPacket) + sizeof(PacketStage) + instance_bytes(instances[0]) +
+               AlignPacket(sizeof(AmdGpu::ComputeProgram));
+    if (count > 1) {
+        size += sizeof(RunPacketHeader) + task_bytes(instances[0]);
+        for (u32 k = 1; k < count; ++k) {
+            size += sizeof(RunPacketInstance) + instance_bytes(instances[k]) +
+                    task_bytes(instances[k]);
+        }
+    }
+    u8* out = draw_pipe->Begin(size);
+    u8* const start = out;
+    auto& packet = *reinterpret_cast<DrawPacket*>(out);
+    packet.kind = count > 1 ? PacketKind::DispatchRun : PacketKind::Dispatch;
+    packet.pipeline = run.pipeline;
+    packet.prepared = nullptr;
+    packet.index_offset = 0;
+    packet.is_indexed = false;
+    packet.regs_reset = false;
+    packet.num_blocks = 0;
+    packet.num_stages = 1;
+    packet.verify = 0;
+    packet.cb_extent = run.cb_extent;
+    packet.db_extent = run.db_extent;
+    packet.ring_end = instances[count - 1].ring_end;
+    out += sizeof(DrawPacket);
+    const auto write_words = [&](const RunInstance& staged) {
+        std::memcpy(out, staged.rings.data(), staged.rings.size() * sizeof(RingBinding));
+        out += staged.rings.size() * sizeof(RingBinding);
+        std::memcpy(out, staged.ud.data(), run.ud_size * sizeof(u32));
+        std::memcpy(out + run.ud_size * sizeof(u32), staged.flat.data(), run.flat_size * sizeof(u32));
+        out += words;
+    };
+    *reinterpret_cast<PacketStage*>(out) = {&info,        run.pgm_base,
+                                            run.ud_size,  run.flat_size,
+                                            static_cast<u32>(instances[0].rings.size()), 0};
+    out += sizeof(PacketStage);
+    write_words(instances[0]);
+    // The register image as PostDraw copies it (memcpy: the bitfields' padding words too).
+    std::memcpy(out, &run.cs, sizeof(AmdGpu::ComputeProgram));
+    std::memcpy(out + offsetof(AmdGpu::ComputeProgram, user_data), instances[0].ud.data(),
+                sizeof(AmdGpu::UserData));
+    out += AlignPacket(sizeof(AmdGpu::ComputeProgram));
+    if (count > 1) {
+        *reinterpret_cast<RunPacketHeader*>(out) = {count, instances[0].num_tasks,
+                                                    instances[0].ring_end};
+        out += sizeof(RunPacketHeader);
+        write_tasks(out, instances[0]);
+        for (u32 k = 1; k < count; ++k) {
+            *reinterpret_cast<RunPacketInstance*>(out) = {instances[k].ring_end,
+                                                          static_cast<u32>(instances[k].rings.size()),
+                                                          instances[k].num_tasks};
+            out += sizeof(RunPacketInstance);
+            write_words(instances[k]);
+            write_tasks(out, instances[k]);
+        }
+    }
+    ASSERT(static_cast<u32>(out - start) == size);
+    draw_pipe->Commit(static_cast<u32>(out - start));
+    if (count == 1) {
+        // A dispatch alone: its tasks follow as the Task packets RunInOrder would have made.
+        for (u32 t = 0; t < instances[0].num_tasks; ++t) {
+            const auto& task = instances[0].tasks[t];
+            const u32 total = sizeof(TaskPacket) + AlignPacket(task.size);
+            u8* task_out = draw_pipe->Begin(total);
+            *reinterpret_cast<TaskPacket*>(task_out) = {PacketKind::Task, task.size, task.task};
+            std::memcpy(task_out + sizeof(TaskPacket), task.data.data(), task.size);
+            draw_pipe->Commit(total);
+        }
+    }
+}
+
+bool Rasterizer::AppendSkinningBatch(const ComputePipeline* pipeline) {
+    static const bool requested = [] {
+        const char* env = std::getenv("GOW3_DISPATCH_FUSION");
+        return env && env[0] == '1';
+    }();
+    // 24 Oct 2026: never together with the dispatch runs (DispatchRunsRequested logs it).
+    if (!requested || DispatchRunsRequested() || Gow3Toggle::Disabled2(Gow3Toggle::DispatchFusion) ||
+        !UseDrawPipe() || !DrawPipe::OnStageB() || GpuProfiler::Get() || FrameCapture::Active() ||
+        FullBarriersEnabled() || !cloth_peeks.empty()) return false;
+    const auto& cs = CsRegs();
+    const auto& info = pipeline->GetStage(Shader::SwStage::Compute);
+    if (info.pgm_hash != 0x8f067540 || cs.dim_y != 1 || cs.dim_z != 1 || !cs.dim_x ||
+        set_writes.size() != info.buffers.size() || !pipeline->EnsureBatchPipeline()) return false;
+    for (u32 i = 0; i < set_writes.size(); ++i) {
+        const auto& write = set_writes[i];
+        if (write.dstBinding != i || write.descriptorCount != 1 || !write.pBufferInfo ||
+            write.descriptorType != vk::DescriptorType::eStorageBuffer) return false;
+    }
+    if (skinning_batch.count &&
+        (skinning_batch.pipeline != pipeline || skinning_batch.dim_x != cs.dim_x)) {
+        scheduler.FlushDeferredRecord();
+    }
+    // Allocate BEFORE installing/appending to the deferred batch. A stream wrap may submit:
+    // earlier batches must be emitted at their original tick, not after the wrap's Finish().
+    auto& stream = buffer_cache.GetStreamBuffer();
+    const u64 push_offset = stream.Copy(&push_data, sizeof(push_data), instance.StorageMinAlignment());
+    auto& batch = skinning_batch;
+    if (!batch.count) {
+        batch.pipeline = pipeline;
+        batch.dim_x = cs.dim_x;
+        batch.bindings = set_writes.size() + 1;
+        batch.first_push = push_data;
+        scheduler.DeferRecord([this] { FlushSkinningBatch(); });
+    }
+    for (u32 i = 0; i < set_writes.size(); ++i)
+        batch.buffers[i][batch.count] = *set_writes[i].pBufferInfo;
+    batch.buffers[set_writes.size()][batch.count] = {stream.Handle(), push_offset, sizeof(push_data)};
+    ++batch.count;
+    DebugState.IncDispatch(); // logical PS4 dispatches; physical Vulkan count is reported separately
+    ResetBindings(true);    // retain exact resource hazards for EVERY original dispatch
+    if (batch.count == ComputePipeline::BatchCapacity) scheduler.FlushDeferredRecord();
+    return true;
+}
+
+void Rasterizer::FlushSkinningBatch() {
+    auto& batch = skinning_batch;
+    if (!batch.count) return;
+    const auto* pipeline = batch.pipeline;
+    const u32 count = batch.count, dim_x = batch.dim_x;
+    batch.count = 0; // emitted commands can themselves flush/submit without re-entering the batch
+    if (count == 1) {
+        // An ordering boundary after one instance: ordinary shader/commands, not a padded set.
+        std::vector<vk::WriteDescriptorSet> writes(batch.bindings - 1);
+        for (u32 i = 0; i < writes.size(); ++i) {
+            writes[i] = {.dstBinding = i, .descriptorCount = 1,
+                         .descriptorType = vk::DescriptorType::eStorageBuffer,
+                         .pBufferInfo = &batch.buffers[i][0]};
+        }
+        pipeline->BindResources(writes, batch.first_push);
+        const auto handle = pipeline->Handle();
+        scheduler.Record([=](vk::CommandBuffer cmd) {
+            cmd.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
+            cmd.dispatch(dim_x, 1, 1);
+        });
+        ++fused_singles;
+        if (fused_singles <= 8 || fused_singles % 50000 == 0) {
+            const auto caller = scheduler.DeferredRecordBoundary();
+            std::printf("Dispatch fusion singleton %llu: boundary %s:%u (%s)\n",
+                        fused_singles, caller.file_name(), caller.line(), caller.function_name());
+        }
+        scheduler.KickRecording();
+        return;
+    }
+    const vk::DescriptorSet set = pipeline->BatchDescriptorSet();
+    std::vector<vk::WriteDescriptorSet> writes(batch.bindings);
+    for (u32 i = 0; i < batch.bindings; ++i) {
+        // All declared descriptors are initialized, even in a partial batch: no partially-bound
+        // feature or nonuniform indexing required. Workgroup Y is uniform within each group.
+        for (u32 j = count; j < ComputePipeline::BatchCapacity; ++j)
+            batch.buffers[i][j] = batch.buffers[i][count - 1];
+        writes[i] = {.dstSet = set, .dstBinding = i,
+                     .descriptorCount = ComputePipeline::BatchCapacity,
+                     .descriptorType = vk::DescriptorType::eStorageBuffer,
+                     .pBufferInfo = batch.buffers[i].data()};
+    }
+    instance.GetDevice().updateDescriptorSets(writes, {});
+    const auto handle = pipeline->BatchHandle();
+    const auto layout = pipeline->BatchLayout();
+    scheduler.Checkpoint("skinning batch", count);
+    scheduler.Record([=](vk::CommandBuffer cmd) {
+        cmd.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
+        cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, layout, 0, set, {});
+        cmd.dispatch(dim_x, count, 1);
+    });
+    scheduler.KickRecording();
+    fused_dispatches += count;
+    ++fused_batches;
+    if ((fused_batches & 255) == 0) {
+        static auto last = std::chrono::steady_clock::now();
+        if (const auto now = std::chrono::steady_clock::now(); now - last >= std::chrono::seconds{5}) {
+            last = now;
+            std::printf("Dispatch fusion (5 s): %llu logical -> %llu Vulkan dispatches, %llu singles, "
+                        "%.2f instances/batch, %llu dispatches removed\n",
+                        fused_dispatches, fused_batches, fused_singles,
+                        double(fused_dispatches) / fused_batches, fused_dispatches - fused_batches);
+            fused_dispatches = fused_batches = fused_singles = 0;
+        }
+    }
 }
 
 void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
@@ -3952,6 +4925,9 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
 
     scheduler.EndRendering();
     mark();
+    // Any resource transfer/barrier recorded by BindResources has already flushed earlier
+    // batches through Scheduler::Record. Only compatible, hazard-free consecutive work fuses.
+    if (AppendSkinningBatch(pipeline)) return;
     // gow3 20 Oct 2026 (GOW3_SKIP_COMPUTE_REBIND=0: always bind): the compute pipeline is not
     // bound again when the previous dispatch bound the same one and nothing but this dispatch's
     // push constants and descriptors was recorded since, in the same command buffer (the
@@ -3966,6 +4942,9 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         const char* env = std::getenv("GOW3_SKIP_COMPUTE_REBIND");
         return !(env && env[0] == '0');
     }();
+    if (run_verify_index != ~0u) [[unlikely]] {
+        VerifyRunInstance(); // GOW3_DISPATCH_RUN_VERIFY: the run's batch plan against these
+    }
     const u64 serial_before_bind = scheduler.RecordSerial();
     pipeline->BindResources(set_writes, push_data);
     const u64 serial_after_bind = scheduler.RecordSerial();
@@ -4017,8 +4996,551 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     scheduler.KickRecording();
 }
 
+void Rasterizer::DispatchRunRecord(const ComputePipeline* pipeline, const u8* tail,
+                                   const u8* end) {
+    constexpr u32 Capacity = ComputePipeline::RunCapacity;
+    struct Instance {
+        const RingBinding* rings;
+        u32 num_ring;
+        const u32* ud;
+        const u32* flat;
+        u64 ring_end;
+        const u8* tasks; ///< Task packets run after the dispatch
+        u32 num_tasks;
+    };
+    const auto& info = pipeline->GetStage(Shader::SwStage::Compute);
+    const auto first = Shader::Info::ud_snapshots[0];
+    const auto& header = *reinterpret_cast<const RunPacketHeader*>(tail);
+    const u32 count = header.count;
+    ASSERT(count >= 2 && count <= Capacity && first.info == &info && num_ring_stages == 1);
+    const auto skip_tasks = [](const u8*& at, u32 num_tasks) {
+        for (u32 t = 0; t < num_tasks; ++t) {
+            at += sizeof(TaskPacket) + AlignPacket(reinterpret_cast<const TaskPacket*>(at)->size);
+        }
+    };
+    std::array<Instance, Capacity> runs;
+    const u8* at = tail + sizeof(RunPacketHeader);
+    runs[0] = {ring_stages[0].bindings, ring_stages[0].count, first.user_data, first.flat,
+               header.first_ring_end, at, header.num_tasks};
+    skip_tasks(at, header.num_tasks);
+    const u32 words = AlignPacket((first.user_data_size + first.flat_size) * sizeof(u32));
+    for (u32 k = 1; k < count; ++k) {
+        const auto& record = *reinterpret_cast<const RunPacketInstance*>(at);
+        at += sizeof(RunPacketInstance);
+        const auto* rings = reinterpret_cast<const RingBinding*>(at);
+        at += record.num_ring * sizeof(RingBinding);
+        const auto* ud = reinterpret_cast<const u32*>(at);
+        at += words;
+        runs[k] = {rings, record.num_ring, ud, ud + first.user_data_size, record.ring_end, at,
+                   record.num_tasks};
+        skip_tasks(at, record.num_tasks);
+    }
+    ASSERT(at == end);
+    // gow3 24 Oct 2026 (Gow3Toggle::RunReleaseBatch): after a batch, its compute releases (~20 a
+    // run, ~666k per 5 s in U3's street) are noted one by one and signalled together: one
+    // SignalAfterHostCopies whose closure writes every label and raises every IRQ in order
+    // (SignalAfterHostCopies + its Flush were ~4.9% of stage B). One download pass before the
+    // first: between releases nothing queues an image download or a tiny readback (the
+    // per-label part only notes buffer cache state), so later passes found nothing. Any other
+    // task sends the batch first. Not on the replay path.
+    const auto& hooks = release_hooks;
+    const auto flush_releases = [&] {
+        if (!release_batch.empty()) {
+            hooks.signal(*this, release_batch, release_batch_hash);
+            release_batch_hash = 0;
+        }
+    };
+    // An instance's in-order tasks, as RunDrawPacket runs Task packets (no stage state).
+    const auto run_tasks = [&](const Instance& run, bool batch_releases) {
+        const auto* cs = stage_cs;
+        const u32 snapshots = Shader::Info::num_ud_snapshots;
+        stage_cs = nullptr;
+        Shader::Info::num_ud_snapshots = 0;
+        num_ring_stages = 0;
+        const u8* task = run.tasks;
+        for (u32 t = 0; t < run.num_tasks; ++t) {
+            const auto& packet = *reinterpret_cast<const TaskPacket*>(task);
+            const u8* data = task + sizeof(TaskPacket);
+            task += sizeof(TaskPacket) + AlignPacket(packet.size);
+            if (batch_releases && packet.task == hooks.task && packet.size == hooks.size) {
+                if (release_batch.empty()) {
+                    ProcessDownloadImages();
+                }
+                if (hooks.stage(*this, data, release_batch_hash)) {
+                    release_batch.insert(release_batch.end(), data, data + packet.size);
+                    continue;
+                }
+            }
+            flush_releases();
+            packet.task(*this, data);
+        }
+        stage_cs = cs;
+        Shader::Info::num_ud_snapshots = snapshots;
+        num_ring_stages = 1;
+    };
+    // Instance k's user data and constant ring bindings, as RunDrawPacket installs a packet's.
+    const auto install = [&](const Instance& run) {
+        Shader::Info::ud_snapshots[0] = {&info, run.ud, first.user_data_size, run.flat,
+                                         first.flat_size, first.pgm_base};
+        Shader::Info::num_ud_snapshots = 1;
+        ring_stages[0] = {&info, run.rings, run.num_ring};
+    };
+    auto& stats = g_run_stats;
+    FrameCapture::Poll();
+    const bool verify = RunVerifyEnabled();
+    u32 replay = NumRunReplays;
+    if (Gow3Toggle::Disabled2(Gow3Toggle::DispatchRuns)) {
+        replay = ReplayToggle;
+    } else if (!pipeline->HasRunPipeline()) {
+        replay = ReplayPipeline;
+    } else if (FrameCapture::Active() || GpuProfiler::Get()) {
+        replay = ReplayCapture;
+    }
+    if (!run_plan) {
+        run_plan = std::make_unique<RunPlan>();
+    }
+    auto& plan = *run_plan;
+    const u64 alignment = instance.StorageMinAlignment();
+    bool planned = false;
+    if (replay == NumRunReplays) {
+        if (!verify) {
+            // DispatchRecord's and BindResources' work before the bindings, once for the run.
+            scheduler.PopPendingOperations();
+            gbuffer_draw = false;
+            if (upscaler->Enabled()) {
+                upscaler->OnDispatch(info.pgm_hash);
+            }
+            buffer_cache.PollReadbacks();
+            sampler_lod_bias = 0.0f;
+            sampler_graphics = false;
+            sampler_forced_aniso = 0;
+        }
+        // Per instance what BindResources/BindBuffers would bind: reads from the constant ring
+        // (or static mesh snapshots), push data, and the V#s of the three output views.
+        const auto& regs = Regs();
+        for (u32 k = 0; k < count && replay == NumRunReplays; ++k) {
+            install(runs[k]);
+            u32 reads = 0;
+            for (u32 j = 0; j < runs[k].num_ring; ++j) {
+                const auto& ring = runs[k].rings[j];
+                if (ring.index >= RunPlan::Bindings - 1 || (ring.index >= 6 && ring.index <= 8)) {
+                    reads = 0;
+                    break;
+                }
+                const bool persistent = (ring.offset & StaticMeshOffsetFlag) != 0;
+                plan.infos[ring.index][k] = vk::DescriptorBufferInfo{
+                    persistent ? static_mesh_buffer->Handle() : constant_ring->Handle(),
+                    ring.offset & ~StaticMeshOffsetFlag, ring.size};
+                reads |= 1u << ring.index;
+            }
+            if (reads != RunReadSlots) {
+                replay = ReplayReads;
+                break;
+            }
+            auto& push = plan.push[k];
+            push = MakeUserData(regs);
+            Shader::Backend::Bindings binding{};
+            info.PushUd(binding, push);
+            for (u32 slot = 0; slot < 6; ++slot) {
+                push.AddOffset(slot, 0);
+            }
+            for (u32 v = 0; v < 3 && replay == NumRunReplays; ++v) {
+                const auto& desc = info.buffers[6 + v];
+                const auto sharp = desc.GetSharp(info);
+                const GarbageSharp gs = ClassifyGarbageSharp(memory, sharp, info.pgm_hash);
+                if (gs.unbound || gs.garbage || gs.mapped_size != sharp.GetSize()) {
+                    replay = ReplaySharps;
+                } else if (texture_cache.IsMeta(sharp.base_address)) {
+                    replay = ReplayMeta; // IsComputeMetaClear may skip or clear: as before
+                } else {
+                    plan.writes[k].views[v] = {sharp.base_address, sharp.GetSize()};
+                    plan.writes[k].tracked[v] = TrackedBufferSize(desc, sharp, sharp.GetSize());
+                }
+            }
+        }
+        if (replay == NumRunReplays) {
+            const auto refusal = BuildSkinningWriteSpans(plan.writes.data(), count,
+                                                         plan.spans.data(), RunPlan::MaxSpans,
+                                                         plan.num_spans, plan.span_of.data());
+            if (refusal != SkinningSpanRefusal::None) {
+                replay = ReplaySpans;
+                RunCount(stats.span_refusals[static_cast<u32>(refusal)]);
+            } else if (plan.num_spans > RunPlan::MaxTracked) {
+                // More tracked ranges than bound_buffers holds: before any acquisition, the old
+                // path (one hull over all spans could cover unrelated buffers of the arena).
+                replay = ReplayManySpans;
+            }
+        }
+        planned = replay == NumRunReplays;
+    }
+    // The batched path's acquisitions (verify mode makes none: the frame gets exactly the old
+    // path, the plan is checked against it afterwards). A span: SynchronizeMemory, GpuRangesAdd
+    // and the readback rewrite notes over exactly the views' union, in pieces of at most 64 KiB
+    // (SplitSkinningWrite: a larger write would stamp whole 1 MiB windows the views did not); a
+    // span with small or large views view by view, as before.
+    // Returns false when a span's pieces or views were not one buffer at linear offsets.
+    const auto acquire = [&](bool first_time) {
+        bool one_buffer = true;
+        for (u32 s = 0; s < plan.num_spans; ++s) {
+            const auto& span = plan.spans[s];
+            if (span.per_view) {
+                continue;
+            }
+            const u64 first_window = span.address >> 20;
+            const u64 last_window = (span.address + span.size - 1) >> 20;
+            boost::container::small_vector<u64, 8> window_ticks;
+            for (u64 window = first_window; window <= last_window; ++window) {
+                window_ticks.push_back(buffer_cache.GpuWriteWindowTick(window));
+            }
+            const auto [pieces, bytes] = SplitSkinningWrite(span.size);
+            for (u32 piece = 0; piece < pieces; ++piece) {
+                const u64 at = u64(piece) * bytes;
+                const auto got = buffer_cache.ObtainBuffer(
+                    span.address + at, static_cast<u32>(std::min(bytes, span.size - at)), true,
+                    false);
+                if (piece == 0) {
+                    plan.obtained[s] = got;
+                } else {
+                    one_buffer &= got.first == plan.obtained[s].first &&
+                                  got.second == plan.obtained[s].second + at;
+                }
+            }
+            if (pieces > 1 && first_time) {
+                RunCount(stats.chunked);
+            }
+            // Views of 64 KiB or less stamp page ticks only: the pieces must not move a window's.
+            for (u64 window = first_window; window <= last_window; ++window) {
+                if (buffer_cache.GpuWriteWindowTick(window) != window_ticks[window - first_window]) {
+                    RunCount(stats.bad_bookkeeping);
+                    break;
+                }
+            }
+        }
+        for (u32 k = 0; k < count; ++k) {
+            const u32 s = plan.span_of[k];
+            const auto& span = plan.spans[s];
+            for (u32 v = 0; v < 3; ++v) {
+                const auto& view = plan.writes[k].views[v];
+                auto& got = plan.view_obtained[k][v];
+                if (span.per_view) {
+                    got = buffer_cache.ObtainBuffer(view.address, static_cast<u32>(view.size), true,
+                                                    info.buffers[6 + v].is_formatted);
+                    if (view.address == span.address) {
+                        plan.obtained[s] = got; // the span's tracking starts there
+                    }
+                } else {
+                    got = {plan.obtained[s].first,
+                           plan.obtained[s].second + (view.address - span.address)};
+                }
+            }
+        }
+        for (u32 k = 0; k < count; ++k) {
+            for (u32 v = 0; v < 3; ++v) {
+                one_buffer &= plan.view_obtained[k][v].first == plan.obtained[plan.span_of[k]].first;
+            }
+        }
+        return one_buffer;
+    };
+    // The tick the acquisitions stamped on the written pages (re-acquired if it moves before the
+    // batch is recorded).
+    u64 acquired_tick = scheduler.CurrentTick();
+    vk::DescriptorSet run_set{};
+    if (planned && !verify) {
+        // A span's tracking is one range of one buffer (never seen otherwise; the acquisitions
+        // repeat harmlessly in the replay, which makes the write effects itself).
+        const bool one_buffer = acquire(true);
+        for (u32 k = 0; k < count; ++k) {
+            for (u32 v = 0; v < 3; ++v) {
+                const auto& view = plan.writes[k].views[v];
+                const auto& got = plan.view_obtained[k][v];
+                const u64 aligned = Common::AlignDown(got.second, alignment);
+                plan.push[k].AddOffset(6 + v, static_cast<u32>(got.second - aligned));
+                plan.infos[6 + v][k] = vk::DescriptorBufferInfo{
+                    got.first->Handle(), aligned, view.size + (got.second - aligned)};
+            }
+        }
+        // One tracked range per span (at most MaxTracked: more were replayed above).
+        plan.num_tracked = plan.num_spans;
+        for (u32 s = 0; s < plan.num_spans; ++s) {
+            const auto& span = plan.spans[s];
+            plan.tracked[s] = {plan.obtained[s].first,
+                               plan.obtained[s].second + (span.track_address - span.address),
+                               span.track_size};
+        }
+        if (!one_buffer) {
+            planned = false;
+            replay = ReplaySpans;
+            RunCount(stats.span_refusals.back());
+        }
+    }
+    if (planned && !verify) {
+        // BindBuffers' write effects, now that no replay follows: a span's once (but texture
+        // invalidation per view: an image matches only its own base address), per view where
+        // the views were acquired one by one.
+        const auto note_write = [&](VAddr base, u64 size, u32 slot) {
+            Gow3WatchRange::Note("storage", info.pgm_hash, slot, base, size);
+            VideoCore::NoteGpuWriter(base, size, info.pgm_hash);
+            if (sync_gpu_constants && small_gpu_writes.size() < 16384 &&
+                info.pgm_hash != ReadbackSkipShader()) {
+                if (size <= 4096) {
+                    small_gpu_writes.emplace_back(base, size);
+                    VideoCore::NoteReadbackKind(base, size, VideoCore::ReadbackSmallWrite);
+                } else if (buffer_cache.IsCpuWriteHot(base, size)) {
+                    const VAddr write_end = base + size;
+                    for (VAddr window = Common::AlignDown(base, 1_MB); window < write_end;
+                         window += 1_MB) {
+                        if (buffer_cache.IsCpuWriteHot(window, 1_MB)) {
+                            const VAddr lo = std::max(window, base);
+                            const VAddr hi = std::min(window + 1_MB, write_end);
+                            small_gpu_writes.emplace_back(lo, hi - lo);
+                            VideoCore::NoteReadbackKind(lo, hi - lo, VideoCore::ReadbackHotWindow);
+                        }
+                    }
+                }
+            }
+        };
+        for (u32 s = 0; s < plan.num_spans; ++s) {
+            if (!plan.spans[s].per_view) {
+                note_write(plan.spans[s].address, plan.spans[s].size, 6);
+            }
+        }
+        for (u32 k = 0; k < count; ++k) {
+            const bool per_view = plan.spans[plan.span_of[k]].per_view;
+            for (u32 v = 0; v < 3; ++v) {
+                const auto& view = plan.writes[k].views[v];
+                if (per_view) {
+                    note_write(view.address, view.size, 6 + v);
+                }
+                texture_cache.InvalidateMemoryFromGPU(view.address, view.size);
+            }
+        }
+        // The barrier check and the tracking, once per span.
+        for (u32 t = 0; t < plan.num_tracked; ++t) {
+            const auto& range = plan.tracked[t];
+            bound_buffers.emplace_back(range.buffer, range.offset, static_cast<u32>(range.size),
+                                       true);
+            needs_barrier |= runtime.IsBufferAccessed(range.buffer, range.offset, range.size, true);
+        }
+        if (needs_barrier) {
+            runtime.FlushBarriers();
+        }
+        scheduler.EndRendering();
+        // Push data: one stream copy, one descriptor per instance (the array replacing it).
+        auto& stream = buffer_cache.GetStreamBuffer();
+        const u64 stride = Common::AlignUp(u64{sizeof(Shader::PushData)}, alignment);
+        ASSERT(stride <= 256);
+        for (u32 k = 0; k < count; ++k) {
+            std::memcpy(plan.push_bytes.data() + k * stride, &plan.push[k], sizeof(Shader::PushData));
+        }
+        const u64 push_offset = stream.Copy(plan.push_bytes.data(), count * stride, alignment);
+        for (u32 k = 0; k < count; ++k) {
+            plan.infos[RunPlan::Bindings - 1][k] = vk::DescriptorBufferInfo{
+                stream.Handle(), push_offset + k * stride, sizeof(Shader::PushData)};
+        }
+        run_set = pipeline->RunDescriptorSet();
+        std::array<vk::WriteDescriptorSet, RunPlan::Bindings> writes;
+        for (u32 b = 0; b < RunPlan::Bindings; ++b) {
+            // Every descriptor is written (no partially-bound feature): the last instance pads.
+            for (u32 j = count; j < Capacity; ++j) {
+                plan.infos[b][j] = plan.infos[b][count - 1];
+            }
+            writes[b] = vk::WriteDescriptorSet{.dstSet = run_set,
+                                               .dstBinding = b,
+                                               .descriptorCount = Capacity,
+                                               .descriptorType = vk::DescriptorType::eStorageBuffer,
+                                               .pBufferInfo = plan.infos[b].data()};
+        }
+        instance.GetDevice().updateDescriptorSets(writes, {});
+        // 24 Oct 2026 review: the acquisitions stamped the pages' GPU-write tick; a submission
+        // since (texture invalidation resolving a readback, the stream copy waiting for room)
+        // leaves them a tick before the batch, and a copy-queue fetch (FetchableWindowTick) could
+        // read the bytes before it. Acquire again at the batch's tick (the same buffers and
+        // offsets; its uploads get their barrier). Else the old path.
+        bool placed = true;
+        for (u32 tries = 0; placed && scheduler.CurrentTick() != acquired_tick; ++tries) {
+            if (tries == 4) {
+                placed = false;
+                break;
+            }
+            acquired_tick = scheduler.CurrentTick();
+            const auto obtained = plan.obtained;
+            const auto view_obtained = plan.view_obtained;
+            placed = acquire(false) && plan.obtained == obtained &&
+                     plan.view_obtained == view_obtained;
+            RunCount(stats.reacquired);
+            needs_barrier = false; // flushed above; only the new acquisitions' uploads count
+            for (u32 t = 0; placed && t < plan.num_tracked; ++t) {
+                const auto& range = plan.tracked[t];
+                needs_barrier |= runtime.IsBufferAccessed(range.buffer, range.offset, range.size, true);
+            }
+            if (placed && needs_barrier) {
+                runtime.FlushBarriers();
+            }
+            scheduler.EndRendering();
+        }
+        if (!placed) {
+            // Never seen; the replay repeats the write effects (duplicate small-write notes).
+            ResetBindings(true); // the spans' ranges: tracked, never dispatched (barriers only)
+            replay = ReplayTickMoved;
+            planned = false;
+        }
+    }
+    if (planned && !verify) {
+        const vk::Pipeline handle = pipeline->RunHandle();
+        const vk::PipelineLayout layout = pipeline->RunLayout();
+        const u32 dim_x = CsRegs().dim_x;
+        const vk::DescriptorSet set = run_set;
+        scheduler.Checkpoint("dispatch run", info.pgm_hash, count);
+        scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
+            cmdbuf.bindDescriptorSets(vk::PipelineBindPoint::eCompute, layout, 0, set, {});
+            cmdbuf.dispatch(dim_x, count, 1);
+        });
+        bound_compute_pipeline = handle;
+        bound_compute_serial = scheduler.RecordSerial();
+        for (u32 k = 0; k < count; ++k) {
+            DebugState.IncDispatch();
+        }
+        ResetBindings(true); // the spans' tracked ranges into the barrier tracker
+        scheduler.KickRecording();
+        // Fences after their dispatch: after the batch. Batched where RunComputeReleaseMem would
+        // queue each on the Vulkan recorder (else it waits and writes them itself).
+        const bool batch_releases = !Gow3Toggle::Disabled2(Gow3Toggle::RunReleaseBatch) &&
+                                    hooks.task && scheduler.IsRecordingDeferred();
+        for (u32 k = 0; k < count; ++k) {
+            run_tasks(runs[k], batch_releases);
+        }
+        flush_releases();
+        RunCount(stats.batched, count);
+        RunCount(stats.batches);
+        return;
+    }
+    // The per-dispatch path, one instance at a time (GOW3_DISPATCH_RUN_VERIFY: compared).
+    RunCount(stats.replays[replay == NumRunReplays ? ReplayVerify : replay]);
+    const bool compare = verify && planned;
+    if (compare) {
+        run_verify_writes.clear();
+        plan.captured.fill(false);
+    }
+    // Instance k's registers: the first instance's with its own user data (stage A compared
+    // the rest of the image when it joined the run).
+    AmdGpu::ComputeProgram program;
+    std::memcpy(&program, &CsRegs(), sizeof(program));
+    const auto* run_cs = stage_cs;
+    for (u32 k = 0; k < count; ++k) {
+        install(runs[k]);
+        std::memcpy(program.user_data.data(), runs[k].ud, sizeof(program.user_data));
+        stage_cs = &program;
+        run_verify_index = compare ? k : ~0u;
+        DispatchRecord(pipeline);
+        run_verify_index = ~0u;
+        if (constant_ring) {
+            constant_ring->Stamp(runs[k].ring_end);
+        }
+        run_tasks(runs[k], false);
+    }
+    run_verify_index = ~0u;
+    stage_cs = run_cs;
+    if (compare) {
+        // The old path's GPU-written bytes (its acquisitions) are exactly the spans' bytes.
+        auto& written = run_verify_writes;
+        std::ranges::sort(written);
+        u32 merged = 0;
+        bool same = true;
+        for (size_t i = 0; i < written.size() && same;) {
+            VAddr lo = written[i].first, hi = lo + written[i].second;
+            for (++i; i < written.size() && written[i].first <= hi; ++i) {
+                hi = std::max<VAddr>(hi, written[i].first + written[i].second);
+            }
+            same = merged < plan.num_spans && plan.spans[merged].address == lo &&
+                   plan.spans[merged].size == hi - lo;
+            ++merged;
+        }
+        if (!same || merged != plan.num_spans) {
+            RunCount(stats.bad_written);
+        }
+        // What the batch would bind, from the plan and the old path's own placement of each
+        // span's first byte (the batch takes every view of a span from one acquisition at that
+        // offset): descriptors, push data, and the tracked ranges inside the span's.
+        std::array<u32, RunPlan::MaxSpans> first_of{};
+        for (u32 k = 0; k < count; ++k) {
+            if (plan.writes[k].views[0].address == plan.spans[plan.span_of[k]].address) {
+                first_of[plan.span_of[k]] = k;
+            }
+        }
+        u64 bad_descriptors = 0, bad_push = 0, bad_tracking = 0;
+        for (u32 k = 0; k < count; ++k) {
+            const u32 s = plan.span_of[k], f = first_of[s];
+            const auto& span = plan.spans[s];
+            if (!plan.captured[k] || !plan.captured[f] || !plan.replayed_tracked_count[f]) {
+                ++bad_descriptors;
+                continue;
+            }
+            bool descriptors = true;
+            for (const u32 b : {0u, 1u, 2u, 3u, 4u, 5u, 9u}) {
+                descriptors &= plan.replayed[b][k] == plan.infos[b][k];
+            }
+            const auto& base_info = plan.replayed[6][f];
+            const u64 base = base_info.offset + plan.replayed_push[f].buf_offsets[6];
+            auto push = plan.push[k];
+            for (u32 v = 0; v < 3; ++v) {
+                const auto& view = plan.writes[k].views[v];
+                const u64 bound = base + (view.address - span.address);
+                const u64 aligned = Common::AlignDown(bound, alignment);
+                push.AddOffset(6 + v, static_cast<u32>(bound - aligned));
+                descriptors &= plan.replayed[6 + v][k] ==
+                               vk::DescriptorBufferInfo{base_info.buffer, aligned,
+                                                        view.size + (bound - aligned)};
+            }
+            bad_descriptors += !descriptors;
+            bad_push += std::memcmp(&push, &plan.replayed_push[k], sizeof(push)) != 0;
+            const auto* buffer = plan.replayed_tracked[f][0].buffer;
+            const u64 lo = base + (span.track_address - span.address), hi = lo + span.track_size;
+            bool tracking = true;
+            for (u32 t = 0; t < plan.replayed_tracked_count[k]; ++t) {
+                const auto& range = plan.replayed_tracked[k][t];
+                tracking &= range.buffer == buffer && range.offset >= lo && range.offset + range.size <= hi;
+            }
+            bad_tracking += !tracking;
+        }
+        RunCount(stats.bad_descriptors, bad_descriptors);
+        RunCount(stats.bad_push, bad_push);
+        RunCount(stats.bad_tracking, bad_tracking);
+        RunCount(stats.verified, count);
+    }
+}
+
+void Rasterizer::VerifyRunInstance() {
+    // GOW3_DISPATCH_RUN_VERIFY: what the old path binds for instance k, compared with the batch
+    // plan once the run is replayed (DispatchRunRecord).
+    const u32 k = run_verify_index;
+    auto& plan = *run_plan;
+    bool captured = set_writes.size() == RunPlan::Bindings - 1;
+    for (u32 b = 0; captured && b < RunPlan::Bindings - 1; ++b) {
+        const auto* bound = set_writes[b].pBufferInfo;
+        captured = bound && set_writes[b].dstBinding == b;
+        if (captured) {
+            plan.replayed[b][k] = *bound;
+        }
+    }
+    plan.replayed_push[k] = push_data;
+    u8 written = 0;
+    for (const auto& bound : bound_buffers) {
+        if (bound.is_written) {
+            if (written == plan.replayed_tracked[k].size()) {
+                captured = false;
+                break;
+            }
+            plan.replayed_tracked[k][written++] = {bound.buffer, bound.offset, bound.size};
+        }
+    }
+    plan.replayed_tracked_count[k] = written;
+    plan.captured[k] = captured;
+}
+
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     RENDERER_TRACE;
+    CutDispatchRun(CutIndirect);
     DispatchStatsScope stats;
     // gow3: handed to the recording thread like direct dispatches.
     const bool pipelined = UseDrawPipe() && !Gow3Toggle::Disabled(Gow3Toggle::PipelinedIndirectDraws);
@@ -5970,6 +7492,22 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                              Shader::PushData& push_data, u32& write_index) {
     const u64 alignment = instance.StorageMinAlignment();
     const bool compute_stage = stage.hw_stage == Shader::HwStage::Compute;
+    // 23 Oct profile (prof_st1): ObtainBuffer is 15.4% of stage B, GpuRangesAdd 4.7%.
+    // The crowd kernel writes position/normal/tangent through overlapping views of one output
+    // allocation (+0/+12/+20). Acquire/synchronize their exact contiguous union once, not three
+    // times. This memo lasts ONE dispatch: no cached residency, content or lifetime assumptions.
+    struct WriteGroup {
+        const VideoCore::Buffer* buffer = nullptr;
+        VAddr address = 0;
+        u64 size = 0, offset = 0;
+    } write_group;
+    static const bool batch_writes = [] {
+        const char* env = std::getenv("GOW3_SKINNING_WRITE_BATCH");
+        return env && env[0] == '1';
+    }();
+    const bool coalesce = batch_writes && compute_stage && stage.pgm_hash == 0x8f067540 &&
+                          !Gow3Toggle::Disabled2(Gow3Toggle::CoalescedSkinningWrites);
+    static u64 write_groups = 0, write_group_refused = 0, write_group_bytes = 0;
     ClothTrace(stage.pgm_hash, ~0u, 0, 0, false, compute_stage);
     for (u32 buffer_index = 0; buffer_index < stage.buffers.size(); ++buffer_index) {
         const auto& desc = stage.buffers[buffer_index];
@@ -6013,25 +7551,30 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             }
         }
         if (ring) {
+            const bool persistent = (ring->offset & StaticMeshOffsetFlag) != 0;
+            const u64 offset = ring->offset & ~StaticMeshOffsetFlag;
+            const u8* snapshot = persistent ? static_mesh_buffer->mapped_data.data() + offset
+                                            : constant_ring->Data(offset);
             // Uncharted 2's camera in the vertex user data: with multithreaded rendering the flat
             // user data reaches this stage as a ring copy made at stage A (the stage's own copy
             // may already hold a later draw's), so the camera is read from the ring.
             if (desc.buffer_type == Shader::BufferType::Flatbuf && flat_camera_depth &&
                 stage.sw_stage == Shader::SwStage::Vertex &&
                 camera_motion->OnFlatConstants(
-                    reinterpret_cast<const u32*>(constant_ring->Data(ring->offset)),
+                    reinterpret_cast<const u32*>(snapshot),
                     ring->size / sizeof(u32), flat_camera_depth)) {
                 flat_camera_depth = {};
             }
             // Copied by the GPU command thread into the constant ring (read-only).
             if (FrameCapture::Active() && memory->IsValidGpuMapping(ring->address, 0)) {
                 FrameCapture::Buffer(stage.pgm_hash, buffer_index, ring->address,
-                                     reinterpret_cast<const void*>(ring->address), ring->size);
+                                      snapshot, ring->size);
             }
             if (!desc.IsSpecial()) {
                 if (compute_stage && DispatchTraceCapturing()) [[unlikely]] {
                     DispatchTraceBind(buffer_index, desc, AmdGpu::Buffer{}, ring->address, ring->size,
-                                      "constant-ring-copy", nullptr, 0, ring->offset);
+                                       persistent ? "static-mesh-snapshot" : "constant-ring-copy",
+                                       nullptr, 0, offset);
                 }
                 if (ring->size == 864 && gbuffer_draw &&
                     memory->IsValidGpuMapping(ring->address, 0)) {
@@ -6039,7 +7582,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 }
                 push_data.AddOffset(binding.buffer, 0);
             }
-            buffer_infos.emplace_back(constant_ring->Handle(), ring->offset, ring->size);
+            buffer_infos.emplace_back(persistent ? static_mesh_buffer->Handle() : constant_ring->Handle(),
+                                      offset, ring->size);
         } else if (desc.IsSpecial()) {
             if (desc.buffer_type == Shader::BufferType::GdsBuffer) {
                 const auto* gds_buf = buffer_cache.GetGdsBuffer();
@@ -6215,8 +7759,66 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                             vsharp.num_records != 0 && !vsharp.swizzle_enable
                         ? u64(vsharp.num_records - 1) * vsharp.stride + desc.access_extent
                         : 0;
-                const auto [buffer, offset] = buffer_cache.ObtainBuffer(
-                    vsharp.base_address, size, desc.is_written, desc.is_formatted);
+                if (coalesce && buffer_index == 6 && stage.buffers.size() >= 9 &&
+                    desc.is_written && size == vsharp.GetSize() && size) {
+                    std::array<SkinningWriteView, 3> views{};
+                    views[0] = {vsharp.base_address, size};
+                    bool eligible = true;
+                    for (u32 slot = 7; slot <= 8; ++slot) {
+                        const auto& other = stage.buffers[slot];
+                        if (other.IsSpecial() || !other.is_written) {
+                            eligible = false;
+                            break;
+                        }
+                        const auto sharp = prepared ? prepared->buffer_sharps[slot]
+                                                    : other.GetSharp(stage);
+                        if (!sharp) {
+                            eligible = false;
+                            break;
+                        }
+                        views[slot - 6] = {sharp.base_address, sharp.GetSize()};
+                    }
+                    const u64 bytes = SkinningWriteUnion(views);
+                    eligible = eligible && bytes &&
+                               memory->ClampRangeSize(vsharp.base_address, bytes) == bytes;
+                    if (eligible) {
+                        // All descriptors here remain storage buffers. SynchronizeMemory's
+                        // is_texel_buffer path is only taken for !is_written, so formatted
+                        // stores have exactly the same acquisition semantics as raw stores.
+                        const auto [buffer, offset] =
+                            buffer_cache.ObtainBuffer(vsharp.base_address, bytes, true, false);
+                        write_group = {buffer, vsharp.base_address, bytes, offset};
+                        ++write_groups;
+                        write_group_bytes += bytes;
+                    } else {
+                        ++write_group_refused;
+                    }
+                    if (((write_groups + write_group_refused) & 4095) == 0) {
+                        static auto report = std::chrono::steady_clock::now();
+                        if (const auto now = std::chrono::steady_clock::now();
+                            now - report >= std::chrono::seconds{5}) {
+                            report = now;
+                            std::printf("Skinning write groups (5 s): %llu groups, %llu refused, "
+                                        "%llu acquisitions saved, %.1f MB union bytes\n",
+                                        write_groups, write_group_refused, write_groups * 2,
+                                        write_group_bytes / 1e6);
+                            write_groups = write_group_refused = write_group_bytes = 0;
+                        }
+                    }
+                }
+                const bool grouped = write_group.buffer && desc.is_written &&
+                                     buffer_index >= 6 && buffer_index <= 8 &&
+                                     vsharp.base_address >= write_group.address &&
+                                     size <= write_group.size &&
+                                     vsharp.base_address - write_group.address <= write_group.size - size;
+                const auto [buffer, offset] = grouped
+                    ? std::pair{write_group.buffer,
+                                write_group.offset + vsharp.base_address - write_group.address}
+                    : buffer_cache.ObtainBuffer(vsharp.base_address, size, desc.is_written,
+                                                desc.is_formatted);
+                if (run_verify_index != ~0u && desc.is_written) [[unlikely]] {
+                    run_verify_writes.emplace_back(vsharp.base_address, size);
+                }
                 if (compute_stage && DispatchTraceCapturing()) [[unlikely]] {
                     DispatchTraceBind(buffer_index, desc, vsharp, vsharp.base_address, size,
                                       desc.is_written ? "gpu-written-buffer"
@@ -6245,20 +7847,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 // (~10 ms of GPU time a frame). Needs the tracker's gap merge (BarrierTracker::
                 // InsertRange): without those barriers its tree was never emptied (Uncharted 2's
                 // museum 79 -> 41 FPS); with it 79 -> 85. GOW3_EXACT_STRIDED_RANGES=0: whole ranges.
-                u64 tracked_size = size;
-                {
-                    static const bool exact = [] {
-                        const char* env = std::getenv("GOW3_EXACT_STRIDED_RANGES");
-                        return !(env && env[0] == '0');
-                    }();
-                    const u32 extent = desc.access_extent;
-                    if (exact && extent != 0 && extent != ~0u && vsharp.stride != 0 &&
-                        extent < vsharp.stride && vsharp.num_records != 0 &&
-                        !vsharp.swizzle_enable && !vsharp.add_tid_enable) {
-                        tracked_size = std::min<u64>(
-                            size, u64(vsharp.num_records - 1) * vsharp.stride + extent);
-                    }
-                }
+                // (TrackedBufferSize, shared with the dispatch runs since 24 Oct 2026.)
+                const u64 tracked_size = TrackedBufferSize(desc, vsharp, size);
                 // gow3 17 Oct 2026: static ranges from the arena (never GPU-written mesh data,
                 // ~10k binds a frame in Uncharted 3's crowds) are tracked in 64 KiB pieces: far
                 // fewer barrier tracker nodes; a wider read range only adds barriers.
@@ -6313,10 +7903,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     }
                     // Small writes (constants) and writes into windows where the CPU writes into
                     // GPU data (each such CPU write otherwise downloads with a full GPU wait).
-                    static const u64 readback_skip = [] {
-                        const char* env = std::getenv("GOW3_READBACK_SKIP");
-                        return env ? std::strtoull(env, nullptr, 16) : 0ULL;
-                    }();
+                    const u64 readback_skip = ReadbackSkipShader();
                     if (size <= 4096 && Gow3Stats::enabled) {
                         // gow3: a shader whose first 3 writes were printed is remembered lock-free
                         // (direct-mapped by hash; a collision only takes the lock again), so the
@@ -8050,6 +9637,186 @@ void Rasterizer::WaitDrawPipeForCapture() {
         }
         std::this_thread::yield();
     }
+}
+
+// gow3 23 Oct 2026 (U3 Cartagena street, 4K with FG; mode-1 async readbacks): guest read faults
+// on read-protected readback pages cost ~950 ms per 5 s across the game's threads, 40.6 real FPS
+// against 50.9 with the pages left readable (unsafe: stale reads). About 70% read only the CPU's
+// own bytes beside the GPU bytes (~1.3 ms each through the command thread, which then unwatches
+// the page); the rest read GPU bytes still on their way back, and the command thread waited ~10
+// ms for the GPU per fault, feeding it nothing meanwhile. Here the faulting thread does the first
+// alone and waits for the second itself (toggles GuestFalseSharing, GuestReadPrewait).
+int Rasterizer::GuestReadFault(VAddr addr) {
+    const bool open = !Gow3Toggle::Disabled2(Gow3Toggle::GuestFalseSharing);
+    const bool prewait = !Gow3Toggle::Disabled2(Gow3Toggle::GuestReadPrewait);
+    if (!open && !prewait && !Gow3Stats::fault_stats) {
+        return 0;
+    }
+    const auto read = buffer_cache.LookupWatchedRead(addr, 8);
+    if (read.owners == 0) {
+        return 0; // not a buffer readback's watch (or landed meanwhile): the usual path
+    }
+    const u64 tick = std::max(read.tick, read.strict_tick);
+    if (!tick) {
+        return open && buffer_cache.OpenFalseSharingPage(addr, read.owners) ? 1 : 0;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    if (prewait && tick < scheduler.CurrentTick()) {
+        scheduler.GetWorkSemaphore()->Wait(tick);
+    }
+    // A strict forwarded-copy guard can precede submission. Do NOT wait on that tick here:
+    // the normal fault command runs Scheduler::Wait, which flushes the open command buffer.
+    // GOW3_FAULT_STATS: how old the readback was when the guest read its GPU bytes (queued at the
+    // submission that holds the GPU work), and how long the guest then waited for the GPU.
+    if (Gow3Stats::fault_stats) {
+        static std::atomic<u64> count{0}, age_us{0}, wait_us{0}, wait_max_us{0};
+        static std::atomic<s64> last_s{0};
+        const auto now = std::chrono::steady_clock::now();
+        const auto us = [](auto d) {
+            return static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(d).count());
+        };
+        ++count;
+        age_us += us(start - read.queued);
+        const u64 waited = us(now - start);
+        wait_us += waited;
+        for (u64 m = wait_max_us.load(); waited > m && !wait_max_us.compare_exchange_weak(m, waited);) {
+        }
+        const s64 second =
+            std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+        if (s64 last = last_s.load(); second - last >= 5 && last_s.compare_exchange_strong(last, second)) {
+            const u64 n = count.exchange(0);
+            std::printf("Guest reads of GPU bytes on their way back (5 s): %llu, readback queued %.2f "
+                        "ms before on average, then waited %.2f ms on average (%.2f at most)\n",
+                        static_cast<unsigned long long>(n), n ? age_us.exchange(0) / 1e3 / n : 0.0,
+                        n ? wait_us.exchange(0) / 1e3 / n : 0.0, wait_max_us.exchange(0) / 1e3);
+            std::fflush(stdout);
+        }
+    }
+    return 2;
+}
+
+// gow3 23 Oct 2026 (U3 Cartagena street): after GuestReadFault the guest threads still waited
+// ~9.5 ms per read of GPU bytes, 74-108 per 5 s, all of them one memcpy in
+// PrepareInstanceForRendering (fg-draw-mgr.cpp, guest 0xe3c6e7): the instance's bone matrices
+// (written by the cloth solvers cs 1c957b01 / 809864d3) copied into the frame's skinning palette,
+// which the GPU's skinning reads. The GPU makes that copy instead, in stream order after the
+// solver; the palette's CPU view comes back with the submission's small-write readback.
+bool Rasterizer::ForwardGuestCopy(VAddr dst, VAddr src, u64 size) {
+    if (!size || size > 1_MB || src + size < src || dst + size < dst ||
+        ((src | dst | size) & 3) || (dst < src + size && src < dst + size) || IsGpuSideThread()) {
+        return false;
+    }
+    const VAddr first_page = Common::AlignDown(src, VAddr{4096});
+    bool watched = false;
+    for (VAddr page = first_page; page < src + size; page += 4096) {
+        if (page_manager.IsReadWatched(page)) {
+            watched = true;
+            break;
+        }
+    }
+    if (!watched) {
+        return false;
+    }
+    bool gpu_bytes = false;
+    for (VAddr page = first_page; page < src + size && !gpu_bytes; page += 4096) {
+        const VAddr lo = std::max(page, src);
+        const VAddr hi = std::min(page + 4096, src + size);
+        gpu_bytes = buffer_cache.LookupWatchedRead(lo, hi - lo).tick != 0;
+    }
+    // Only beside GPU bytes (false sharing): the plain copy opens the pages on this thread.
+    if (!gpu_bytes || !IsMapped(dst, size) ||
+        !IsMapped(src, size)) {
+        return false;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    bool done = false;
+    std::vector<u8> expected;
+    liverpool->SendFaultCommand(
+        [this, dst, src, size, &done, &expected] {
+            DrainDrawPipe();
+            // Landed meanwhile, or bytes the texture cache owns: the guest copies as usual.
+            if (!buffer_cache.IsRegionGpuModified(src, size) ||
+                texture_cache.FindImageFromRange(src, size) ||
+                texture_cache.FindImageFromRange(dst, size)) {
+                return;
+            }
+            // A diagnostic copy checks the destination's immediate CPU-consumer contract,
+            // including a false-sharing read first. Capture a known source BEFORE the GPU
+            // copy; only this sampled verifier deliberately waits/lands the source early.
+            static const bool verify = [] {
+                const char* env = std::getenv("GOW3_FORWARD_COPY_VERIFY");
+                return env && env[0] == '1';
+            }();
+            static u64 copies = 0;
+            if (verify && ((copies++ & 127) == 0)) {
+                const std::pair<VAddr, u64> source{src, size};
+                buffer_cache.DownloadRanges(std::span{&source, 1});
+                expected.resize(size);
+                if (!memory->TryReadBacking(src, expected.data(), size)) {
+                    memory->CopySparseMemory(src, expected.data(), size);
+                }
+            }
+            texture_cache.InvalidateMemoryFromGPU(dst, size);
+            const u32 bytes = static_cast<u32>(size);
+            const auto [src_buffer, src_offset] = buffer_cache.ObtainBuffer(src, bytes, false, true);
+            const auto [dst_buffer, dst_offset] = buffer_cache.ObtainBuffer(dst, bytes, true, true);
+            const vk::BufferCopy copy = {
+                .srcOffset = src_offset,
+                .dstOffset = dst_offset,
+                .size = size,
+            };
+            runtime.CopyBuffer(src_buffer, dst_buffer, std::span{&copy, 1});
+            // memcpy is not an asynchronous API: protect its destination BEFORE returning.
+            // The deferred prototype protects even before submission, without allowing a
+            // false-sharing read to open the page. A CPU consumer submits/lands it on demand;
+            // GPU-only consumers use the queued result without a per-copy submission/drain.
+            const std::pair<VAddr, u64> range{dst, size};
+            static const bool defer_requested = [] {
+                const char* env = std::getenv("GOW3_FORWARD_COPY_DEFER");
+                return env && env[0] == '1';
+            }();
+            const bool deferred = defer_requested &&
+                                  !Gow3Toggle::Disabled2(Gow3Toggle::ForwardCopyDefer);
+            buffer_cache.DownloadRangesAsync(std::span{&range, 1}, true, false, false, deferred);
+            VideoCore::NoteReadbackKind(dst, size, VideoCore::ReadbackCpWrite);
+            if (!deferred) {
+                Flush();
+                buffer_cache.PollReadbacksNow();
+            }
+            done = true;
+        },
+        "forward-copy");
+    if (done && !expected.empty()) {
+        if ((dst & 4095) && IsMapped(dst - 1, 1)) {
+            const volatile u8 neighbour = *reinterpret_cast<const volatile u8*>(dst - 1);
+            (void)neighbour;
+        }
+        std::vector<u8> actual(size);
+        std::memcpy(actual.data(), reinterpret_cast<const void*>(dst), size); // MUST fault/land if pending
+        const bool match = actual == expected;
+        std::printf("Forwarded copy guard verify: %s, %llu bytes at %#llx (immediate CPU read)\n",
+                    match ? "OK" : "MISMATCH", size, dst);
+        ASSERT_MSG(match, "forwarded memcpy exposed stale destination bytes");
+    }
+    if (Gow3Stats::fault_stats) {
+        static std::atomic<u64> forwarded{0}, declined{0}, bytes{0}, us{0};
+        static std::atomic<s64> last_s{0};
+        ++(done ? forwarded : declined);
+        bytes += done ? size : 0;
+        const auto now = std::chrono::steady_clock::now();
+        us += static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(now - start).count());
+        const s64 second =
+            std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+        if (s64 last = last_s.load(); second - last >= 5 && last_s.compare_exchange_strong(last, second)) {
+            const u64 n = forwarded.exchange(0), m = declined.exchange(0);
+            std::printf("Forwarded guest copies (5 s): %llu made by the GPU (%.1f KB), %llu left to the "
+                        "guest; %.2f ms on average for the command thread\n",
+                        static_cast<unsigned long long>(n), bytes.exchange(0) / 1024.0,
+                        static_cast<unsigned long long>(m), n + m ? us.exchange(0) / 1e3 / (n + m) : 0.0);
+            std::fflush(stdout);
+        }
+    }
+    return done;
 }
 
 bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {

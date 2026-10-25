@@ -13,6 +13,7 @@
 #include <vector>
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
+#include "common/unique_function.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_bind_helper.h"
@@ -125,8 +126,13 @@ public:
     /// Returns true when the task was handed to the recording thread (not run yet).
     /// `writes_noted`: the caller passes the memory the task writes to NoteRingWrite (or
     /// NotePendingGpuWrite), so constant ring copies elsewhere stay reusable.
+    /// `after_run` (gow3 24 Oct 2026, a fence write no later dispatch reads): with a dispatch
+    /// run open the task joins it, after the dispatch before it (Gow3Toggle::DispatchRuns).
     bool RunInOrder(OrderedTask task, const void* data, u32 size,
-                    u64 toggle = Gow3Toggle::PipelinedTasks, bool writes_noted = false);
+                    u64 toggle = Gow3Toggle::PipelinedTasks, bool writes_noted = false,
+                    bool after_run = false);
+    bool CommandsInOrder() const;
+    void RunCommandInOrder(Common::UniqueFunction<void>&& command);
     /// Stage A: GPU work queued for the recording thread writes [address, address + size):
     /// constant ring copies of those bytes are not reused (NotePendingGpuWrite does this too).
     void NoteRingWrite(VAddr address, u64 size);
@@ -143,9 +149,47 @@ public:
     [[nodiscard]] bool DrawPipeReached(u64 position) const {
         return !draw_pipe || draw_pipe->Reached(position);
     }
-    /// Stage A: no draws waiting for the recording thread.
+    /// Stage A: no draws waiting for the recording thread (an open dispatch run counts).
     [[nodiscard]] bool DrawPipeIdle() const {
-        return !draw_pipe || draw_pipe->Idle();
+        return (!draw_pipe || draw_pipe->Idle()) && !dispatch_run.count;
+    }
+    /// gow3 24 Oct 2026 (Gow3Toggle::DispatchRuns): why stage A handed its open run of crowd
+    /// dispatches to stage B (statistics). The run goes first, then whatever cut it.
+    enum RunCut : u32 {
+        CutPacket,     ///< another packet (draw, other dispatch)
+        CutTask,       ///< an in-order task
+        CutDrain,      ///< a draw pipe drain
+        CutIndirect,   ///< an indirect dispatch
+        CutOpcode,     ///< a PM4 packet other than a no-op, user data or a direct dispatch
+        CutQueueEnd,   ///< a command buffer ended
+        CutYield,      ///< the command thread switches queues
+        CutCommand,    ///< a queued command runs
+        CutSubmission, ///< end of a submission
+        CutFull,       ///< 64 instances
+        CutJoin,       ///< another pipeline, queue or program registers
+        CutRefused,    ///< an instance that cannot be batched
+        NumRunCuts,
+    };
+    /// gow3 24 Oct 2026 (Gow3Toggle::RunReleaseBatch): set by Liverpool. `task` is the compute
+    /// release task (`size` bytes of data); `stage` does a release's stage B part per label and
+    /// mixes it into `hash` (false: run the task itself); `signal` queues one host-copy signal
+    /// for the staged releases' bytes (taken out of `batch`), `hash` for verify mode.
+    struct ReleaseBatchHooks {
+        OrderedTask task;
+        bool (*stage)(Rasterizer&, const u8* data, u64& hash);
+        void (*signal)(Rasterizer&, std::vector<u8>& batch, u64 hash);
+        u32 size;
+    };
+    static inline ReleaseBatchHooks release_hooks{nullptr, nullptr, nullptr, 0};
+    /// GOW3_RUN_RELEASE_VERIFY=1: each batch's signal checks its writes and IRQs (any thread).
+    static bool RunReleaseVerify();
+    static void NoteReleaseVerify(u64 fences, bool mismatch);
+    /// Stage A: the open run (if any) is handed to stage B first. `detail`: for CutOpcode the
+    /// PM4 opcode (and SET_SH_REG's register << 8), for the statistics.
+    void CutDispatchRun(u32 reason, u32 detail = 0) {
+        if (dispatch_run.count) {
+            FlushDispatchRun(reason, detail);
+        }
     }
     /// Stage A, end of a submission: its prepared draws stay alive until the recording thread
     /// has recorded them (instead of a drain).
@@ -191,6 +235,13 @@ public:
     /// gow3: a guest instruction keeps faulting on one page (see BufferCache::ReleaseStuckPage).
     void ReleaseStuckPage(VAddr page, bool is_write, bool assume_locks);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
+    /// gow3 23 Oct 2026: a guest thread's read fault at `addr`, before ReadMemory: 1 when it was
+    /// a false-sharing read made possible here (handled); 2 when it read GPU bytes and waited
+    /// for their submission here (ReadMemory then lands them without a GPU wait); 0 otherwise.
+    int GuestReadFault(VAddr addr);
+    /// gow3 23 Oct 2026 (guest thread, guest memcpy): true when the GPU made the copy because its
+    /// source holds GPU bytes still on their way back (toggle ForwardedCopies).
+    bool ForwardGuestCopy(VAddr dst, VAddr src, u64 size);
     /// gow3: after a fault: lands a buffer readback that still read-protects the page of `addr`.
     void LandWatchedReadback(VAddr addr, bool assume_locks);
     void WaitDrawPipeForCapture();
@@ -645,6 +696,16 @@ private:
     /// the scheduler's RecordSerial() right after its dispatch.
     vk::Pipeline bound_compute_pipeline{};
     u64 bound_compute_serial = ~u64{0};
+    bool AppendSkinningBatch(const ComputePipeline* pipeline);
+    void FlushSkinningBatch();
+    struct SkinningBatch {
+        const ComputePipeline* pipeline = nullptr;
+        u32 count = 0, dim_x = 0, bindings = 0;
+        Shader::PushData first_push;
+        std::array<std::array<vk::DescriptorBufferInfo, ComputePipeline::BatchCapacity>,
+                   Shader::NUM_BUFFERS + 1> buffers;
+    } skinning_batch;
+    u64 fused_dispatches = 0, fused_batches = 0, fused_singles = 0;
     // gow3: two-stage draw pipeline (stage B state; the thread is the last member so it
     // stops first).
     static inline thread_local const AmdGpu::Regs* stage_regs = nullptr;
@@ -694,15 +755,42 @@ private:
     struct RingWatchPage {
         bool watched;
         u8 faults; ///< CPU writes that dropped its watch; RingWatchMaxFaults: never again
+        u64 version; ///< unique promotion serial; a re-watched/re-mapped page gets a new one
     };
     std::mutex ring_watch_mutex;
     std::unordered_map<VAddr, RingWatchPage> ring_watch_pages;
     std::atomic<u64> ring_watch_gen{0};
+    u64 ring_watch_version = 0; ///< under ring_watch_mutex, never reused after an unmap
     /// `probe` (GOW3_STAGEA_VERIFY): changes nothing; 0 when a page would need a new watch.
     u64 RingWatchToken(VAddr address, u64 size, bool probe = false);
     void RingUnwatch(VAddr address, u64 size, bool written);
+    u64 StaticMeshWatchVersion(VAddr address, u64 size);
+    bool TryStaticMeshSnapshot(u32 index, VAddr address, u64 size,
+                              boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out);
+    // Append-only: invalidating a lookup NEVER overwrites an earlier packet's snapshot.
+    // Bounded to 64 MiB; exhausted or untracked inputs fall back to the constant ring.
+    static constexpr u64 StaticMeshCapacity = 64ull << 20;
+    static constexpr u64 StaticMeshOffsetFlag = 1ull << 63;
+    struct StaticMeshCopy {
+        VAddr address;
+        u64 size;
+        u64 offset;
+        u64 version;
+        u64 observed_gen;
+    };
+    std::unique_ptr<VideoCore::Buffer> static_mesh_buffer;
+    std::unordered_map<u64, StaticMeshCopy> static_mesh_copies;
+    u64 static_mesh_position = 0;
+    u64 static_mesh_hits = 0, static_mesh_uploads = 0, static_mesh_full = 0;
+    u64 static_mesh_rechecks = 0, static_mesh_checks = 0, static_mesh_mismatches = 0;
     static constexpr u32 RingCopyBits = 12;
     std::array<RingCopy, 1u << RingCopyBits> ring_copies{};
+    // 23 Oct 2026 profile: CollectRingBindings is 31.6% of stage A, including 13% copying.
+    // Heap storage avoids enlarging the rasterizer's stack allocation. Four candidates preserve
+    // collision victims without changing the snapshot's validity or ring-allocation lifetime.
+    static constexpr u32 RingSetBits = 14;
+    using RingSet = std::array<RingCopy, 4>;
+    std::unique_ptr<RingSet[]> ring_copy_sets{new RingSet[1u << RingSetBits]{}};
     u64 ring_epoch = 1;
     VAddr ring_epoch_min = ~VAddr{0}, ring_epoch_max = 0; ///< bounds of this epoch's copies
     u64 ring_reused_bytes = 0, ring_reuse_checks = 0, ring_reuse_mismatches = 0;
@@ -768,6 +856,9 @@ private:
     bool sampler_graphics = false; ///< this BindResources call is a graphics draw's
     bool scene_debug_frame = false; ///< GOW3_SCENE_DEBUG: this frame's passes are printed
     bool PendingWriteOverlaps(VAddr address, u64 size);
+    /// Stage A: drops pending_writes stage B has done (only with no uncommitted entry); returns
+    /// how many.
+    u32 PrunePendingWrites();
     void PrunePendingLabels();
     /// gow3 21 Oct 2026: stage A waits until stage B has run the packets that write the range
     /// (`writes`; not the whole pipe: the work queued after them keeps stage B busy meanwhile).
@@ -802,6 +893,56 @@ private:
     u64 ring_seen_flush = ~0ULL;
     /// Submissions (prepared draws) kept alive until stage B reaches the position.
     std::deque<std::pair<u64, std::shared_ptr<const void>>> pipe_keepalive;
+    /// gow3 24 Oct 2026 (Gow3Toggle::DispatchRuns, GOW3_DISPATCH_RUNS=1): consecutive cs
+    /// 8f067540 dispatches staged by stage A, handed to stage B as one packet of up to 64.
+    static constexpr u32 RunMaxFlat = 256; ///< flattened user data dwords of one instance
+    /// An in-order task after an instance (a compute RELEASE_MEM): run by stage B after the
+    /// dispatches before it are recorded.
+    struct RunTask {
+        OrderedTask task;
+        u32 size;
+        std::array<u8, 64> data;
+    };
+    struct RunInstance {
+        AmdGpu::UserData ud;
+        std::array<u32, RunMaxFlat> flat;
+        boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS> rings;
+        u64 ring_end; ///< constant ring position after its copies
+        u32 num_tasks;
+        /// runv4 (24 Oct 2026): with 2, ~16k runs per 5 s ended at a third release.
+        std::array<RunTask, 4> tasks;
+    };
+    struct DispatchRun {
+        u32 count = 0;
+        u64 generation = 0;  ///< flushes so far (one inside an instance's staging moves it)
+        u32 uncommitted = 0; ///< uncommitted_indices entries of the staged instances
+        u32 labels = 0;      ///< pending_labels entries of the staged tasks
+        const ComputePipeline* pipeline = nullptr;
+        const AmdGpu::ComputeProgram* queue = nullptr; ///< the queue's compute registers
+        AmdGpu::ComputeProgram cs{}; ///< the first instance's (all equal but the user data)
+        std::array<AmdGpu::CbDbExtent, AmdGpu::NUM_COLOR_BUFFERS> cb_extent{};
+        AmdGpu::CbDbExtent db_extent{};
+        VAddr pgm_base = 0;
+        u32 ud_size = 0, flat_size = 0; ///< the stage's user data and flattened user data dwords
+        std::unique_ptr<RunInstance[]> instances; ///< capacity + 1: the one being staged
+    } dispatch_run;
+    /// Stage A: true when the dispatch joined a run or went out as a packet of its own.
+    bool StageDispatchRun(const ComputePipeline* pipeline, const AmdGpu::Buffer* sharps);
+    void FlushDispatchRun(u32 reason, u32 detail = 0);
+    void EmitRunPacket(const RunInstance* instances, u32 count);
+    /// Stage A: the first `head` uncommitted writes are the packet just committed.
+    void ResolveRunWrites(u32 head);
+    /// Stage B: a DispatchRun packet; its first instance is installed as for a dispatch,
+    /// `tail` up to `end` holds the others.
+    void DispatchRunRecord(const ComputePipeline* pipeline, const u8* tail, const u8* end);
+    struct RunPlan;
+    std::unique_ptr<RunPlan> run_plan; ///< stage B scratch
+    std::vector<u8> release_batch; ///< stage B: staged release bytes (ReleaseBatchHooks)
+    u64 release_batch_hash = 0;
+    /// Stage B, GOW3_DISPATCH_RUN_VERIFY=1: the replayed instance DispatchRecord compares.
+    u32 run_verify_index = ~0u;
+    std::vector<std::pair<VAddr, u64>> run_verify_writes; ///< its GPU-written views
+    void VerifyRunInstance();
     std::unique_ptr<DrawPipe> draw_pipe;
 };
 

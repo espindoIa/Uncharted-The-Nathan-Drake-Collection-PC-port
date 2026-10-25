@@ -82,6 +82,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         (key == "mouse" ? v.mouse : key == "mouse_invert" ? v.mouse_invert : v.mouse_invert_x) = i != 0;
         return;
     }
+    if (key == "vibration") {
+        v.vibration = i != 0;
+        return;
+    }
     if (key == "mouse_aim_sens" || key == "mouse_vertical") {
         (key == "mouse_aim_sens" ? v.mouse_aim_sens : v.mouse_vertical) =
             f > 0.0f ? Clamp(f, 0.1f, 10.0f) : 1.0f;
@@ -172,6 +176,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.anisotropy = value.empty() ? 16 : i >= 16 ? 16 : i >= 8 ? 8 : i >= 4 ? 4 : i >= 2 ? 2 : 0;
     } else if (key == "frames_queued") {
         v.frames_queued = Gow3Graphics::ParseFramesQueued(value.empty() ? -1 : i);
+    } else if (key == "reflex") {
+        v.reflex = std::clamp(i, 0, 2);
+    } else if (key == "frame_gen") {
+        v.frame_gen = std::clamp(i, 0, 1);
     } else if (key == "render_resolution") {
         v.render_resolution = Gow3Graphics::ParseResolution(value);
     } else if (key == "engine_fps") {
@@ -283,11 +291,12 @@ void Load() {
         {"GOW3_STALE_READBACK", "stale_readback"},     {"GOW3_FSR1", "fsr1"},
         {"GOW3_RCAS", "rcas"},                        {"GOW3_FRAMES_AHEAD", "frames_queued"},
         {"GOW3_DLSS_MODEL", "dlss_model"},            {"GOW3_ANISOTROPY", "anisotropy"},
+        {"GOW3_REFLEX", "reflex"},                    {"GOW3_FRAME_GEN", "frame_gen"},
         {"GOW3_PAD_MAP", "pad_map"},                  {"GOW3_KEY_MAP", "key_map"},
         {"GOW3_MOUSE_MAP", "mouse_map"},              {"GOW3_MOUSE", "mouse"},
         {"GOW3_MOUSE_SENS", "mouse_sens"},            {"GOW3_MOUSE_INVERT", "mouse_invert"},
         {"GOW3_MOUSE_AIM_SENS", "mouse_aim_sens"},    {"GOW3_MOUSE_VERTICAL", "mouse_vertical"},
-        {"GOW3_MOUSE_INVERT_X", "mouse_invert_x"},
+        {"GOW3_MOUSE_INVERT_X", "mouse_invert_x"},    {"GOW3_VIBRATION", "vibration"},
         {"GOW3_PROMPTS", "prompts"},                  {"GOW3_STICK_SPEED", "stick_speed"},
     };
     for (const auto& [env, key] : env_keys) {
@@ -355,6 +364,14 @@ void ConfigureDlssSupport(bool available, const char* problem) {
         v.upscaler = UpscalerFsr3;
         SyncUpscalerFallback();
     }
+}
+
+void ConfigureFrameGenSupport(bool available, const char* problem) {
+    auto& v = Get();
+    static std::string kept;
+    kept = problem ? problem : "";
+    v.frame_gen_problem = available || kept.empty() ? nullptr : kept.c_str();
+    v.frame_gen_supported = available;
 }
 
 bool FixedRenderSession() {
@@ -453,6 +470,7 @@ KeyValues Current() {
                  int(v.fsr1.load()), int(v.rcas.load()), v.rcas_strength.load(), v.frames_queued.load(),
                  int(v.deferred_readback.load()), int(v.stale_readback.load()),
                  int(v.restart_unconfirmed.load()));
+    Append(text, "reflex=%d\nframe_gen=%d\n", v.reflex.load(), v.frame_gen.load());
     // Read by run.sh at start.
     Append(text, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
                                                   : v.live_resolution ? "1" : "0");
@@ -463,8 +481,9 @@ KeyValues Current() {
     Append(text, "mouse=%d\nmouse_sens=%.2f\nmouse_invert=%d\nprompts=%s\nstick_speed=%.2f\n",
            int(v.mouse.load()), v.mouse_sens.load(), int(v.mouse_invert.load()), PromptsName(v.prompts),
            v.stick_speed.load());
-    Append(text, "mouse_aim_sens=%.2f\nmouse_vertical=%.2f\nmouse_invert_x=%d\n", v.mouse_aim_sens.load(),
-           v.mouse_vertical.load(), int(v.mouse_invert_x.load()));
+    Append(text, "mouse_aim_sens=%.2f\nmouse_vertical=%.2f\nmouse_invert_x=%d\nvibration=%d\n",
+           v.mouse_aim_sens.load(), v.mouse_vertical.load(), int(v.mouse_invert_x.load()),
+           int(v.vibration.load()));
     {
         std::scoped_lock lock{ControlsMutex()};
         text += "pad_map=" + v.pad_map + "\nkey_map=" + v.key_map + "\nmouse_map=" + v.mouse_map + "\n";
@@ -597,6 +616,10 @@ extern "C" float gow3gpu_controls_mouse_vertical(void) {
 
 extern "C" int gow3gpu_controls_mouse_invert_x(void) {
     return Gow3Settings::Get().mouse_invert_x ? 1 : 0;
+}
+
+extern "C" int gow3gpu_controls_vibration(void) {
+    return Gow3Settings::Get().vibration ? 1 : 0;
 }
 
 extern "C" float gow3gpu_controls_stick_speed(void) {

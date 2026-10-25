@@ -96,6 +96,9 @@ Theme: the frame-rate targets in "What 1.0 means".
   six job threads.
 - **Drake's Fortune at native 4K** (it renders at most 2880x1620 now because of its memory
   layout). Only if a safe memory placement is found; otherwise it stays a known limit.
+- **Reflex and Frame Generation (22 Oct, in the fork):** both exist and are off by default. Reflex costs
+  11-19% FPS at 4K (early submit won back 2-3 FPS) and does nothing at 1080p; Frame Generation 2x
+  roughly doubles the frames shown. Open: Reflex input delay with early submit, G-SYNC screens.
 - **Launcher defaults per GPU class:** at 4K, DLAA with DLSS model M costs 7.8 ms a frame and
   model K 2.2 ms. Pick the preset defaults from those measurements.
 

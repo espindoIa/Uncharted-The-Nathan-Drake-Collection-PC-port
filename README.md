@@ -61,7 +61,7 @@ plan and test list: [analysis/PLAN.md](analysis/PLAN.md).
   Every preset queues 1 frame. 2 frames queued is faster in heavy scenes, but GPU results
   reach the game a frame later: keep it at 1.
 
-  **Low-end PCs and laptops:** keep **Idle game threads** (launcher, **Performance** tab) on
+  **Low-end PCs and laptops:** keep **Idle game threads** (launcher, **Performance** section) on
   **Sleep** (the default). With **Spin** the games' six job threads keep their cores busy while
   they wait for work, as on the PS4 where each has its own core; on a 4-6 core CPU that took
   nearly all of it (a 4-core test: 19-27 FPS on the title screen, 60 with Sleep). Keep
@@ -80,16 +80,33 @@ plan and test list: [analysis/PLAN.md](analysis/PLAN.md).
   offered; with VSync a limit at or above the monitor's refresh rate follows the monitor; cutscene
   movies keep their speed at any frame rate); frames queued; background shader compilation;
   multithreaded rendering (on by default); idle game threads (sleep or spin).
+- **NVIDIA Reflex** (off by default, NVIDIA cards): lower input delay, but 11-19% less FPS at 4K
+  (about 2-3 FPS of that is recovered by early submit); no effect at 1080p.
+- **DLSS Frame Generation 2x** (off by default, RTX 40 or newer): needs `nvngx_dlssg.dll`, added in
+  the launcher (Display); the limit counts shown frames (144-240).
 - **Keyboard and mouse:** mouse look (sensitivity, invert Y), right mouse aim, left mouse fire, WASD,
-  and every action remappable per game in the **Controls** tab (two bindings per action, keys or
+  and every action remappable per game in the **Controls** section (two bindings per action, keys or
   mouse buttons). Controllers (DualSense, DualShock 4, Xbox) work at the same time.
-- **Language** (Advanced tab): any of the 22 languages the games have text for; each game's main
+- **Language** (System section): any of the 22 languages the games have text for; each game's main
   menu then offers it next to English (Square). Voices: the languages in your copy of the game.
-- **Unlock all chapters** (Advanced tab, off by default): every chapter and the Brutal difficulty
+- **Unlock all chapters** (System section, off by default): every chapter and the Brutal difficulty
   from the start in all three games; saves are untouched.
 - **Game update 1.02** is used automatically when it sits next to the game folder (see below).
 - Log and save folders, desktop shortcut, shader cache reset, game folder selection, links to the
   author's [YouTube](https://www.youtube.com/@BilalReloaded/videos) and GitHub.
+- The games and the settings sections sit in a **sidebar** on the left; the window fits a 1280x720
+  screen and **PLAY** always stays in view at the bottom right.
+- **Home** checks that you are ready to play: a "Ready to play" list above the presets checks the
+  game files, update 1.02, the NVIDIA DLSS / Frame Generation DLLs, the drive speed and launcher
+  updates, and every line that needs attention has the button to fix it.
+- Every setting shows a one-line hint; the full explanation is behind the round **?** next to its
+  name.
+- **Apply to all games** (Display and Performance): copies the graphics and performance settings
+  to the other two games, after asking.
+- Every control works from the **keyboard** (Tab, the arrow keys, Space/Enter; Ctrl+Enter plays)
+  or from a **controller** (D-pad or stick, A to press, B to go back, Start to play).
+- When a game stops with an error, the window offers **Open log folder** and **Copy report** (the
+  error, the game's version, your graphics card and the main settings, ready for a GitHub issue).
 
 **In game:** `Insert` or `LT + R3` opens the menu (display, anti-aliasing, draw distance, frame rate,
 overlay, controls). Both shortcuts can be changed in its Controls tab (any key; any one or two
@@ -111,7 +128,7 @@ controller buttons).
 - **Drake's Fortune:** the grenade launcher can kill the player (GitHub #6). Being looked at.
 - **Slower CPUs:** the PS4's GPU commands are processed on one CPU core (3,000-5,600 draws per frame
   in the heaviest scenes); on older CPUs those scenes can drop below 60 FPS.
-- **Multithreaded rendering is on by default** (Performance tab, per game): keep Frames queued at
+- **Multithreaded rendering is on by default** (Performance section, per game): keep Frames queued at
   1 with it. If a game hangs while loading, turn it off for that game. Drake's Fortune always runs
   without it (its guns flickered grey with it, GitHub #23). With "Frames queued 2" Uncharted 2 can
   still stop with the game assert `m_gfxEopTick`, so keep 1.
@@ -123,10 +140,10 @@ controller buttons).
 - **Frames queued 2** is faster in heavy scenes, but GPU results reach the game a frame later
   (Uncharted 2's NPCs float, Nate's feet sink into the floor): keep it at 1 (every preset does).
 - Drake's Fortune renders at most 2880x1620 (its memory layout) and upscales to 4K; turn on FSR 1.
-- Frame rates above 120 are not offered: the games' movement breaks (Drake's Fortune at 160 FPS
+- Frame rates above 120 are offered only with Frame Generation (real frames stay at half): the games' movement breaks (Drake's Fortune at 160 FPS
   dropped Nate through the world).
 - Uncharted 3 has had less play testing than the other two: please report crashes with the log
-  (launcher **Advanced -> Open log folder**, `boot.log`) on this fork's
+  (launcher **System -> FOLDERS -> Open log folder**, `boot.log`) on this fork's
   [Issues](../../issues/new/choose) page.
 
 ## Playing
@@ -139,7 +156,7 @@ controller buttons).
    `CUSA02320` (US) or `CUSA02344` (Europe) folder (the one holding `eboot.bin` and `sce_sys`, often called `uroot`).
 3. **Recommended: update 1.02** (Bluepoint's stability, movie, audio and gameplay fixes). Extract
    the update next to the game folder, named like it plus `-patch` (for example `CUSA02320-patch`,
-   with or without its `uroot` folder). The launcher's Advanced tab shows the version in use.
+   with or without its `uroot` folder). The launcher's Home checklist shows the version in use.
 4. Pick a game and a preset, press **PLAY**. The first start of each game prepares files and
    compiles shaders: expect a slow first load and some stutter until the cache has filled.
 
@@ -150,7 +167,7 @@ Intel), 16 GB RAM recommended, a 4-core CPU or better. Saves, logs and settings 
 **Updates** (from version 0.1.1): the launcher checks the releases when it starts and shows
 **UPDATE TO x.y.z** when there is a newer one. It downloads the package, checks its SHA-256 against
 the release, replaces the program files (saves, settings and the shader cache stay) and starts
-again; if anything fails, the installed version is put back. Advanced tab: turn the check off, or
+again; if anything fails, the installed version is put back. System section: turn the check off, or
 check now.
 
 ## Building

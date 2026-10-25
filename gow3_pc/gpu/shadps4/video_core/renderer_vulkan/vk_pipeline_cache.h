@@ -289,6 +289,7 @@ private:
     ComputePipelineKey compute_key{};
     /// gow3 22 Oct 2026: see ComputeSharps. RefreshComputeKey sets sharp_capture for GetProgram.
     std::array<AmdGpu::Buffer, Shader::NUM_BUFFERS> compute_sharps{};
+    Shader::StageSpecialization compute_spec_scratch;
     const Shader::Info* compute_sharps_info = nullptr;
     bool sharp_capture = false;
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start

@@ -31,6 +31,7 @@
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
+#include <chrono>
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -630,7 +631,17 @@ bool BufferCache::DiscardCpuWritePage(VAddr page) {
 void BufferCache::RunGuestCopy(const Gow3Copy::Item& item) {
     auto* cache = static_cast<BufferCache*>(item.context);
     auto* dst = reinterpret_cast<u8*>(item.destination);
-    cache->memory->CopySparseMemory(item.source, dst, item.size);
+    // Only CPU-owned upload pieces reach this helper (ObtainBuffer's clean stream path, or
+    // ForEachLazyUploadPiece excluding GPU-owned bytes). Read the same physical RAM through
+    // its backing view: a no-access neighbour in a forwarded-copy page must not fault on a
+    // copy worker while submission waits for that worker. GPU-owned inputs never use this path.
+    static const bool guarded_copies = [] {
+        const char* env = std::getenv("GOW3_FORWARD_COPY_DEFER");
+        return env && env[0] == '1';
+    }();
+    if (!guarded_copies || !cache->memory->TryReadBacking(item.source, dst, item.size)) {
+        cache->memory->CopySparseMemory(item.source, dst, item.size);
+    }
     auto* buffer = reinterpret_cast<Buffer*>(item.extra);
     buffer->Flush(dst - buffer->mapped_data.data(), item.size);
 }
@@ -679,7 +690,7 @@ void BufferCache::ReleaseStuckPage(VAddr page, bool is_write, bool assume_locks)
             if (!holders(newest)) {
                 outcome = "landed (polled)";
                 landed.fetch_add(1, std::memory_order_relaxed);
-            } else if (newest < scheduler.CurrentTick()) {
+            } else if (newest < scheduler.CurrentTick() || LookupWatchedRead(page, 4096).strict_tick) {
                 CompleteReadbacks(true, newest);
                 outcome = "landed (waited for the GPU)";
                 waited.fetch_add(1, std::memory_order_relaxed);
@@ -727,6 +738,8 @@ static std::atomic<u32> g_readback_read_waits;
 // hit those GPU bytes, or only other data on their page; time the faulting thread waited for the
 // GPU thread to take the request, and for the readback itself (microseconds).
 static std::atomic<u32> g_read_on_gpu_bytes, g_read_same_page;
+// gow3 23 Oct 2026: false-sharing reads opened on the faulting thread (OpenFalseSharingPage).
+static std::atomic<u32> g_read_same_page_guest;
 static std::atomic<u32> g_pieces_recurring, g_pieces_protected;
 static std::atomic<u64> g_readback_bytes;
 // gow3 statistics: fences deferred to ray-cast readbacks (label, delay until written).
@@ -984,10 +997,12 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                     const u64 total_us = g_read_queue_us.exchange(0);
                     const u64 wait_us = g_read_wait_us.exchange(0);
                     std::printf("  CPU read faults on readback pages: %u on the GPU bytes, %u elsewhere on "
-                                "their page; %.1f ms in all, %.1f ms of it waiting for the GPU; readback "
-                                "pieces: %u recurring (readable), %u new (protected)\n",
-                                on_bytes, same_page, total_us / 1e3, wait_us / 1e3,
-                                g_pieces_recurring.exchange(0), g_pieces_protected.exchange(0));
+                                "their page (%u opened on the faulting thread); %.1f ms in all, %.1f ms "
+                                "of it waiting for the GPU; readback pieces: %u recurring (readable), %u "
+                                "new (protected)\n",
+                                on_bytes, same_page, g_read_same_page_guest.exchange(0), total_us / 1e3,
+                                wait_us / 1e3, g_pieces_recurring.exchange(0),
+                                g_pieces_protected.exchange(0));
                     std::scoped_lock lock{g_read_pieces_mutex};
                     std::vector<std::pair<u32, u64>> pieces;
                     for (const auto& [key, n] : g_read_pieces) {
@@ -2046,7 +2061,8 @@ void BufferCache::RecycleSnapshot(SnapshotBytes& bytes) {
 }
 
 void BufferCache::DownloadRangesAsync(std::span<const std::pair<VAddr, u64>> ranges, bool protect,
-                                      bool yield_to_cpu, bool never_protect) {
+                                      bool yield_to_cpu, bool never_protect, bool guard_before_submit) {
+    ASSERT(!guard_before_submit || (protect && !yield_to_cpu && !never_protect));
     const ReadbackScope readback_scope{*this, "DownloadRangesAsync"};
     last_readback_tick = scheduler.CurrentTick();
     PendingReadback readback;
@@ -2074,6 +2090,7 @@ void BufferCache::DownloadRangesAsync(std::span<const std::pair<VAddr, u64>> ran
         });
     }
     if (total_size_bytes == 0) {
+        ASSERT(!guard_before_submit); // a forwarded copy cannot return without a destination guard
         return;
     }
     for (const auto& [address, size] : readback.pieces) {
@@ -2245,6 +2262,16 @@ void BufferCache::DownloadRangesAsync(std::span<const std::pair<VAddr, u64>> ran
         }
     }
     pending_readbacks.push_back(std::move(readback));
+    if (guard_before_submit) {
+        auto& guarded = pending_readbacks.back();
+        guarded.strict_guard = true;
+        ASSERT(!guarded.watched.empty());
+        IndexWatched(guarded); // deque element identity, NOT the moved local object
+        for (const auto& [address, size] : guarded.watched) {
+            page_manager->UpdatePageWatchers<true, true>(address, size);
+        }
+        guarded.watching = true;
+    }
     ++g_async_readbacks;
     SweepTracking();
 }
@@ -2620,6 +2647,7 @@ void BufferCache::CompleteReadbacks(bool wait, u64 wait_until) {
         if (readback.watching || readback.watched.empty() || readback.tick >= scheduler.CurrentTick()) {
             continue;
         }
+        IndexWatched(readback);
         for (const auto& [address, size] : readback.watched) {
             page_manager->UpdatePageWatchers<true, true>(address, size);
         }
@@ -2727,6 +2755,7 @@ void BufferCache::CompleteReadbacks(bool wait, u64 wait_until) {
         if (readback.watching) {
             for (const auto& [address, size] : readback.watched) {
                 page_manager->UpdatePageWatchers<false, true>(address, size);
+                UnindexWatched(readback, address, size);
             }
         }
         if (readback.open) {
@@ -2870,9 +2899,102 @@ void BufferCache::LandReadbacksWatching(VAddr page) {
     }
 }
 
+void BufferCache::IndexWatched(const PendingReadback& readback) {
+    const auto& watched = readback.watched;
+    const auto is_watched = [&](VAddr page) {
+        auto it = std::upper_bound(watched.begin(), watched.end(), page,
+                                   [](VAddr p, const auto& range) { return p < range.first; });
+        return it != watched.begin() && page < std::prev(it)->first + std::prev(it)->second;
+    };
+    std::scoped_lock lock{watched_index_mutex};
+    for (const auto& [address, size] : watched) {
+        for (VAddr page = address; page < address + size; page += 4096) {
+            watched_index[page >> 12].push_back(
+                {&readback, 0, 0, readback.tick, readback.queued, readback.strict_guard});
+        }
+    }
+    for (const auto& [piece, piece_size] : readback.pieces) {
+        for (VAddr page = Common::AlignDown(piece, VAddr{4096}); page < piece + piece_size; page += 4096) {
+            if (is_watched(page)) {
+                watched_index[page >> 12].push_back(
+                    {&readback, piece, piece_size, readback.tick, readback.queued, readback.strict_guard});
+            }
+        }
+    }
+}
+
+void BufferCache::UnindexWatched(const PendingReadback& readback, VAddr address, u64 size) {
+    std::scoped_lock lock{watched_index_mutex};
+    for (VAddr page = address; page < address + size; page += 4096) {
+        const auto it = watched_index.find(page >> 12);
+        if (it == watched_index.end()) {
+            continue;
+        }
+        std::erase_if(it->second, [&](const WatchedPiece& entry) { return entry.owner == &readback; });
+        if (it->second.empty()) {
+            watched_index.erase(it);
+        }
+    }
+}
+
+BufferCache::WatchedRead BufferCache::LookupWatchedRead(VAddr addr, u64 size) const {
+    WatchedRead read;
+    std::scoped_lock lock{watched_index_mutex};
+    const auto it = watched_index.find(addr >> 12);
+    if (it == watched_index.end()) {
+        return read;
+    }
+    for (const auto& entry : it->second) {
+        if (entry.address == 0) {
+            ++read.owners;
+            if (entry.strict_guard) {
+                if (entry.tick >= std::max(read.tick, read.strict_tick)) {
+                    read.queued = entry.queued;
+                }
+                read.strict_tick = std::max(read.strict_tick, entry.tick);
+            }
+        } else if (entry.address < addr + size && addr < entry.address + entry.size &&
+                   entry.tick >= read.tick) {
+            read.tick = entry.tick;
+            if (entry.tick >= read.strict_tick) {
+                read.queued = entry.queued;
+            }
+        }
+    }
+    return read;
+}
+
+bool BufferCache::OpenFalseSharingPage(VAddr addr, u32 owners) {
+    const VAddr page = Common::AlignDown(addr, VAddr{4096});
+    {
+        // Serialize the strict-guard check with IndexWatched. An older false-sharing request
+        // must not open a newer memcpy guard, even if an older watcher left in the meantime.
+        std::scoped_lock lock{watched_index_mutex};
+        if (const auto it = watched_index.find(page >> 12); it != watched_index.end() &&
+            std::ranges::any_of(it->second, [](const WatchedPiece& p) { return p.strict_guard; })) {
+            return false;
+        }
+        if (!page_manager->OpenForReads(page, owners)) {
+            return false;
+        }
+    }
+    ++g_read_same_page;
+    ++g_read_same_page_guest;
+    liverpool->SendCommand<false>(
+        [this, page] {
+            noisy_pages[page >> 12] = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+            UnwatchPage(page);
+        },
+        "false-sharing");
+    return true;
+}
+
 void BufferCache::UnwatchPage(VAddr page) {
     const ReadbackScope readback_scope{*this, "UnwatchPage"};
     for (auto& readback : pending_readbacks) {
+        if (readback.strict_guard) {
+            continue; // a returned memcpy must never expose stale destination RAM
+        }
         for (size_t i = 0; i < readback.watched.size(); ++i) {
             const auto [address, size] = readback.watched[i];
             if (page < address || page >= address + size) {
@@ -2880,6 +3002,7 @@ void BufferCache::UnwatchPage(VAddr page) {
             }
             if (readback.watching) {
                 page_manager->UpdatePageWatchers<false, true>(page, 4096);
+                UnindexWatched(readback, page, 4096);
             }
             // Split the range around the page.
             const VAddr tail = page + 4096;
@@ -4463,6 +4586,30 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
     };
 
     info.AddWait(signal_sema, signal_tick);
+    {
+        // gow3 24 Oct 2026: bindSparse history for GPU-stall attribution (5 s line + timeout dump).
+        u32 binds = 0, unbinds = 0;
+        u64 bytes = 0;
+        for (const auto& arena_binds : pending_binds) {
+            for (const auto& bind : arena_binds.binds) {
+                (bind.memory ? binds : unbinds)++;
+                bytes += bind.size;
+            }
+        }
+        Vulkan::SetSparseSemaphore(signal_sema);
+        Vulkan::NoteSparseBind(signal_tick, binds, unbinds, bytes);
+        static u64 w_submits = 0, w_binds = 0, w_unbinds = 0, w_bytes = 0;
+        static auto w_start = std::chrono::steady_clock::now();
+        ++w_submits, w_binds += binds, w_unbinds += unbinds, w_bytes += bytes;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - w_start >= std::chrono::seconds(5)) {
+            std::printf("Sparse binds (5 s): %llu submits, %llu binds, %llu unbinds, %.1f MiB\n",
+                        (unsigned long long)w_submits, (unsigned long long)w_binds,
+                        (unsigned long long)w_unbinds, double(w_bytes) / 1048576.0);
+            w_submits = w_binds = w_unbinds = w_bytes = 0;
+            w_start = now;
+        }
+    }
     auto submit_result = instance.GetSparseQueue().bindSparse(sparse_info);
     if (submit_result == vk::Result::eErrorDeviceLost) {
         Vulkan::DumpGpuCheckpoints(instance);

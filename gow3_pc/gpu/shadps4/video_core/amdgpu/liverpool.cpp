@@ -17,6 +17,7 @@
 #endif
 #include <time.h>
 #include "gow3_copy.h"
+#include "gow3_reflex.h"
 #include "gow3_toggles.h"
 #include "gow3_watch_range.h"
 #include <cstdio>
@@ -54,7 +55,12 @@ static_assert(Liverpool::NumComputeRings <= MAX_NAMES);
 
 static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
 
+// gow3 24 Oct 2026: an open run of crowd dispatches goes to the draw pipe before another queue
+// runs (Rasterizer::CutDispatchRun).
 #define YIELD(name)                                                                                \
+    if (rasterizer) {                                                                              \
+        rasterizer->CutDispatchRun(Vulkan::Rasterizer::CutYield);                                  \
+    }                                                                                              \
     FIBER_EXIT;                                                                                    \
     co_yield {};                                                                                   \
     FIBER_ENTER(name);
@@ -362,6 +368,30 @@ void Liverpool::ProcessCommands() {
     }
     // Process incoming commands with high priority
     while (num_commands) {
+        if (rasterizer) {
+            rasterizer->CutDispatchRun(Vulkan::Rasterizer::CutCommand);
+        }
+        // 23 Oct 2026: repeat the stage-B experiment under measured external CPU load.
+        // Off by default. Flip commands keep their original path (presenter waits).
+        if (rasterizer && rasterizer->CommandsInOrder()) {
+            Common::UniqueFunction<void> callback{};
+            {
+                std::scoped_lock lk{submit_mutex};
+                auto& queue = !fault_queue.empty() ? fault_queue : command_queue;
+                if (std::string_view{queue.front().tag} != "flip") {
+                    callback = std::move(queue.front().func);
+                    queue.pop();
+                    if (&queue == &fault_queue) {
+                        --num_fault_commands;
+                    }
+                    --num_commands;
+                }
+            }
+            if (callback) {
+                rasterizer->RunCommandInOrder(std::move(callback));
+                continue;
+            }
+        }
         // gow3: commands touch the caches the draw recording thread uses: it runs dry first,
         // before every command. A drain only when num_commands was set on entry let a command
         // queued just after that check (a guest page fault's ReadMemory) run beside the
@@ -722,6 +752,34 @@ bool SkipIbDrain() {
     return on;
 }
 
+/// gow3 24 Oct 2026: packets an open run of crowd dispatches survives (Rasterizer::CutDispatchRun):
+/// no-ops, nested buffers (their packets are checked one by one), direct dispatches (they join
+/// it or cut it themselves), compute releases (RunInOrder stages a fence write into the run or
+/// cuts it) and SET_SH_REG into the compute program registers: a dispatch joins only with its
+/// whole register image equal to the run's but the user data. runv1/runv2 (U3 Cartagena): with
+/// only user data allowed every run was cut, ~300k a 5 s, by RELEASE_MEM after each dispatch.
+bool KeepsDispatchRun(PM4ItOpcode opcode, const PM4Header* header) {
+    if (opcode == PM4ItOpcode::Nop || opcode == PM4ItOpcode::DispatchDirect ||
+        opcode == PM4ItOpcode::IndirectBuffer || opcode == PM4ItOpcode::ReleaseMem) {
+        return true;
+    }
+    if (opcode != PM4ItOpcode::SetShReg) {
+        return false;
+    }
+    const auto* set_data = reinterpret_cast<const PM4CmdSetData*>(header);
+    const u32 count = header->type3.NumWords() - 1;
+    return set_data->reg_offset >= 0x200 &&
+           set_data->reg_offset + count <= 0x200 + sizeof(ComputeProgram) / 4;
+}
+
+/// What cut a run (the "Dispatch runs" line): the opcode, and for SET_SH_REG its register.
+u32 RunCutDetail(PM4ItOpcode opcode, const PM4Header* header) {
+    const u32 reg = opcode == PM4ItOpcode::SetShReg
+                        ? reinterpret_cast<const PM4CmdSetData*>(header)->reg_offset
+                        : 0;
+    return static_cast<u32>(opcode) | reg << 8;
+}
+
 /// gow3: packets the GPU command thread handles while the draw recording thread may still
 /// work on earlier draws (register state, draws it hands over, nested buffers). Every other
 /// packet first waits for that thread to run dry (Rasterizer::DrainDrawPipe).
@@ -1032,43 +1090,128 @@ struct ComputeRelease {
     u32 pipe_id;
 };
 
+// gow3 17 Oct 2026: multithreaded rendering: like end-of-pipe fences (RunEventWriteEop), the
+// Vulkan recording thread signals the fence after the copies queued before it instead of this
+// thread waiting for them (Uncharted 3: ~1,800 compute releases a frame, 16% of the draw
+// recording thread blocked on host copies at 4K).
+bool ComputeReleaseOnRecorder(const ComputeRelease& release) {
+    return Vulkan::DrawPipe::OnStageB() && !Gow3Toggle::Disabled(Gow3Toggle::RecorderFences) &&
+           release.packet.data_sel.Value() != DataSelect::GdsMemStore;
+}
+
+/// Stage B's part of a recorder release, per label (before its signal is queued).
+void NoteComputeRelease(Vulkan::Rasterizer& rasterizer, const ComputeRelease& release) {
+    const auto sel = release.packet.data_sel.Value();
+    const VAddr label = release.packet.Address<VAddr>();
+    NoteOvertake(rasterizer, "compute release (recorder)", label);
+    const bool backing = rasterizer.GetBufferCache().MayBeGpuWritten(label & ~VAddr{4095}, 4096);
+    if (backing) {
+        rasterizer.NoteLabelWrite(label, sel == DataSelect::Data32Low ? 4 : 8);
+    }
+}
+
+// gow3 19 Oct 2026: the Vulkan recording thread must never fault on guest memory: a fault there
+// downloads through the GPU command thread, which drains the draw pipe, which (presenting a
+// frame) waits for the recording thread. A plain store into a protected page (GPU writes later
+// in the stream, or CPU-write tracking of a bound buffer) froze Uncharted 3 for good after
+// loading a save at 4K, twice. The label always goes through the backing view, as end-of-pipe
+// labels do (SignalEop; the window is marked backing-written for the buffer cache); a plain store
+// only where there is no backing. `note(address, value, bytes)` / `note_irq()`: verify mode.
+void SignalComputeRelease(const ComputeRelease& release, auto&& note, auto&& note_irq) {
+    const u32 pipe_id = release.pipe_id;
+    release.packet.SignalFence(
+        [pipe_id, &note_irq] {
+            note_irq(pipe_id);
+            Platform::IrqC::Instance()->SignalAsync(static_cast<Platform::InterruptId>(pipe_id));
+        },
+        [](VAddr, u16, u16) {},
+        [&note](void* address, u64 value, u32 num_bytes) {
+            note(address, value, num_bytes);
+            if (!Core::Memory::Instance()->TryWriteBacking(address, &value, num_bytes)) {
+                StoreFenceValue(address, value, num_bytes);
+            }
+        });
+}
+
+// gow3 24 Oct 2026 (GOW3_RUN_RELEASE_VERIFY=1): a rolling hash of what a batch of releases
+// writes and signals, in order: (address, bytes, value; clocks as 0) per label, pipe per IRQ.
+u64 ReleaseHashStep(u64 hash, u64 value) {
+    return (hash ^ value) * 0x100000001B3ull + 0x9E3779B97F4A7C15ull;
+}
+bool ReleaseValueFixed(const ComputeRelease& release) {
+    const auto sel = release.packet.data_sel.Value();
+    return sel == DataSelect::Data32Low || sel == DataSelect::Data64;
+}
+u64 HashComputeRelease(u64 hash, const ComputeRelease& release) {
+    const auto& packet = release.packet;
+    const auto sel = packet.data_sel.Value();
+    hash = ReleaseHashStep(hash, packet.Address<u64>());
+    hash = ReleaseHashStep(hash, sel == DataSelect::Data32Low ? 4 : 8);
+    hash = ReleaseHashStep(hash, sel == DataSelect::Data32Low ? u64(packet.DataDWord())
+                                 : sel == DataSelect::Data64  ? packet.DataQWord()
+                                                              : 0);
+    const auto irq = packet.int_sel.Value();
+    if (irq == InterruptSelect::IrqUndocumented || irq == InterruptSelect::IrqWhenWriteConfirm) {
+        hash = ReleaseHashStep(hash, 0x10000 | release.pipe_id);
+    }
+    return hash;
+}
+
+/// Rasterizer::ReleaseBatchHooks::stage: a run's release on the recorder path is noted here and
+/// its signal batched by the caller; false: run the task itself.
+bool StageComputeRelease(Vulkan::Rasterizer& rasterizer, const u8* data, u64& hash) {
+    alignas(ComputeRelease) u8 storage[sizeof(ComputeRelease)];
+    std::memcpy(storage, data, sizeof(storage));
+    const auto& release = *reinterpret_cast<const ComputeRelease*>(storage);
+    if (!ComputeReleaseOnRecorder(release)) {
+        return false;
+    }
+    NoteComputeRelease(rasterizer, release);
+    hash = HashComputeRelease(hash, release);
+    return true;
+}
+
+/// Rasterizer::ReleaseBatchHooks::signal: one SignalAfterHostCopies for the batch's releases (the
+/// bytes of `count` ComputeRelease), each signalled in order as RunComputeReleaseMem does.
+void SignalComputeReleases(Vulkan::Rasterizer& rasterizer, std::vector<u8>& batch, u64 hash) {
+    const bool verify = Vulkan::Rasterizer::RunReleaseVerify();
+    rasterizer.SignalAfterHostCopies([bytes = std::exchange(batch, {}), hash, verify] {
+        u64 seen = 0;
+        alignas(ComputeRelease) u8 storage[sizeof(ComputeRelease)];
+        const auto& release = *reinterpret_cast<const ComputeRelease*>(storage);
+        const auto note = [&](void* address, u64 value, u32 num_bytes) {
+            if (verify) {
+                seen = ReleaseHashStep(seen, reinterpret_cast<u64>(address));
+                seen = ReleaseHashStep(seen, num_bytes);
+                seen = ReleaseHashStep(seen, ReleaseValueFixed(release) ? value : 0);
+            }
+        };
+        const auto note_irq = [&](u32 pipe_id) {
+            if (verify) {
+                seen = ReleaseHashStep(seen, 0x10000 | pipe_id);
+            }
+        };
+        const size_t count = bytes.size() / sizeof(ComputeRelease);
+        for (size_t i = 0; i < count; ++i) {
+            std::memcpy(storage, bytes.data() + i * sizeof(ComputeRelease), sizeof(storage));
+            SignalComputeRelease(release, note, note_irq);
+        }
+        if (verify) {
+            Vulkan::Rasterizer::NoteReleaseVerify(count, seen != hash);
+        }
+    });
+}
+
 void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
     alignas(ComputeRelease) u8 storage[sizeof(ComputeRelease)];
     std::memcpy(storage, data, sizeof(storage));
     const auto& release = *reinterpret_cast<const ComputeRelease*>(storage);
     const u32 pipe_id = release.pipe_id;
-    // gow3 17 Oct 2026: multithreaded rendering: like end-of-pipe fences (RunEventWriteEop), the
-    // Vulkan recording thread signals the fence after the copies queued before it instead of
-    // this thread waiting for them (Uncharted 3: ~1,800 compute releases a frame, 16% of the
-    // draw recording thread blocked on host copies at 4K).
-    const auto sel = release.packet.data_sel.Value();
-    if (Vulkan::DrawPipe::OnStageB() && !Gow3Toggle::Disabled(Gow3Toggle::RecorderFences) &&
-        sel != DataSelect::GdsMemStore) {
+    if (ComputeReleaseOnRecorder(release)) {
         rasterizer.ProcessDownloadImages();
-        const VAddr label = release.packet.Address<VAddr>();
-        NoteOvertake(rasterizer, "compute release (recorder)", label);
-        const bool backing = rasterizer.GetBufferCache().MayBeGpuWritten(label & ~VAddr{4095}, 4096);
-        if (backing) {
-            rasterizer.NoteLabelWrite(label, sel == DataSelect::Data32Low ? 4 : 8);
-        }
-        // gow3 19 Oct 2026: the Vulkan recording thread must never fault on guest memory: a fault
-        // there downloads through the GPU command thread, which drains the draw pipe, which
-        // (presenting a frame) waits for the recording thread. A plain store into a protected
-        // page (GPU writes later in the stream, or CPU-write tracking of a bound buffer) froze
-        // Uncharted 3 for good after loading a save at 4K, twice. The label always goes through
-        // the backing view, as end-of-pipe labels do (SignalEop; the window is marked
-        // backing-written for the buffer cache); a plain store only where there is no backing.
-        rasterizer.SignalAfterHostCopies([packet = release.packet, pipe_id] {
-            packet.SignalFence(
-                [pipe_id] {
-                    Platform::IrqC::Instance()->SignalAsync(static_cast<Platform::InterruptId>(pipe_id));
-                },
-                [](VAddr, u16, u16) {},
-                [](void* address, u64 value, u32 num_bytes) {
-                    if (!Core::Memory::Instance()->TryWriteBacking(address, &value, num_bytes)) {
-                        StoreFenceValue(address, value, num_bytes);
-                    }
-                });
+        NoteComputeRelease(rasterizer, release);
+        rasterizer.SignalAfterHostCopies([release] {
+            SignalComputeRelease(release, [](void*, u64, u32) {}, [](u32) {});
         });
         return;
     }
@@ -1116,6 +1259,13 @@ static bool DmaDstIsRegister(const PM4DmaData* d) {
     return d->command.das != 0 &&
            (d->dst_sel == DmaDataDst::Memory || d->dst_sel == DmaDataDst::MemoryUsingL2);
 }
+
+// gow3 24 Oct 2026: the dispatch runs' batched release signals (Rasterizer::DispatchRunRecord).
+[[maybe_unused]] const bool g_release_batch_hooks = [] {
+    Vulkan::Rasterizer::release_hooks = {&RunComputeReleaseMem, &StageComputeRelease,
+                                         &SignalComputeReleases, sizeof(ComputeRelease)};
+    return true;
+}();
 
 void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const Vulkan::GpuWriteSite site{4};
@@ -1701,6 +1851,36 @@ void ScanDcb(std::span<const u32> dcb, int depth) {
         st = DcbStats{};
     }
 }
+
+/// gow3 22 Oct 2026: a draw or dispatch was handed to the draw recording thread. While Reflex
+/// sleeps (toggle ReflexEarlySubmit clear), every GOW3_REFLEX_EARLY_DRAWS of them (default 80, 0
+/// never) since the last submission send the recorded work to the GPU instead of waiting for the
+/// sceGnmSubmitDone flush in Process. GPU profile, U3 ch.2, 4K DLAA, RTX 5070, reflex on vs off:
+/// 18.9 vs 15.65 ms of GPU time a frame, all of it idle between submissions (3.48 vs 0.21 ms a
+/// frame before that flush): the sleep leaves no backlog, so each batch's recording latency shows.
+/// A Flush here is like the ray-cast and memory-wait flushes: it submits work already recorded,
+/// in order on the one queue; fences, readbacks and barriers keep their own paths.
+void EarlySubmit(Vulkan::Rasterizer& rasterizer) {
+    if (!Gow3Reflex::SleepActive() || Gow3Toggle::Disabled2(Gow3Toggle::ReflexEarlySubmit)) {
+        return;
+    }
+    static const u32 threshold = [] {
+        const char* env = std::getenv("GOW3_REFLEX_EARLY_DRAWS");
+        return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 80u;
+    }();
+    // GPU command thread only. Every submission (this, OnSubmit, readbacks, the scheduler's own)
+    // moves the tick on, which restarts the count.
+    static u64 count_tick = 0;
+    static u32 draws = 0;
+    const u64 tick = rasterizer.GetRuntime().GetScheduler().CurrentTick();
+    if (tick != count_tick) {
+        count_tick = tick;
+        draws = 0;
+    }
+    if (threshold != 0 && ++draws >= threshold) {
+        rasterizer.Flush();
+    }
+}
 } // namespace
 
 // gow3 test (GOW3_GFX_START_DELAY_US): a graphics submission starts at least this long after the
@@ -1821,6 +2001,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         case 3:
             const u32 count = header->type3.NumWords();
             const PM4ItOpcode opcode = header->type3.opcode;
+            if (rasterizer && !KeepsDispatchRun(opcode, header)) {
+                rasterizer->CutDispatchRun(Vulkan::Rasterizer::CutOpcode,
+                                           RunCutDetail(opcode, header));
+            }
             ApplyGraphicsRegisterPacket(regs, header, gfx_reg_checksum, &pipe_dirty);
             // DmaData to 0x3022C does nothing here (skipped below): no need to wait.
             if (rasterizer && !PipelinedOpcode(opcode) &&
@@ -2499,9 +2683,16 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 UNREACHABLE_MSG("Unknown PM4 type 3 opcode {:#x} with count {}",
                                 static_cast<u32>(opcode), count);
             }
+            if (rasterizer && (IsDrawOpcode(opcode) || opcode == PM4ItOpcode::DispatchDirect ||
+                               opcode == PM4ItOpcode::DispatchIndirect)) {
+                EarlySubmit(*rasterizer);
+            }
             dcb = NextPacket(dcb, header->type3.NumWords() + 1);
             break;
         }
+    }
+    if (rasterizer && dcb_depth == 0) {
+        rasterizer->CutDispatchRun(Vulkan::Rasterizer::CutQueueEnd);
     }
 
     if (ce_task.handle) {
@@ -2552,6 +2743,38 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     if constexpr (!is_indirect) {
         if (rasterizer) {
             rasterizer->NewGuestEpoch();
+        }
+        // gow3 23 Oct 2026 diagnostics (GOW3_FAULT_STATS): how long a compute-ring submission
+        // waited for this thread (the graphics task runs until it waits on something).
+        if (Gow3Stats::fault_stats) {
+            s64 submitted = 0;
+            {
+                auto& mapped = mapped_queues[vqid + 1];
+                std::scoped_lock lock{mapped.m_access};
+                if (!mapped.submit_ns.empty()) {
+                    submitted = mapped.submit_ns.front();
+                    mapped.submit_ns.pop();
+                }
+            }
+            static std::atomic<u64> count{0}, sum_ns{0}, max_ns{0};
+            static std::atomic<s64> last_ns{0};
+            const s64 now = SteadyNs();
+            if (submitted) {
+                const u64 waited = static_cast<u64>(now - submitted);
+                ++count;
+                sum_ns += waited;
+                for (u64 m = max_ns.load(); waited > m && !max_ns.compare_exchange_weak(m, waited);) {
+                }
+            }
+            if (s64 last = last_ns.load();
+                now - last >= 5'000'000'000 && last_ns.compare_exchange_strong(last, now)) {
+                const u64 n = count.exchange(0);
+                std::printf("Compute rings (5 s): %llu submissions, waited %.2f ms on average for the "
+                            "command thread, %.2f ms at most\n",
+                            static_cast<unsigned long long>(n), n ? sum_ns.exchange(0) / 1e6 / n : 0.0,
+                            max_ns.exchange(0) / 1e6);
+                std::fflush(stdout);
+            }
         }
     }
 
@@ -2606,6 +2829,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
 
         const PM4ItOpcode opcode = header->type3.opcode;
+        if (rasterizer && !KeepsDispatchRun(opcode, header)) {
+            rasterizer->CutDispatchRun(Vulkan::Rasterizer::CutOpcode, RunCutDetail(opcode, header));
+        }
 
         // gow3: compute work uses the caches, so the draw recording thread runs dry first. Not for
         // no-ops and register writes (per-queue compute state, or SH registers the draw packets
@@ -2889,8 +3115,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
             if (rasterizer) {
                 ComputeRelease release{.packet = *release_mem, .pipe_id = queue.pipe_id};
+                // 24 Oct 2026: a fence write (not a GDS store) may follow a dispatch run.
                 if (rasterizer->RunInOrder(&RunComputeReleaseMem, &release, sizeof(release),
-                                           Gow3Toggle::PipelinedTasks, true)) {
+                                           Gow3Toggle::PipelinedTasks, true,
+                                           release_mem->data_sel.Value() != DataSelect::GdsMemStore)) {
                     // gow3 21 Oct: a GDS store writes num_dw dwords, not one label (SRT pending-write check).
                     const u64 bytes = release_mem->data_sel.Value() == DataSelect::GdsMemStore
                                           ? u64{release_mem->num_dw} * sizeof(u32)
@@ -2921,6 +3149,11 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         if constexpr (!is_indirect) {
             *queue.read_addr += next_dw_off;
             *queue.read_addr %= queue.ring_size_dw;
+        }
+    }
+    if constexpr (!is_indirect) {
+        if (rasterizer) {
+            rasterizer->CutDispatchRun(Vulkan::Rasterizer::CutQueueEnd);
         }
     }
 
@@ -3023,6 +3256,9 @@ void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
     {
         std::scoped_lock lock{queue.m_access};
         queue.submits.emplace(task.handle);
+        if (Gow3Stats::fault_stats) {
+            queue.submit_ns.push(SteadyNs());
+        }
     }
 
     std::scoped_lock lk{submit_mutex};

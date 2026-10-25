@@ -1,5 +1,8 @@
 # Uncharted PC — plan for 4K, 100+ FPS on fast PCs, 60 FPS on weak PCs
 
+> This is the 15 Oct 2026 plan, superseded by [ROADMAP.md](../ROADMAP.md). Kept as history; for
+> current status see ROADMAP.md, CHANGELOG.md and STATUS.md.
+
 15 October 2026 (night). Written from tonight's investigation: crash logs, reverse engineering of
 all three executables (1.00 and 1.02), boot tests on this PC (Ryzen 9 9950X3D, RTX 5080, and the
 CPU's integrated Radeon as a stand-in for a weak GPU), and research (GoldHEN patch repository,

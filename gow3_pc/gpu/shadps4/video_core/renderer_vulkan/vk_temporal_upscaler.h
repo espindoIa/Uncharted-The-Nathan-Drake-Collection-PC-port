@@ -138,7 +138,36 @@ public:
         return composite_frames;
     }
 
+    /// gow3 22 Oct 2026: DLSS Frame Generation's inputs from one upscaled frame: copies of its
+    /// depth and motion vectors (render size, General layout), its camera, jitter and reset.
+    struct FrameGenInputs {
+        Dlss::Resource depth, motion;
+        FrameGenCamera camera;
+        std::array<float, 2> jitter;
+        bool reset;
+    };
+    /// Presenter, at the flip: the inputs of the upscale since the last call, or false.
+    bool TakeFrameGenInputs(FrameGenInputs& inputs);
+    /// Presenter: how many copies to keep, one more than its frames (see StashFrameGen).
+    void SetFrameGenRing(u32 size) {
+        frame_gen_slots.resize(size);
+    }
+
 private:
+    /// Copies the frame's depth and motion vectors for frame generation (only when it is wanted).
+    void StashFrameGen(vk::CommandBuffer cmdbuf, vk::Image depth, vk::Format depth_format,
+                       vk::ImageUsageFlags depth_usage, u32 w, u32 h, bool was_reset);
+    struct FrameGenSlot {
+        VideoCore::UniqueImage depth, motion;
+        vk::UniqueImageView depth_view, motion_view;
+        vk::Format format{};
+        u32 width = 0, height = 0;
+    };
+    std::vector<FrameGenSlot> frame_gen_slots;
+    u32 frame_gen_next = 0;
+    bool frame_gen_fresh = false; ///< frame_gen_inputs not taken yet
+    FrameGenInputs frame_gen_inputs{};
+
     /// gow3: views of guest images the upscaler reads, kept across frames: FSR 4 registers
     /// images by view in a registry of eight (a new view per frame filled it at Native AA).
     vk::ImageView CachedView(const VideoCore::Image& image, vk::Format format,

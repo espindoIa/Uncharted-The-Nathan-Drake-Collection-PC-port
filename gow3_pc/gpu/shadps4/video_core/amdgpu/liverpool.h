@@ -301,6 +301,8 @@ private:
         std::vector<u32> dcb_buffer;
         std::vector<u32> ccb_buffer;
         std::queue<Task::Handle> submits{};
+        /// gow3 23 Oct 2026 (GOW3_FAULT_STATS): when each compute-ring submission was made.
+        std::queue<s64> submit_ns{};
         ComputeProgram cs_state{};
     };
     std::array<GpuQueue, NumTotalQueues> mapped_queues{};

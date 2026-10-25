@@ -30,6 +30,172 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 - **Uncharted 3: a rare case where the constants or bones of a crowd could stay one frame or longer
   out of date is closed.** It could happen after a page of memory was re-protected while the GPU
   work was being prepared. Found by code review, not seen in game, and not tested in game.
+- **Added (24 Oct 2026): the launcher can be used with a controller.** The D-pad or the left stick
+  move through the games, the sections, the settings and the buttons; A presses a button, flips a
+  switch or opens a list, left and right change a choice, B goes back to the section list (and
+  then to the games), LB and RB switch the section, and Start plays (or stops). In a message
+  window A presses the highlighted button, B closes it and left and right pick a button. It works
+  only while the launcher window has the focus and no game runs.
+
+- **Added (24 Oct 2026): the launcher can be used with the keyboard.** Tab and Shift+Tab move
+  through the games, the sections, the settings and the buttons, with an orange outline on the one
+  that has the focus; Space or Enter presses a button or flips a switch, Left and Right change a
+  choice (Home and End pick the first and the last), and Down or Enter opens a list. In
+  Controls, Enter on a slot waits for the next key like a click, and Delete clears it. Shortcuts:
+  Ctrl+1, Ctrl+2, Ctrl+3 pick the game, Ctrl+Tab and Ctrl+Shift+Tab the next and previous section,
+  Ctrl+Enter plays (or stops). The launcher opens with the focus on PLAY.
+
+- **Added (24 Oct 2026): "Apply to all games" and a note when a setting waits for the next start.**
+  Display and Performance have an Apply to all games button at the top right: it copies the
+  selected game's graphics and performance settings (resolution, aspect ratio, anti-aliasing,
+  frame rate and the rest) to the other two games; their controls stay as they are. It asks
+  first and is not available while a game runs. Changing the resolution, aspect ratio,
+  multithreading or graphics card while a game runs now says it applies the next time the game
+  starts (the settings in the in-game menu, opened with Insert, change live).
+
+- **Changed (24 Oct 2026): options that do nothing are greyed out and say what they need.** Under
+  Display, Upscaling mode is greyed out unless Anti-aliasing is FSR or DLSS, DLSS model unless it
+  is DLSS, and DLSS Frame Generation when Anti-aliasing is Off or NVIDIA's `nvngx_dlssg.dll` is
+  missing; a short orange line under each says what it needs. Nothing is reset: your choices are
+  kept and the options wake up again as soon as you pick a matching anti-aliasing mode, in the
+  launcher or in the in-game menu.
+
+- **Changed (24 Oct 2026): settings show one line and a ? with the details.** Each setting now has
+  a short one-line hint; the full explanation (the numbers, what to do if a game misbehaves) is
+  behind the round ? next to its name: hover it, click it (it stays open until you click elsewhere
+  or press Esc) or press Space or Enter on it. Settings that apply to all three games (language,
+  speakers, the unlocks, the cheats, the performance log, update checks, idle game threads) carry
+  an ALL GAMES label; the others are kept separately for each game.
+
+- **Changed (24 Oct 2026): launcher messages and questions match the launcher's look.** They are
+  dark windows in the launcher's colours instead of the grey Windows message boxes: Enter
+  answers the highlighted button, Esc cancels, and long details (an error's text) have a Copy
+  button. Short confirmations (shortcut created, shader cache cleared, update installed, NVIDIA
+  DLSS ready) are a small note in the corner that goes away after a few seconds. When a game stops
+  with an error, the message now has Open log folder and Copy report buttons; the report holds
+  the error, the game and its version, your graphics card and the main settings, ready to paste
+  into a GitHub issue. This also works for the desktop game shortcuts (`--play`).
+
+- **New (24 Oct 2026): Home checks that you are ready to play.** A "Ready to play" list at the top
+  of Home checks the game files, update 1.02 (and whether its files are intact), the NVIDIA DLSS
+  and Frame Generation files, the drive speed and whether a new launcher version is out. Each
+  line that needs attention has the buttons to fix it (choose or install the game and the update,
+  get or add the NVIDIA files, install the launcher update); on a first start it reads as the
+  steps to follow. The NVIDIA file buttons moved here from Display. Adding an NVIDIA file no
+  longer needs a restart: DLSS shows up under Anti-aliasing and the 144-240 FPS limits under
+  Performance (with Frame Generation) at once.
+
+- **Changed (24 Oct 2026): launcher layout.** The games and the settings sections are now in a
+  sidebar on the left, with the selected game's name in a smaller banner and PLAY always at the
+  bottom right. The sections were renamed: Quick Setup is now Home, Cheats is now Gameplay and
+  Advanced is now System (the launcher opens the section you used last). The window fits a
+  1280x720 screen (1080p at 150% scaling); on a short screen the settings scroll and PLAY stays in
+  view. Long hints wrap to the window's width, and choices with many options (the frame rate
+  limit) are a menu.
+
+- **Fixed (24 Oct 2026): launcher.** The mouse wheel no longer stops scrolling the pages after you
+  rebind a control. Reset (now "Reset this game's settings" under System) also puts the
+  keyboard, mouse and controller controls back to the defaults; before, they came back the next
+  time the launcher started or you switched game. The launcher no longer freezes for seconds
+  while it checks an NVIDIA DLL you add, creates shortcuts, stops the game or looks for graphics
+  cards (the Graphics card row on Display now appears a moment after the launcher opens).
+
+- **24 Oct 2026: Uncharted 3's Cartagena market street (chapter 2) runs about 10-12% faster.**
+  The street's crowd made the port prepare about 1,500 tiny skinning jobs a frame one by one,
+  which kept the processor, not the graphics card, as the limit. They now go to the graphics card
+  in batches. Measured at 4K, DLSS Quality, Frame Generation on (RTX 5070, Ryzen 5 5600): the
+  street went from about 78 to about 87 real FPS and the meat market gate from about 86 to about
+  97. The street is still a little slower than the gate because the game draws more there. To turn
+  it off, set `GOW3_DISPATCH_RUNS=0` (and `GOW3_STATIC_MESH_SNAPSHOTS=0`) in
+  `analysis/uncharted-user/test-env.txt`.
+
+- **Fixed (24 Oct 2026): in Uncharted 3, young Sully's shirt in chapter 2 (Cartagena chase) no
+  longer stretches into a long strip down to his knees.** The cloth shader read and wrote past
+  the shared memory the game reserves for it; the PS4 ignores such accesses, NVIDIA cards did
+  not. (`GOW3_LDS_BOUNDS=0` restores the old behaviour.)
+
+- **24 Oct 2026: Uncharted 3 market (and any GPU-heavy scene) runs about 27-30% faster with Reflex
+  or Frame Generation on.** Reflex's sleep held the game back, so the graphics card sat idle
+  between frames. The port now starts the next frame as soon as the card has one frame queued.
+  Measured at 4K DLAA in the market street (RTX 5070): 42 -> 55 FPS with Frame Generation on, and
+  49-51 -> 62-64 FPS with Frame Generation off and Reflex on. Trade-off: the median latency is
+  higher than with the driver's sleep, but slow frames are rarer. For the old behaviour, toggle bit
+  549755813888 in the second number of `analysis/uncharted-user/disabled-optimizations.txt`.
+  The market hitches of up to a second are not fixed and are still under investigation.
+
+- **Experimental (23 Oct 2026): further Uncharted 3 crowd-rendering work.** Static mesh inputs can
+  stay in immutable GPU snapshots instead of being recycled through temporary copies. Two short
+  market comparisons did not establish a material FPS or smoothness improvement; this is opt-in
+  (`GOW3_STATIC_MESH_SNAPSHOTS=1`), not a released market fix. A separate opt-in experiment
+  (`GOW3_SKINNING_WRITE_BATCH=1`) prepares overlapping crowd-output views together. Deferred
+  forwarding (`GOW3_FORWARD_COPY_DEFER=1`, also needs `GOW3_FORWARD_COPIES=1`) is testing a way
+  to avoid a separate submission for each GPU copy while protecting immediate CPU consumers.
+  These are not verified market fixes. The installed
+  playable package is unchanged; technical evidence and rollback details are in `analysis/STATUS.md`.
+
+- **In progress (23 Oct 2026): Uncharted 3 market CPU stalls.** The earlier benchmarks stood
+  at the save's gate, not in the meat market behind it. Readback handling now lets reads beside
+  GPU results proceed on the game thread, and forwards copies of pending GPU results to the
+  GPU in an opt-in experiment (`GOW3_FORWARD_COPIES=1`, off by default). Its initial 9–14% FPS
+  gain came from a prototype with a destination-read correctness gap, not a released fix.
+  Constant-snapshot caching and compute-specialization storage are also being optimized.
+  No long-session or other-game validation.
+
+- **Changed (23 Oct 2026): DLSS, Frame Generation and Reflex now go through NVIDIA Streamline.**
+  Streamline is NVIDIA's own SDK for these features, and there is no setting for it. You still
+  add `nvngx_dlss.dll` and `nvngx_dlssg.dll` yourself; Streamline's own files come with the port
+  and need the Microsoft Visual C++ 2015-2022 runtime. Without that runtime, or when the game runs
+  on a graphics card that is not NVIDIA's, it uses the port's earlier way, and the in-game menu
+  says why. Uncharted 3 (RTX 5070):
+  - DLSS upscaling: the same frame rate as before at 1080p and 4K.
+  - Frame Generation at 1080p: steadier frame times than before (99% of shown frames within
+    9.6 ms against 12.2 ms, both at 60 real and 120 shown FPS; one Streamline run).
+  - Frame Generation only adds frames while the game window has the focus. When you switch to
+    another window the frame rate limit counts real frames until you come back. It also switches
+    Reflex on and ignores VSync.
+  - At 4K with Frame Generation and Reflex, Streamline ran at about 43 real FPS, the earlier way
+    at about 47.
+  Not tested: the RivaTuner overlay with Streamline, Uncharted 1 and 2, long sessions, input delay,
+  AMD or Intel graphics cards and laptops with two graphics cards.
+
+- **Fixed (22 Oct 2026): the MSI Afterburner / RivaTuner overlay flickered or was missing.** Its
+  on-screen display showed only now and then, with or without Frame Generation. On PCs whose screen
+  is connected to the graphics card that runs the game, frames are now handed to the screen the
+  way RivaTuner expects, and the overlay stays on (shown in 120 of 120 screen captures, before 0 to
+  8%). Laptops whose screen is driven by the processor's graphics keep the way that fixed their
+  freezes on 20 Oct. No frame rate change was measured (Uncharted 3 at 4K: about 54 real FPS either
+  way). Not tested: such a laptop with this change, and other overlays (Steam, Discord, OBS).
+
+- **Improved (22 Oct 2026): NVIDIA Reflex loses less frame rate at 4K.** While Reflex sleeps, the
+  GPU work of a frame is now handed to the graphics card in several parts instead of only at the
+  end, so the card waits less. Uncharted 3 at 4K (chapter 2, DLAA, RTX 5070): about 2 to 3 FPS more
+  with Reflex on (for example 54.8 against 52.5), about 4-5%. Reflex is still about 11 to 19%
+  below Reflex off, and it stays off by default. Not measured again: the input delay with this
+  change, and 1080p.
+
+- **New (22 Oct 2026): NVIDIA Reflex option, off by default.** In the in-game menu (Performance) and
+  the launcher (Performance), on NVIDIA cards: Off, On, On + Boost. It trades frame rate for input
+  delay, and only when the graphics card limits the frame rate. Uncharted 3 at 4K (chapter 2, DLAA,
+  RTX 5070): the driver's own timing from input to the end of the GPU work was about 10 ms lower
+  (at the same frame rate as a plain 45 FPS limit, about 34 ms against 54 ms), but the frame rate
+  fell from 58.5 to 46 FPS by the game's own count (about a fifth, 21%; the PresentMon log gave
+  57.2 to 44.0, 23%; with Boost 59.2 to 48.6 by the game's own count, 18%). At 1080p, where the processor limits the
+  frame rate, it changed nothing (94.1 against 94.8 FPS, no latency difference). It stays off by
+  default. An earlier note here said it gave no lower input delay; that was wrong (the driver's
+  timestamps had been matched to the wrong time windows).
+- **New (22 Oct 2026): frame rate limit above 120 with DLSS Frame Generation.** With Frame
+  Generation on, the limit counts the frames shown and can be set to 144, 160, 165, 180, 200 or 240
+  (the menu lists them only when Frame Generation is supported); without it the limit stays at
+  120. Before, a limit of 120 with Frame Generation held the real frames to 60 FPS. In tests at
+  1080p on a 165 Hz screen, a limit of 160 gave 80 real FPS and about 97% of the shown frames were
+  exactly one refresh apart (about 3% two refreshes, the 160 against 165 beat). Not tested: a
+  variable-refresh (G-SYNC) screen, and Frame Generation together with Reflex.
+- **New (22 Oct 2026): DLSS Frame Generation (2x), off by default.** Adds one AI-generated frame
+  between every two, for about twice the frames shown (Uncharted 3, same scene: 48.5 real, 98.1
+  shown FPS) with a little more input delay. Needs an RTX 40 or newer, an anti-aliasing mode (TAA,
+  FSR or DLSS) and NVIDIA's `nvngx_dlssg.dll`, which is not included: the launcher (Display) adds it
+  like `nvngx_dlss.dll`. The frame rate limit counts the frames shown. It is off in menus, movies
+  and loading. Switch it in the in-game menu (Image) or the launcher (Display).
 
 - **Uncharted 3: about 1 more FPS in crowded scenes where the processor limits the frame rate.**
   The thread that records the GPU work no longer looks up and updates a large table for every
@@ -124,6 +290,58 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   Deck).** Ported from BilalReloaded's upstream commit 696bcb1. The wipe now uses the PS4's
   1920x1080 when the resolution patch is on. Tested: the patch script parses. Not tested: a
   sub-720p run (the boots did not apply the resolution patch).
+
+### From BilalReloaded's 0.6.0 (merged 24 Oct)
+
+Upstream's 0.6.0 notes (24 October 2026), in their words. The fork keeps its own defaults where
+they differ: multithreaded rendering stays on by default.
+
+- **Uncharted 3 too bright in sunny areas** (#140): the glow around bright light (bloom) was
+  drawn into a separate image the game never read, so the final picture used stale data from
+  memory instead, a haze that washed out sunlit places like Cartagena and the Chateau. The bloom
+  now goes into the right texture and shows as a soft glow.
+- **Mouse aiming and camera without the "stick" feel** (#190, #86, #141, #158, #170): aiming in
+  Uncharted 2 and 3, and the camera in Drake's Fortune, now turn directly from the mouse instead
+  of through an emulated right stick, which had a speed cap and a ramp that felt like
+  acceleration. The same mouse movement now turns the same angle, slow or fast (about 63 degrees
+  per 1,000 counts at sensitivity 1). Windows' pointer acceleration is kept out, and the
+  sensitivity goes up to 5x in the launcher (10x in the in-game menu).
+- **Uncharted 2: the most common crash, "read access to 0 at guest offset 0xd09665"** (#61 #113
+  #115 #164 #181 #187; often around trains, where particle effects are heavy): a particle routine
+  kept two loop values just below the stack pointer. When Windows handled a page fault in the
+  middle of it, it wrote over one of them, and the loop read one entry past the end of its list.
+  The routine now takes those values from registers it never changes (a 10-byte patch, also in
+  Uncharted 1 and 3, which share the routine).
+- **Save profiles** (#66): launcher Advanced -> Save profile gives each game three separate
+  save profiles, each with its own progress and in-game settings, like separate PS4 users.
+  Profile 1 holds the saves from earlier versions; switching never moves or deletes a save.
+- **Controller vibration on/off** (#166): launcher Controls and the in-game Controls tab.
+- **Games that stopped at start with update 1.02 in a separate folder** ("files.json -> not
+  found", "ASSERTION: root"; #43 #73 #139 #151 #153 #165 and others): where Windows allows
+  symbolic links (Developer Mode, a launcher run as administrator), the game read the update's
+  linked archives as empty files. The port now reads a linked file's real size, and the update
+  folder links files as hard links first.
+- **Updating keeps your own files** (#134): files you put into the port's folders (ReShade,
+  notes, a game folder) are no longer removed by the launcher's update.
+- **The update download continues after a stall** (#150) instead of failing.
+- **Mouse side buttons can be bound in the launcher** (#152).
+- A crash message now says when the game is version 1.00 without update 1.02.
+- Device-lost crash logs now include the graphics driver's fault report.
+- **Half the RAM and faster shader loading** (#186): the port no longer saves "pipeline binaries"
+  (about 2 MB for each of thousands of shader pipelines). Each pipeline loaded from one kept its
+  2 MB in memory: Uncharted 2 used 15.5 GB of RAM with them and 7.0 GB without, and shader
+  loading at the start took 40 s instead of about 10 s. The graphics driver's own shader cache
+  does the same job. The old folder (up to 20 GB) is deleted at the first start.
+- **Multi-second shader-compile freezes that 0.5.0 still had** (#144, #132, #142, #117): one
+  effect shader still built a new version for every broken buffer slot whose address is 0 or
+  whose size wraps to 0. Those slots now count as empty, as they are drawn.
+- **Uncharted 2: crash on a garbage texture with an unknown format** (#144, "pixel_format.cpp
+  NumBitsPerBlock"): such textures are now skipped like other broken ones.
+- **Temperatures in the performance counter** (#178, thanks to memeguyoffical): the graphics
+  card's temperature (NVIDIA, from its driver) and the processor's where Windows reports one,
+  next to their use. RAM shows the game's own memory.
+- **The performance counter's settings in the launcher** (#179, thanks to memeguyoffical):
+  Display tab, what it shows, its corner, layout, size and background.
 
 ### From BilalReloaded's 0.4.1 and 0.5.0 (merged 21 Oct)
 

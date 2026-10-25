@@ -25,6 +25,8 @@
 #include "core/emulator_settings.h"
 #include "gow3_graphics.h"
 #include "gow3_perf_stats.h"
+#include "gow3_reflex.h"
+#include "gow3_streamline.h"
 
 extern "C" void runtime_restart(void); // src/probe.c: hands restart to the launcher
 extern "C" int runtime_gamesettings_active(void); // src/runtime_gamesettings.c
@@ -454,6 +456,20 @@ void ImageTab() {
                 // NVIDIA's DLSS license asks for its attribution where DLSS is offered.
                 InfoRow("NVIDIA DLSS", "NVIDIA technology");
                 Help("NVIDIA, RTX and DLSS are trademarks of NVIDIA Corporation.");
+                // DLSS on the NGX bridge: say why Streamline did not load (missing VC++ runtime...).
+                if (Gow3Streamline::Requested() && !Gow3Streamline::Active()) {
+                    InfoRow("NVIDIA Streamline", Gow3Streamline::Problem());
+                }
+            }
+            if (s.frame_gen_supported) {
+                static const char* const fg_labels[] = {"Off", "On"};
+                ChoiceRow("DLSS Frame Generation", s.frame_gen, fg_labels, nullptr, int(std::size(fg_labels)),
+                          "Adds one AI-generated frame between every two: about twice the frames shown, with a "
+                          "little more input delay. Needs an RTX 40 or newer, an anti-aliasing mode (TAA, FSR "
+                          "or DLSS) and NVIDIA's nvngx_dlssg.dll. The frame rate limit counts the frames shown. "
+                          "Frames are only added while the game window has the focus; it also turns Reflex on.");
+            } else if (const char* fg_problem = s.frame_gen_problem.load()) {
+                InfoRow("DLSS Frame Generation", fg_problem);
             }
             const int upscaler = s.upscaler;
             const bool sharpens = upscaler == Gow3Settings::UpscalerFsr3 ||
@@ -541,10 +557,30 @@ void PerformanceTab() {
     if (BeginRows("##live")) {
         static const char* const fps_labels[] = {"30", "40", "45", "50", "55", "60", "75", "90", "100", "120"};
         static_assert(std::size(fps_labels) == G::FpsLimits.size());
-        ChoiceRow("Frame rate limit", s.fps_limit, fps_labels, G::FpsLimits.data(), int(G::FpsLimits.size()),
-                  "Caps the frame rate, live. 60 is the PS4's; above 120 the game's movement breaks. With VSync, "
-                  "a limit at or above the display's refresh rate makes the game follow the display (75 on a 75 Hz "
-                  "monitor): the steadiest frame times. 40-55 are for tests.");
+        // With Frame Generation the limit counts shown frames, so it may go up to 240 (80 real
+        // frames at 160 shown); the extended values follow 120 in the same list.
+        static const char* const fps_labels_fg[] = {"30", "40", "45", "50", "55", "60", "75", "90", "100", "120",
+                                                    "144", "160", "165", "180", "200", "240"};
+        static const std::array<int, G::FpsLimits.size() + G::ExtendedFpsLimits.size()> fps_values_fg = [] {
+            std::array<int, G::FpsLimits.size() + G::ExtendedFpsLimits.size()> all{};
+            std::copy(G::FpsLimits.begin(), G::FpsLimits.end(), all.begin());
+            std::copy(G::ExtendedFpsLimits.begin(), G::ExtendedFpsLimits.end(), all.begin() + G::FpsLimits.size());
+            return all;
+        }();
+        static_assert(std::size(fps_labels_fg) == std::tuple_size_v<decltype(fps_values_fg)>);
+#define GOW3_FPS_HELP                                                                                  \
+    "Caps the frame rate, live. 60 is the PS4's; above 120 the game's movement breaks. With VSync, "   \
+    "a limit at or above the display's refresh rate makes the game follow the display (75 on a 75 Hz " \
+    "monitor): the steadiest frame times. 40-55 are for tests."
+        if (s.frame_gen_supported) {
+            ChoiceRow("Frame rate limit", s.fps_limit, fps_labels_fg, fps_values_fg.data(), int(fps_values_fg.size()),
+                      GOW3_FPS_HELP " Above 120 counts shown frames and only works with DLSS Frame Generation on "
+                                    "(otherwise it stays at 120).");
+        } else {
+            ChoiceRow("Frame rate limit", s.fps_limit, fps_labels, G::FpsLimits.data(), int(G::FpsLimits.size()),
+                      GOW3_FPS_HELP);
+        }
+#undef GOW3_FPS_HELP
         // At a 60 Hz vblank the game waits for the next vblank: above 60 FPS needs the faster
         // vblank, which the launcher sets at start when its limit is above 60.
         if (EmulatorSettings.GetVblankFrequency() <= 60 && (s.fps_limit == 0 || s.fps_limit > 60)) {
@@ -553,6 +589,14 @@ void PerformanceTab() {
         static const char* const queued_labels[] = {"1 (recommended)", "2 (faster; U2 NPCs float)", "Unlimited"};
         ChoiceRow("Frames queued", s.frames_queued, queued_labels, G::FramesQueued.data(),
                   int(G::FramesQueued.size()), "More frames queued: steadier FPS, slower response to input.");
+        if (Gow3Reflex::Offered()) {
+            static const char* const reflex_labels[] = {"Off (recommended)", "On", "On + Boost"};
+            ChoiceRow("NVIDIA Reflex", s.reflex, reflex_labels, nullptr, int(std::size(reflex_labels)),
+                      "Lets the NVIDIA driver time the start of each frame. When the graphics card limits the "
+                      "frame rate (Uncharted 3 at 4K) it cuts input delay by about 10 ms but costs about 20% of "
+                      "the frame rate; when the processor limits it (1080p) it changes nothing. Off is "
+                      "recommended.");
+        }
         CheckRow("Compile new shaders in the background", s.async_shaders,
                  "Fewer stutters in new areas; an object or effect may appear a moment later.");
         ImGui::EndTable();
@@ -578,8 +622,9 @@ void OverlayTab() {
     ImGui::SeparatorText("What to show");
     if (ImGui::BeginTable("##overlay_items", 2, ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableNextColumn();
-        static const char* const names[] = {"FPS", "Frametime", "Upscaler", "GPU (name and use)", "CPU (game)",
-                                            "RAM (game / total)", "VRAM (used / available)"};
+        static const char* const names[] = {"FPS", "Frametime", "Upscaler", "GPU (use and temperature)",
+                                            "CPU (game use and temperature)", "RAM (game)",
+                                            "VRAM (used / available)"};
         for (unsigned item = 0; item < 7; ++item) {
             const unsigned bit = 1u << item;
             bool on = (s.overlay_items & bit) != 0;
@@ -841,6 +886,7 @@ void ResetControls() {
     s.mouse_sens = 1.0f;
     s.mouse_invert = false;
     s.mouse_invert_x = false;
+    s.vibration = true;
     s.mouse_aim_sens = 1.0f;
     s.mouse_vertical = 1.0f;
     s.prompts = -1;
@@ -1105,7 +1151,7 @@ void ControlsTab() {
         Help("The mouse turns the camera and presses its buttons' actions. Off: the mouse is left alone.");
         ImGui::PopID();
         ImGui::BeginDisabled(!s.mouse);
-        changed |= PercentRow("Mouse sensitivity", s.mouse_sens, 25, 500, "How far the camera turns per mouse movement.");
+        changed |= PercentRow("Mouse sensitivity", s.mouse_sens, 25, 1000, "How far the camera turns per mouse movement.");
         changed |= PercentRow("Mouse aim sensitivity", s.mouse_aim_sens, 25, 1000,
                               "While aiming (the aim button held): the mouse sensitivity times this. Below 100% "
                               "makes aiming finer.");
@@ -1128,6 +1174,14 @@ void ControlsTab() {
         Help("Moving the mouse left turns right.");
         ImGui::PopID();
         ImGui::EndDisabled();
+        Row("Controller vibration");
+        bool vibration = s.vibration;
+        if (ImGui::Checkbox("##value", &vibration)) {
+            s.vibration = vibration;
+            changed = true;
+        }
+        Help("Off: the controller never rumbles.");
+        ImGui::PopID();
         static const char* const icon_labels[] = {"Auto (the device you use)", "Keyboard and mouse", "PlayStation",
                                                   "Xbox"};
         static const int icon_values[] = {-1, 1, 0, 2};

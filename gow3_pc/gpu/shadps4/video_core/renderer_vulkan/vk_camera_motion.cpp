@@ -233,6 +233,40 @@ std::array<std::array<float, 4>, 3> CameraMotion::TaaDepthParameters() const noe
             {transform[8], transform[9], transform[10], transform[11]}};
 }
 
+FrameGenCamera CameraMotion::GetFrameGenCamera() const {
+    if (!Ready()) {
+        return {};
+    }
+    FrameGenCamera camera;
+    std::array<u32, 2> size = render_size;
+    if (velocity_mode) {
+        camera = MakeFrameGenCameraVelocity(velocity_camera.uv_to_view, velocity_camera.depth_to_z,
+                                            velocity_camera.to_previous_clip,
+                                            velocity_camera.to_world);
+        // The pass has no far plane (the depth is 1 - near / z): 10000 as the FSR path gets it
+        // (vk_temporal_upscaler.cpp). It has no scene constants either: the scene depth has
+        // the render size.
+        camera.far_z = 10000.0f;
+        size = {scene_width, scene_height};
+    } else {
+        if (!previous.valid) {
+            return {};
+        }
+        camera = MakeFrameGenCamera(current.inv_view, Multiply(previous.view, current.inv_view),
+                                    current.proj, previous.proj);
+        camera.far_z = 3000.0f;
+    }
+    if (!camera.valid) {
+        return {};
+    }
+    camera.near_z = Near();
+    camera.fov_y = VerticalFov();
+    if (size[0] != 0 && size[1] != 0) {
+        camera.aspect = static_cast<float>(size[0]) / static_cast<float>(size[1]);
+    }
+    return camera;
+}
+
 vk::ImageView CameraMotion::ObjectMotionView() const noexcept {
     return object_motion && object_motion->Enabled() ? object_motion->View() : vk::ImageView{};
 }
@@ -327,6 +361,7 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
     }
     camera.uv_to_view = {c[0], c[1], c[2], c[3]};
     camera.depth_to_z = {c[8], c[9]};
+    std::copy_n(c + 12, 12, camera.to_world.begin()); // for GetFrameGenCamera
     camera.valid = c[9] != 0.0f &&
                    std::all_of(camera.to_previous_clip.begin(), camera.to_previous_clip.end(),
                                [](float v) { return std::isfinite(v); });

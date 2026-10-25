@@ -92,6 +92,14 @@ struct Values {
     /// Set by the presenter: the game's image and the window it is shown in, in pixels.
     std::atomic<int> image_width{0}, image_height{0}, window_width{0}, window_height{0};
     std::atomic<int> frames_queued{1};
+    /// gow3 22 Oct 2026: NVIDIA Reflex (gow3_reflex.h, VK_NV_low_latency2): 0 off, 1 on, 2 on with
+    /// boost. Live. The driver then paces the game's frame start; GPUs or drivers without the
+    /// extension ignore it.
+    std::atomic<int> reflex{0};
+    /// gow3 22 Oct 2026: DLSS Frame Generation (frame_gen, GOW3_FRAME_GEN): 0 off, 1 one generated
+    /// frame between two real ones (vk_presenter.cpp). Live; needs an upscaler (TAA, FSR, DLSS):
+    /// its depth and motion vectors are the inputs.
+    std::atomic<int> frame_gen{0};
     // Startup: run.py turns them into patches and environment variables; "Apply and restart".
     std::atomic<int> render_resolution{0};
     std::atomic<int> engine_fps{120};
@@ -119,6 +127,10 @@ struct Values {
     /// DLSS (gow3_dlss.dll, NVIDIA RTX) is ready, or why not (null before the device exists).
     std::atomic<bool> dlss_supported{false};
     std::atomic<const char*> dlss_problem{nullptr};
+    /// DLSS Frame Generation (RTX 40 and newer, nvngx_dlssg.dll) is ready, or why not. Set by the
+    /// renderer; the presenter also reports a missing upscaler here while frame_gen is on.
+    std::atomic<bool> frame_gen_supported{false};
+    std::atomic<const char*> frame_gen_problem{nullptr};
     /// DLSS transformer model (dlss_model=j|k|l|m, GOW3_DLSS_MODEL): 0 J, 1 K, 2 L, 3 M. Live.
     std::atomic<int> dlss_model{DlssModelDefault};
     /// Set by the renderer: temporal anti-aliasing can run in this game (Uncharted: the camera
@@ -132,6 +144,8 @@ struct Values {
     /// ControlsMutex(); a change calls ControlsChanged() so the pad reapplies them.
     std::string pad_map, key_map, mouse_map;
     std::atomic<bool> mouse{true}, mouse_invert{false}, mouse_invert_x{false};
+    // Controller vibration (GitHub #166, 24 Oct 2026): off stops every rumble the game asks for.
+    std::atomic<bool> vibration{true};
     std::atomic<float> mouse_sens{1.0f}, stick_speed{1.0f};
     /// gow3 20 Oct 2026: mouse sensitivity while aiming (times mouse_sens) and up/down speed
     /// compared with left/right.
@@ -173,6 +187,8 @@ void Load();
 void ConfigureUpscalerSupport(bool fsr4, bool fsr411);
 /// After device creation: DLSS availability; a DLSS setting falls back to FSR 3.1 without it.
 void ConfigureDlssSupport(bool available, const char* problem);
+/// After device creation: DLSS Frame Generation availability (the setting stays as it is).
+void ConfigureFrameGenSupport(bool available, const char* problem);
 /// Startup-patched scene dimensions cannot change until run.sh prepares a new image.
 bool FixedRenderSession();
 int RenderPreset();

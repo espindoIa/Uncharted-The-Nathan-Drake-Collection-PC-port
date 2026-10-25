@@ -254,6 +254,14 @@ public:
         return false;
     }
 
+    /// gow3 24 Oct 2026 (dispatch runs, a check): the tick of the newest GPU write over 64 KiB
+    /// into the 1 MiB window `window` (address >> 20), 0 for none.
+    [[nodiscard]] u64 GpuWriteWindowTick(u64 window) const {
+        std::shared_lock lock{gpu_ranges_mutex};
+        const auto it = gpu_write_window_tick.find(window);
+        return it != gpu_write_window_tick.end() ? it->second : 0;
+    }
+
     /// gow3 22 Oct 2026: the page tracker, for its lock-free CPU-clean queries from the GPU command
     /// thread (MemoryTracker::CpuCleanToken).
     [[nodiscard]] const MemoryTracker* GetMemoryTracker() const noexcept {
@@ -301,8 +309,11 @@ public:
     /// them (the guest refills the buffer; see Rasterizer::ReadBackEopResults).
     /// gow3: `never_protect`: the pages stay accessible whatever the readback mode (results
     /// the guest reads only after a fence written when they land).
+    /// `guard_before_submit` (forwarding prototype): protect immediately, including false-sharing
+    /// accesses. A fault must submit an open tick on the GPU thread, not prewait on the guest.
     void DownloadRangesAsync(std::span<const std::pair<VAddr, u64>> ranges, bool protect = false,
-                             bool yield_to_cpu = false, bool never_protect = false);
+                             bool yield_to_cpu = false, bool never_protect = false,
+                             bool guard_before_submit = false);
 
     /// gow3 diagnostics (GOW3_CLOTH_PEEK=1): copies the GPU's data of [address, size) into a
     /// staging buffer (guest memory untouched); PollPeeks scans finished copies for exploded
@@ -794,6 +805,9 @@ private:
         /// for this readback only (GOW3_ASYNC_READBACK=1; =2 leaves them readable, stale).
         std::vector<std::pair<VAddr, u64>> watched;
         bool watching = false; ///< `watched` is read-protected (from the first poll after submission)
+        /// Forwarded memcpy: protected before return, even before submission. False-sharing
+        /// shortcuts must not open these pages; a CPU consumer submits/lands the copy first.
+        bool strict_guard = false;
         bool yield_to_cpu = false; ///< see DownloadRangesAsync
         bool open = false; ///< gow3: never protected (fence-gated results), in open_readback_ranges
         /// gow3: run once the data is in guest memory (fence labels of ray-cast batches).
@@ -841,8 +855,37 @@ private:
     std::unordered_map<u64, std::chrono::steady_clock::time_point> noisy_pages;
     /// Stops read-protecting one page for every pending readback (a false-sharing read).
     void UnwatchPage(VAddr page);
+    /// gow3 23 Oct 2026: the pieces of watching readbacks on each read-protected page, for guest
+    /// threads' read faults (LookupWatchedRead), which cannot look at pending_readbacks. Kept by
+    /// the threads that own pending_readbacks; address 0 marks an owner's page.
+    struct WatchedPiece {
+        const PendingReadback* owner;
+        VAddr address;
+        u64 size;
+        u64 tick;
+        std::chrono::steady_clock::time_point queued;
+        bool strict_guard;
+    };
+    mutable std::mutex watched_index_mutex;
+    std::unordered_map<u64, std::vector<WatchedPiece>> watched_index; ///< page number -> pieces
+    void IndexWatched(const PendingReadback& readback);
+    void UnindexWatched(const PendingReadback& readback, VAddr page, u64 size);
 
 public:
+    /// gow3 23 Oct 2026 (any thread): the watching readbacks on the page of [addr, addr + size):
+    /// how many, and the newest tick of those whose GPU bytes the range touches (0: none, a
+    /// false-sharing read).
+    struct WatchedRead {
+        u32 owners = 0;
+        u64 tick = 0;
+        u64 strict_tick = 0; ///< strict guard on the whole page, including false-sharing accesses
+        std::chrono::steady_clock::time_point queued{}; ///< of the newest readback it touches
+    };
+    [[nodiscard]] WatchedRead LookupWatchedRead(VAddr addr, u64 size) const;
+    /// gow3 23 Oct 2026 (guest thread): a false-sharing read on the page holding `addr`: makes
+    /// it readable at once if only those `owners` watch it, and has the command thread unwatch it
+    /// (and keep it unprotected for 10 s) as its own false-sharing path does.
+    bool OpenFalseSharingPage(VAddr addr, u32 owners);
     /// gow3: lands the pending readbacks that read-protect `page`, waiting for the GPU if needed
     /// (GPU thread: a CPU access faulted on that page and would fault again).
     void LandReadbacksWatching(VAddr page);

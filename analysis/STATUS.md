@@ -1,5 +1,36 @@
 # Uncharted compatibility work — 13 October 2026
 
+## Index (grep the heading text)
+
+New entries go at the end, dated, measured numbers only.
+
+- Grey/black ground: `Grey/black ground investigation, 14 October 2026 (afternoon)`, `FIXED 14 October 2026 (18:50): grey/black ground, unlit Nate`
+- Sound effects: `Sound effects silent (gunfire, footsteps, ambience); music and dialogue fine (14 October 2026, evening)`, `FIXED 14 October 2026 (19:3x): sound effects (footsteps, ambience, gunfire)`
+- Readbacks and ray-cast fences: `16 October 2026: readbacks, ray-cast fences, floating NPCs (0.1.2)`
+- Floating NPCs: `16 October 2026 (night): U2 floating NPCs / sinking Nate / leg flicker - real cause and fix`
+- Upscalers, DLSS, motion vectors: `18 October 2026: object motion vectors in the Uncharted games; DLSS from NVIDIA`
+- DLSS model M cost: `20 October 2026: model M's own cost (same model, same input and output)`
+- Low-end PCs: `17 October 2026 (night, 02:30-04:40): low-end PCs`
+- Radeon 780M: `18 October 2026 (night, laptop): Radeon 780M optimization (RTX 5060 switched off)`
+- U3 performance at the player's settings (also lists the measuring tools and A/A noise): `19 October 2026: Uncharted 3 performance at the player's settings`
+- Repo audits: `18 October 2026: GPU-offload audit, register scan, constant ring reuse`, `20 October 2026: repo audit fixes`, `20 October 2026: audit leftovers, second audit, performance quick wins`
+- Fork (espindoIa) notes: `Fork (espindoIa) notes, merged onto 0.3.0 (19 Oct)`
+- Multi-core roadmap phases (22 Oct): `22 October 2026: multi-core roadmap phases 0-2 and 5`, `22 October 2026: stage B dispatch fast paths (roadmap phase 4)`
+- Reflex and Frame Generation (decisions, measurements): `Reflex and DLSS Frame Generation (22 Oct)`
+- Reflex latency: `Reflex, corrected measurement (22 Oct, second round)`
+- FG frame limit and pacing: `Frame limit and pacing with Frame Generation (22 Oct, second round)`
+- Reflex + FG together: `Reflex + Frame Generation, one short run (22 Oct 2026)`
+- Reflex GPU idle diagnosis and early submit: `Reflex: GPU idle diagnosis and early submit (22 Oct 2026)`
+- FG model selector (none in NGX 310.9.16): `Frame Generation model (NGX)`
+- RTSS / MSI Afterburner OSD flicker, present queue, dev NGX banner: `RivaTuner / MSI Afterburner OSD flicker: the present queue (22 Oct 2026)`
+- Streamline backend (DLSS, FG, Reflex through SL 2.14.16; FG needs the window focused; the only option since the same day, NGX as fallback): `NVIDIA Streamline backend (23 Oct 2026)`, `Streamline as the only option (23 Oct 2026, later)`
+- Measuring method (ab2.sh, abstats.py, PresentMon, profilers): see the Tools list in the U3 performance section above, and AGENTS.md "Measuring".
+- U3 market stutter and CPU work (earlier 23 Oct benchmarks stood at the save's gate): `Cartagena market: stutter and lower frame rate from readback faults (23 Oct 2026)`.
+- Structural crowd experiments and exact rollback: `Structural crowd snapshots and output grouping (23 Oct 2026)`.
+- Market frame rate = Reflex sleep, pacer replaces it: `Reflex pacer: market frame rate (24 Oct 2026)`
+- Upstream merges: `21 October 2026 (night): upstream 0.5.0 merged`, `Upstream 0.6.0 merged (24 Oct 2026)`
+- Launcher overhaul (sidebar, Home checklist, keyboard/controller, dialogs): `24 October 2026: launcher overhaul`
+
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
 The game boots through the Collection menu and opening movie into gameplay.
@@ -3740,3 +3771,706 @@ game (not measured; the design budget is one `GetProcessTimes`/Toolhelp pass eve
 0.5 s file poll), long-session behaviour, a killed game (STOP) and a crashed one (exit code
 from the handle), multi-GPU machines, non-NVIDIA machines (the `Win32_VideoController` fallback
 was not run), localized Windows beyond the OEM-codepage decode of tool output.
+
+## Reflex and DLSS Frame Generation (22 Oct)
+
+Decisions.
+- Reflex goes through VK_NV_low_latency2 directly (no Streamline, no NVAPI). Driver 616.92 reports revision 2, which attributes submits between presents to the later present and ignores VkLatencySubmissionPresentIdNV. The sleep is before the first pad read of each guest frame; markers are keyed on the flip ordinal.
+- Frame Generation goes through NGX directly in the MIT bridge (ABI 3), not Streamline. Streamline's DLSS-G guide section 8.0 requires sl.reflex and rejects other Reflex integrations; NGX-direct does not require Reflex (the DLSS SDK FG guide only says FG "works with" Reflex).
+- Menu and launcher: reflex (Off / On / On + Boost) in the Performance tab/page, frame_gen (Off / On) under anti-aliasing / Display. The launcher adds nvngx_dlssg.dll like nvngx_dlss.dll (signature check); the package refuses it, apply_update.py CARRY and update_port.sh carry it over for the player.
+
+Reflex measurement. U3 chapter 2 save (backup_ch2meat), 4K DLAA, RTX 5070, live A/B, 6+6 windows of 10 s, 95% hierarchical bootstrap.
+- reflex 1 FPS 44.1 vs 53.5: diff -9.5 [-12.4, -6.7]. Median frame +2.9 ms [+1.5, +4.3]. (First round, 6+6 windows; superseded for the FPS cost by the corrected round below, 57.2 -> 44.0.)
+- CORRECTED (22 Oct, second round): this first round also said "driver timing latency, input sample to GPU render end: +1.7 ms [-2.2, +5.7] (no gain)", repeated in CHANGELOG and commit 8427816. That was wrong. The number came from joining the driver's timestamps (vkGetLatencyTimingsNV) to the host clock, which does not line up (a 288 s log against the windows; frames landed in the wrong windows). With the state written in every log row (below) Reflex does lower the latency. Flip ids stayed paired (lag 0).
+- PresentMon 2.6 reports no PC latency (InstrumentedLatency NA) for VK_NV_low_latency2, so latency comes from vkGetLatencyTimingsNV (GOW3_REFLEX_LOG).
+- The earlier cause ("the port's limit is its own CPU stages, which the driver's pacing model does not see") is replaced by the GPU-saturation explanation in the subsection below.
+
+### Reflex, corrected measurement (22 Oct, second round)
+
+Setup: RTX 5070, driver 616.92, U3 chapter 2 "meat market" save, DLAA K. Live A/B by toggle bit inside one session. Latency = driver timing "input sample to end of GPU work" from vkGetLatencyTimingsNV; every frame is labelled with its state in GOW3_REFLEX_LOG (15th column `state`: 0 off, 1 on with sleep, 2 on without sleep). 95% bootstrap with the state runs (windows) as units. 9 game sessions this round (one discarded: the game started late and the windows measured loading).
+
+4K DLAA (measured, live A/B, bootstrap on windows):
+
+| Setting | FPS | Latency change, mean | median | p95 |
+|---|---|---|---|---|
+| Off | 57.2 (port stdout 58.5) | - | - | - |
+| Reflex On | 44.0 (stdout 46); stdout 58.5 -> 46 is -21.4%, log 57.2 -> 44.0 is -23% | -10.6 ms [-11.0, -9.8] | -9.3 [-9.6, -8.9] | -3.2 [-3.9, -2.9] |
+| Reflex On + Boost | 48.6 (off 59.2 in that pair), -18%; FPS from the port's own frame count (play.py measure stdout, windows of 10 s), not from the driver log (log FPS for that session not computed); latency cells are log-derived | -9.9 ms [-10.3, -9.3] | -7.6 ms [-7.7, -7.6] | -2.0 ms [-3.4, -1.5] |
+
+Each latency cell is the difference (state minus off) of that statistic (mean, median, p95) of input to GPU end, with the state runs as clusters (2 runs per state, 150 frames dropped at each state change for the Boost row). The FPS percentages come from two sources and are not mixed: port stdout (58.5 off, 46 on, -21.4%) and the PresentMon-derived log (57.2 off, 44.0 on, -23%). The Boost pair (59.2 -> 48.6, -18%) is a port count (stdout), not log-derived.
+
+- Equal frame rate (measured, plain 45 FPS limit without Reflex against Reflex On): input to GPU end about 54 ms against about 34 ms, so about 20 ms better at the same FPS.
+- Input to GPU start (measured): 27 -> 15 ms.
+
+1080p DLAA (measured, CPU bound, about 95 FPS):
+
+| Setting | FPS | Latency |
+|---|---|---|
+| Off | 94.8 | input to GPU end about 14 ms |
+| Reflex On | 94.1 (cost under 1%) | about 14 ms; difference +1.2 ms [-0.4, +2.1], none |
+
+So Reflex only matters, and only costs, when the GPU limits the frame rate.
+
+Why it costs FPS. Measured: at 4K DLAA with Reflex off the GPU takes 16.9 ms per frame with no idle gaps (FPS-off period 16.8 ms); with Reflex On the GPU has idle gaps (p95 8.2 ms) and input to GPU start falls from 27 to 15 ms. The cost is entirely the sleep: Reflex mode plus markers without the sleep (toggle bit ReflexNoSleep 33554432) gave 58.6 FPS, the same as off (58.5).
+Inference, not proven: the driver's pacing leaves the GPU starved in part of the frames because of jitter in the CPU stages. No test isolated this mechanism (for example by removing the jitter); it only fits the numbers above.
+
+Tried, no recovery (measured):
+- GOW3_REFLEX_VARIANT=3 (render-submit span about 0): 41-46 FPS, mean sleep 17.5 ms, worse.
+- GOW3_REFLEX_VARIANT=2 (chained from the previous frame): 45-48 FPS.
+- GOW3_FRAMES_AHEAD=2: 43.8-49.4 FPS.
+- Boost: -18% (port count, stdout) instead of -21.4% without Boost (stdout); the log-derived -23% has no Boost counterpart.
+
+Marker attribution (driver revision 2): no queue is marked out-of-band; the shared graphics queue carries all game submits. An agent claim that marker ids must match VkPresentIdKHR is wrong per the spec (they are unrelated). Default stays off.
+
+### Frame limit and pacing with Frame Generation (22 Oct, second round)
+
+Frame limit (code change): with Frame Generation on, the limit counts shown frames and may be 144, 160, 165, 180, 200 or 240 (the menu lists them only when Frame Generation is supported); without it the limit stays at most 120. Before, a shown-frame limit of 120 held real frames to 60 FPS.
+
+Pacing of the generated frame, 1080p DLAA K, shown-frame limit 160 on a 165 Hz display, 3+3 windows (measured with PresentMon DisplayedTime and the port's FrameGen stats line):
+
+| Variant | Real FPS | DisplayedTime | Generated -> real gap |
+|---|---|---|---|
+| High-resolution timer (default now) | 80.0 | 96-97% of intervals exactly one refresh (6.06 ms), about 3.0-3.3% two refreshes | 6.5 ms (target 6.25) |
+| std::this_thread::sleep_until (toggle bit FrameGenStdSleep 67108864) | 80.0 | 96-97% one refresh, about 2.9-3.1% two refreshes | 7.2-7.5 ms (rounded to ms) |
+
+- The two-refresh intervals are the 160/165 beat (5 of every 165 refreshes repeat); the timer type made no difference there.
+- FG off, same scene: 84-90 FPS, intervals quantized to 12.12 ms (measured).
+- The new `FrameGen:` stats line prints every 5 s.
+
+Rejected experiment, removed: a deadline pacer for FG (absolute incremental deadlines, period filtered from arrival intervals). Real FPS fell from about 80 to 52-65 and 37-48% of displayed intervals were above 1.5x the median. Cause (read from its stats: period 19.3 ms, wait 17.7 ms per frame): the period is estimated from arrival intervals that the pacer itself shapes, so it can only ratchet up. A feedback on slack (frame ready earlier than its deadline) would be needed; not tried.
+
+The generated present is wrapped in out-of-band present markers (VK_NV_low_latency2) with the real frame's id so the driver does not count it as a new frame. This was implemented from the spec; the short run below ran both on at 1080p and did not validate it.
+
+### Reflex + Frame Generation, one short run (22 Oct 2026)
+
+Setup: U3 chapter 2, 1080p DLAA, GOW3_FRAME_GEN=1, GOW3_REFLEX=1, shown-frame limit 160, 3 windows of 10 s, no state toggling.
+
+Measured:
+- Real 78.1-78.9 FPS (port count). About 80.0 with FG and Reflex off in the earlier run, so about -1.5%.
+- Reflex stats lines: sleeps avg 0.09-0.14 ms, 0 timeouts, lag=1 (guest flips minus prepared flips; 0 in the 4K runs without FG; not investigated).
+- FG stats: gen == real, no skips, gap_ms mean 6.55-6.69, eval_ms mean 0.42-0.49.
+- Driver log (15 columns): marker order correct in 100% of rows (simStart<=simEnd, renderSubmitStart<=End, presentStart<=End, renderSubmitEnd<=presentEnd). 15% of rows have no input sample (868 of 5605; similar to the 12% of the FG-off 1080p log, 1957 of 16808). 6.6% of rows have no GPU times (371; 0 in the FG-off log).
+
+Problem found: the driver's GPU range per frame is much shorter with FG (median 1.8 ms) than without (10.3 ms), and input-to-GPU-end is 33.5 ms with FG vs 13.3 ms without. Under FG the driver's per-frame accounting does not describe the frame's real GPU work: the out-of-band present markers did NOT make the attribution coherent (or the generated present's work is split in a way the log does not show). Latency numbers with FG on are therefore not interpretable as end-to-end latency. Reflex pacing under FG at 4K (where it sleeps ~10 ms) remains untested and possibly mis-paced.
+
+State: stable and cheap at 1080p, attribution not validated, 4K untested.
+
+Not verified in this round:
+- Frame Generation together with Reflex at 4K, and the attribution of the driver's per-frame accounting under FG (see the short run above).
+- Generated-frame image quality.
+- Frame Generation at 4K (the pacing numbers are 1080p only).
+- VRR/G-SYNC state of the display during the tests: unconfirmed. DisplayedTime was quantized to the 165 Hz refresh, which fits a fixed refresh but does not prove VRR was off. The two-refresh share (the 160/165 beat) is only valid for a fixed refresh.
+- U1, U2 and other U3 chapters (one scene only).
+- Reflex marker attribution inside the driver (only the revision 2 behaviour above).
+
+Frame Generation smoke run (same scene, DLSS DLAA, window 2560x1440).
+- Feature created at window size with depth/motion 3840x2160. Real 48.5 FPS, displayed 98.1 FPS (PresentMon 978 presents vs 485 real). No NGX errors.
+- Without nvngx_dlssg.dll: no FG, presents equal real frames.
+
+Not verified / open: generated-frame image quality; hudless is not passed (the HUD may ghost; the upscaled scene precedes the game's post/tonemap, so it is not a valid hudless); U2's camera view x points to screen left (NGX documents right); TAA and FSR paths; resize and HDR; live toggling; latency with FG; U1, U2 and other chapters; long soak; GPUs without FG; ring memory about 100 MB per slot at 4K.
+
+Toggle bits: ReflexSleep 8388608, FrameGeneration 16777216, ReflexNoSleep 33554432, FrameGenStdSleep 67108864. Settings and env: reflex / GOW3_REFLEX, GOW3_REFLEX_EXT=0, GOW3_REFLEX_LOG (15th column `state`), GOW3_REFLEX_VARIANT (diagnostic, 2/3); frame_gen / GOW3_FRAME_GEN, GOW3_FRAME_GEN_EXT=0, GOW3_NGX_LOG.
+
+## Reflex: GPU idle diagnosis and early submit (22 Oct 2026)
+
+Setup (all numbers measured 22 Oct): U3 chapter 2 Mercado de Carne, 4K DLAA, RTX 5070, frame generation off, reflex 1, GOW3_GPU_PROFILE=1. Toggle files switch the states live inside one session; windows of 15 s (30 s in the diagnosis session), 2 per state, no confidence intervals, one session each.
+
+### Diagnosis: where the Reflex frame rate goes
+
+Diagnosis session, 4 windows of 30 s in the order on, off, off, on:
+
+| Measure | Reflex on | Reflex off (toggle ReflexSleep set; the log shows mode 0) |
+|---|---|---|
+| FPS, two windows | 53.5 and 52.6 | 63.7 and 65.1 (about -19% with Reflex on) |
+| GPU time per frame (profiler) | 18.9 ms | 15.65 ms |
+| DLSS evaluate | 8.0 ms | 8.2 ms |
+| GPU clock mean, two windows | 2955 / 2956 MHz | 2932 / 2926 MHz |
+| GPU utilization | 79% | 96-97% |
+| Power | 172 W | 204 W |
+| "(between submissions: GPU idle)", total | 4.12 ms/frame | 0.48 ms/frame |
+| of which at Process loop -> Rasterizer::Flush (sceGnmSubmitDone tail, liverpool.cpp ~:659) | 3.48 ms (5.6 events/frame) | 0.21 ms (3.0 events/frame) |
+
+- The GPU work itself is unchanged (DLSS evaluate 8.0 vs 8.2 ms) and the clocks do not explain the loss (they are higher with the sleep). All of the extra GPU time per frame is idle time between submissions, mostly at the end-of-batch flush of sceGnmSubmitDone.
+- Mean sleep 8 ms. Reflex timeouts 0.
+
+### Early submit (change)
+
+While Reflex sleeps, the GPU command thread now submits the recorded work of a sceGnmSubmitDone batch every N draws and dispatches instead of only at the batch end (liverpool.cpp, EarlySubmit). Toggle bit ReflexEarlySubmit 134217728 in Disabled2 (bit set = old behaviour). Env GOW3_REFLEX_EARLY_DRAWS, default 80, 0 = never. Active only while Reflex sleeps (gow3_reflex SleepActive()).
+
+| Session | Early submit | No early submit | Sleep off |
+|---|---|---|---|
+| Threshold 80, FPS | 54.8, 54.9 | 52.5, 52.5 | 65.7, 67.5 |
+| Threshold 80, GPU ms/frame | 18.2 | 19.1 | - |
+| Threshold 80, GPU idle ms/frame | 3.9 | about 4.5 | - |
+| Threshold 24, FPS | 53.4, 53.2 | 50.9, 50.6 | 60.3 (one window had a 246 ms hitch) |
+| Threshold 24, GPU ms/frame | 18.8 | 19.6 | - |
+| Threshold 24, GPU idle ms/frame | 4.2 | 4.5 | - |
+
+- Gain: about +2.3 to +2.6 FPS (about 4-5%), independent of the threshold (80 or 24). Reflex stays well below sleep off.
+- The 3.4-3.5 ms gap at the SubmitDone flush stack did not move: it stays 3.41-3.48 ms with early submit on.
+
+INFERENCE, not proven: with the sleep the GPU is drained at each batch, so the frame time follows the CPU chain (guest simulation and command production, stage A) instead of overlapping the previous frame's GPU work. The loss is then largely inherent to less pipelining, not a port stall that early submission removes. This fits the unchanged flush-stack gap above; no test isolated it.
+
+### Frame Generation model (NGX)
+
+NGX SDK 310.9.16 (tag v310.9.16) has no documented application-side parameter to choose the DLSS-G model or preset. The model (Preset B) can only be set through the NVIDIA App, so no launcher or menu selector was added. Header evidence: nvsdk_ngx_defs_dlssg.h has no preset or model parameter; the creation parameters include UserInterfaceRecompositionEnabled and LiteCandidateBlendingEnabled, which are not model selectors. Whether the NVIDIA App override reaches this NGX-direct port is unknown.
+
+Also: a build made during packaging (gow3-probe.exe 12:56) exited silently right after boot twice; a rebuild with build.sh fixed it. Cause unknown, not investigated.
+
+Not verified:
+- Input latency with early submit was not re-measured.
+- 1080p was not re-run.
+- Frame Generation together with Reflex at 4K is untested.
+- No confidence intervals: 2 windows per state, one session each.
+- No independent concurrency review of EarlySubmit.
+- Reflex logs (driver timings) were not collected in these sessions.
+- Cause of the silent boot exit of the packaged build is unknown.
+
+Toggle bit: ReflexEarlySubmit 134217728. Env: GOW3_REFLEX_EARLY_DRAWS.
+
+## RivaTuner / MSI Afterburner OSD flicker: the present queue (22 Oct 2026)
+
+Report (player, watching): the MSI Afterburner OSD flickered with Frame Generation on, and a "DLSS SDK -- DO NOT DISTRIBUTE" banner flickered too; with FG off the OSD still flickered.
+
+Method. Desktop captures (C:\dev\bench\capscreen.ps1, GDI CopyFromScreen of the 2560x1440 screen; the port's own play.py shots are taken before the swapchain and never show third-party overlays), 120 per state, U3 bar (bench save), player's settings (1080p output, DLSS M, borderless, vsync, limit 120, Reflex on), RTX 5070, RTSS 7.3.7 (RTSS.exe still reports 7.3.5.28314 in its version resource; the uninstall entry says 7.3.7, build 28314 is the 7.3.7 release), MSI Afterburner 4.6.7 Beta 2. Classifier C:\dev\bench\osdclass.py: OSD present = share of strong horizontal edges (text with its shadow) in rows 30-100, columns 0-480 above 0.3% (frames without it ~0, with it ~4). Its first version counted white pixels and missed thin anti-aliased text: its 31%/52% readings were wrong and are superseded by the table below.
+
+Banner: from the development NGX DLL, test setup only.
+- gow3_pc/out/nvngx_dlssg.dll was the DLSS SDK 310.9.16 `dev` build (SHA-256 B49508DE..., same as C:\dev\DLSS\lib\Windows_x86_64\dev), copied by hand during the 22 Oct FG work; no script copies it. The player's install has the `rel` build (8D59D49B...). The banner was in 24 of 60 captures with FG on, never in the port's internal (real) frame, gone with FG off: NGX draws it into generated frames. Replaced by the `rel` build in gow3_pc/out (dev copy kept as C:\dev\bench\nvngx_dlssg.dev.dll): 0 of 120 captures since.
+
+OSD (measured, 120 captures each):
+
+| Present queue | State | OSD shown |
+|---|---|---|
+| Third queue (20 Oct default) | FG off | 0% |
+| Third queue | FG on | 5% (8% with DISABLE_CAPFRAMEX_VULKAN_LAYER=1) |
+| Third queue | FG off, limit 60 | 100% |
+| Graphics queue (GOW3_PRESENT_QUEUE=0) | FG off / FG on / Reflex off / limit 60 | 100% each |
+| Automatic (new build, graphics queue here) | FG off / FG on | 100% each; player: "parou de piscar" |
+
+- RTSS is loaded in the game (RTSSHooks64.dll, RTSSVkLayer64.dll; CapFrameX's cfx_osd_vklayer.dll too). Disabling CapFrameX's layer changed nothing.
+- RTSSHooks64.dll names (strings, not disassembly): hooks vkCreateDevice, vkCreateSwapchainKHR, vkQueuePresentKHR; uses vkGetDeviceQueue, vkQueueSubmit, vkQueueWaitIdle, fences; no vkCreateSemaphore. Inference, not proven by disassembly: RTSS draws the OSD inside the present hook with a submission on a queue it fetches itself, ordered by queue order rather than a semaphore, so a present on another queue can leave before the draw. That fits all rows: on the graphics queue the draw and the present share one queue; on the third queue at 120 FPS the present wins, at 60 FPS the draw has time.
+
+Change: Instance::CreateDevice picks the third queue only when another adapter drives the screen (or that cannot be told): gpu/shim/gow3_display_adapter.cpp compares the DXGI adapter that owns the window's monitor with the Vulkan device LUID. Log line "GPU: presents on the graphics queue (the screen is on this GPU)". GOW3_PRESENT_QUEUE=1 forces the third queue, =0 the graphics queue. The 20 Oct third queue was made for hybrid laptops (cross-adapter presents under the submit lock froze the game 0.3-0.8 s); the desktop check then showed no gain from it.
+
+Performance A/B (bench.sh, 4K output, DLSS M, limit 120, FG and Reflex on, MT on, one game session per window since the queue is fixed at device creation; C:\dev\bench\pqab.sh), real FPS by the port's count:
+- Automatic (graphics queue): 54.6, 54.4, 53.9.
+- Third queue: 54.2 in the one normal session; the A/A of the same day (third queue, 12 windows in one session) 54.6 [interval of the A/A difference -0.16, +0.30].
+- No regression seen; too few sessions to claim a gain or loss in either direction.
+- Third-queue anomalies, unexplained: one session never reached gameplay ("The game is not running"), one ran at 26.6 real / 53.2 shown FPS (p50 37.8 ms) in normal gameplay (end shot: the bar). Logs not kept (boot.log is overwritten per session). Not seen in the automatic sessions (3) nor in the A/A session.
+
+Not verified: a hybrid laptop with this build (the automatic choice should keep the third queue there: the iGPU owns the monitor's DXGI output); other overlays (Steam, Discord, OBS); U1 and U2; exclusive fullscreen; HDR; the cause of the two third-queue anomalies; RTSS's draw path by disassembly.
+
+## NVIDIA Streamline backend (23 Oct 2026)
+
+Goal: DLSS super resolution, DLSS Frame Generation, Reflex and PC Latency through NVIDIA Streamline (SL) 2.14.16 instead of the port's NGX bridge, as an option. Setting `nv_backend=ngx|streamline` (GOW3_NV_BACKEND), read at start; default `ngx`.
+
+Design:
+- SL is loaded by the runtime itself (gpu/shim/gow3_streamline.cpp), not by the MSVC bridge: the headers are MIT (vendored in gpu/third_party/streamline, `sl_nvperf.h` left out, Nsight Perf licence), the DLLs are loaded at run time. Only that file includes them, compiled with -std=gnu++20 (under C++23 sl_pcl.h aliases std::to_underlying and does not compile).
+- Load order: `sl.interposer.dll` from the exe folder, NVIDIA signature checked (sl::security::verifyEmbeddedSignature; GOW3_SL_UNSIGNED=1 accepts development DLLs), slInit with eDisableCLStateTracking | eUseManualHooking | eUseFrameBasedResourceTagging (the last one is needed by slSetTagForFrame), OTA off, projectId of the DLSS bridge. Any failure prints "Streamline: not used (<reason>); the NGX bridge stays" and the NGX path runs as before. The missing VC++ 2015-2022 runtime is one such reason (LoadLibrary error).
+- Vulkan routing (vk_platform.cpp, vk_instance.cpp): only vkCreateInstance, vkEnumeratePhysicalDevices, vkCreateDevice, vkCreate/DestroyWin32SurfaceKHR, swapchain create/destroy/get images, acquire, present and vkDeviceWaitIdle go through SL's proxies. Everything else stays on vulkan-1: SL's vkGetDeviceProcAddr also wraps hot vkCmd* calls (its log: "Hook sl.common:Vulkan:CmdBindPipeline is NOT supported"), which the recorder threads do not need.
+- Super resolution (vk_dlss.cpp, Dlss::ViaStreamline): viewport 1 with its own frame counter. The SL mode comes from slDLSSGetOptimalSettings (PickDlssMode, gpu/shim/gow3_streamline_mode.h): the smallest optimal size that holds the port's input, with the mode's minimum at or below it. Unit test `streamline-mode-test`.
+- Frame generation (vk_presenter.cpp): viewport 0, frame index = Reflex flip serial; inputs tagged per frame with slSetTagForFrame; the backbuffer tag only when the image is letterboxed (with a full-size tag SL warned "Invalid backbuffer resource extent"). DLSS-G is unloaded at device creation when frame_gen=0 and loaded/unloaded later with a swapchain recreate (Swapchain::RecreateAround; Swapchain::Destroy now clears the handle, the recreate otherwise destroyed it twice).
+- Reflex (gow3_reflex.cpp): markers, sleep and reports through SL's Reflex and PCL. With SL frame generation on, Reflex is forced to at least On: DLSS-G reports eFailReflexNotDetectedAtRuntime without it.
+- Launcher (Display) and in-game menu ("Applied on restart") offer the choice when sl.interposer.dll is present.
+- Packaging: STREAMLINE_SDK=<SL release> adds sl.interposer/common/dlss/dlss_g/reflex/pcl.dll (release license.txt: MIT) and licenses/nvidia-streamline. The nvngx_* DLLs of the release (RTX SDK licence) and NvLowLatencyVk.dll (Reflex SDK licence) stay out; the script refuses NvLowLatencyVk.dll. The player still adds nvngx_dlss.dll / nvngx_dlssg.dll.
+
+Frame generation only interpolates with the window focused:
+- Automated sessions (game started in the background) gave SL frame generation 60 real and 60 shown FPS in most runs, 120 shown in some. SL's verbose log (GOW3_SL_LOG=2): "dlfgPresent.cpp [shouldInterpolate] DLSS-G disabled: window not focused", then "interpolation state changed from disabled to enabled" once the game window got the focus. NGX frame generation does not depend on the focus.
+- C:\dev\bench\focusgame.ps1 gives the game window the focus after gameplay is reached (FOCUS=1 in bench.sh, slsmoke.sh, slab.sh). Focused, U3 meat market, 1080p, model K, FG on, Reflex off: 60.0 real / 120.2 shown FPS, shown p50 8.33 ms, p99 9.57 ms, 1% low 99 FPS (NGX in slab2, same case: 60 / 120.1, p50 6.07, p99 12.19 ms, 1% low ~80). One session; not an A/B.
+- Limiter fix: before, Presenter::FrameGenActive was true whenever the mode was on, so the frame limit halved real frames while SL showed none generated (60 real / 60 shown at a 120 cap). Now the presenter reads slDLSSGGetState every frame on the present thread and counts shown frames only while SL presented 2 frames for the last real one (one frame late). Unfocused check: about 86 real FPS, no generated frames, no halving. After 2 s on but not interpolating the log says so once, with whether the window has the focus. The FrameGen (Streamline) stats line now has with_inputs= and doubled=.
+
+Performance, interleaved A/B `slab2` (C:\dev\bench\slab.sh, slstats.py; one game session per window, 20 s standing, U3 meat market save; base = 2bf79ce build, ngx and sl = the new build; 3 rounds, rotated order; RTX 5070), real FPS by the port's count, medians, [bootstrap interval of the difference]:
+
+| Case | base | ngx | sl | sl - ngx |
+|---|---|---|---|---|
+| sr1080k (1080p, DLSS K, no FG, no Reflex) | 88.73 (3) | 89.21 (3) | 88.56 (3) | -0.65 [-2.77, +1.52] |
+| sr4k (player's settings, 4K DLAA, no FG, no Reflex) | 56.76 (3) | 55.49 (2) | 55.33 (3) | -0.16 [-0.50, +0.19] |
+
+- sr4k: SL's 1% low was 1.22 FPS lower than NGX [-1.83, -0.70]. The base's first session (59.0 FPS) is high against all the others (55.1-55.8); without it the base sits with the rest.
+- Upscaling through SL: no frame rate difference resolved.
+- 4K, FG + Reflex on (fgrx4k): SL 43.15 real FPS (3 sessions) against base 47.53 (2) and ngx 47.36 (1), -4.4 FPS [-4.89, -4.05] against base. Those SL sessions were not focused (no generated frames), so the loss is not frame generation work; SL's Reflex sleep grew to about 12-13 ms per frame. An earlier focused SL run at 4K: about 41.5 real / 83 shown, NGX 47.5 / 95. Not explained.
+- slab2's FG sessions with SL are invalid for frame generation (not focused). The focused FG A/B (slab3) was stopped by the user after one session (base fgrx4k: 48.7 real / 97.5 shown).
+- Harness: slab2 lost sessions when switching executables ("no gameplay", boot.log locked); slab.sh now copies the variant's exe with retries before each session.
+
+Environment note: since about 09:20 on 23 Oct every build, the 2bf79ce one included, shows SyncInterval 0 and AllowsTearing in PresentMon (Hardware: Independent Flip). Not caused by this change; cause not looked for.
+
+Seen once, not investigated: in one SL 4K screenshot Nate's head was missing in an idle animation (C:\dev\bench\sl_fg4k_on2.png); other SL shots show it. One NGX 1080p FG session (slab2 fg1080k_ngx_3) ran at 76.9 real / 104.3 shown instead of 60 / 120.
+
+Not verified: the regression checks (RTSS / Afterburner OSD with SL, Vulkan validation, U1 and U2 boots, a soak), the focused FG A/B (user stopped it), Reflex latency through SL (PCL markers in PresentMon or NVIDIA's overlay), the 4K Reflex loss's cause, packaging with STREAMLINE_SDK (script not run), a PC without the VC++ runtime (fallback path read, not run), HDR, exclusive fullscreen, AMD/Intel GPUs (SL should not load features there; not run).
+
+### Streamline as the only option (23 Oct 2026, later)
+
+The player asked for Streamline as the only option, with NGX kept as a fallback.
+- The `nv_backend` setting is gone: the menu row, the launcher choice, the ini key and the restart check. An old `nv_backend=` line in an ini is ignored. `GOW3_NV_BACKEND=ngx` (or 0) keeps Streamline off for A/B tests.
+- Streamline is not loaded without `nvngx_dlss.dll` (it would only run Reflex, which the direct path covers) or without an NVIDIA DXGI adapter (AMD/Intel PCs: its vkCreateDevice adds its plugins' extensions and features). If the chosen Vulkan device is not NVIDIA's (a hybrid laptop's other GPU picked in the settings), Instance::CreateDevice calls Gow3Streamline::Abandon (slShutdown) and puts back vulkan-1's vkEnumeratePhysicalDevices, vkCreateDevice and surface entries before the device is created.
+- In-game menu: when DLSS runs on the NGX bridge, the "NVIDIA Streamline" row gives the reason Streamline did not load. The Frame Generation help (menu and launcher) says that frames are only added while the window has the focus.
+- Packaging without STREAMLINE_SDK now prints a warning.
+
+Tested: build.sh. One U3 session (1080p, DLSS K, FG and Reflex off) with no GOW3_NV_BACKEND: "Streamline: SDK 2.14.16 loaded", "DLSS: through Streamline", "Reflex: through Streamline", 93 real FPS. PresentMon showed SyncInterval 1 again, without tearing, so the morning's tearing note no longer applies.
+
+Not tested: the Abandon path (no non-NVIDIA GPU here), a PC without NVIDIA or without nvngx_dlss.dll, GOW3_NV_BACKEND=ngx after this change.
+
+## Cartagena market: stutter and lower frame rate from readback faults (23 Oct 2026)
+
+Report (player): walking back from the U3 chapter 2 save (the alley in front of the meat market's gate) through the market into the street, a stutter, then the frame rate settles lower. All of the day's earlier measurements stood still at the gate.
+
+Method: C:\dev\bench\mktquick.sh / mkab.sh / mkabhere.sh (bench save, route analysis/play/routes/mkt_back.txt = 15 s walking back, frame log GOW3_FRAME_LOG with perf_counter marks, mktana.py / mqstats.py), player's settings (4K DLAA M, FG + Reflex on, cap 120), RTX 5070. A/Bs alternate the toggle file in one session, 10 s windows, order flipped each round.
+
+Cause: guest threads' read faults on pages that pending readbacks read-protect (GOW3_ASYNC_READBACK=1, mode 1).
+- Street (current build): ~250-290 per 5 s, ~900-1000 ms per 5 s across the game's threads. Stall frames (40-57 ms) held 30-55 ms of fault-handler time. Same route with mode 2 (pages left readable; unsafe, 16 Oct Cartagena crash): walk + street 50.9 real FPS, p99 26.6 ms, no frame over 33 ms, against 40.6 FPS, p99 34.5 ms, 18 frames over 33 ms.
+- ~70% were false sharing: the guest reading its own bytes beside GPU bytes on the same page (guest 0xe3c753 in PrepareInstanceForRendering, fg-draw-mgr.cpp, ~130 per 5 s; 0xea640e). Each went through the GPU command thread (~1.3 ms), which then unwatched the page.
+- The rest read GPU bytes: all from one memcpy (guest 0xe3c6e7, found by unwinding the C runtime's memcpy in the fault statistics). PrepareInstanceForRendering copies the instance's bone matrices ([inst+0x110], numJoints x 48 bytes, written by the cloth solvers cs 1c957b01 / 809864d3) into a per-frame allocation, the skinning palette the GPU reads. 74-108 per 5 s, readback queued ~5.5 ms before the read, then ~8.5-9.5 ms waiting for the GPU (the GPU runs ~14 ms behind the command thread). The command thread waited in CompleteReadbacks meanwhile.
+- New diagnostics (GOW3_FAULT_STATS=1): "read faults by kind", library callers unwound to the guest, "Guest reads of GPU bytes on their way back", "Compute rings (5 s)" (~2,600 compute-ring submissions a second, waiting 2.3-3.3 ms on average for the command thread), "Forwarded guest copies".
+
+Changes (toggle file, second word; bit set = old behaviour):
+- GuestFalseSharing (1<<28): a read fault on a page whose watching readbacks' GPU bytes the read misses makes the page readable on the faulting thread (PageManager::OpenForReads, under the page lock, only while those readbacks are the page's only read watchers) and queues the usual unwatch for the command thread. BufferCache keeps an index of the watching readbacks' pieces per page (IndexWatched / UnindexWatched, its own mutex) for these lookups. 182 such faults cost 1.2 ms per 5 s.
+- GuestReadPrewait (1<<29): a read of GPU bytes waits for the readback's submission on the faulting thread first; the command thread then lands it without waiting. Command thread time on these faults 800-900 -> ~60 ms per 5 s; no frame rate change by itself (A/B in the street, two spots: 44.7/44.9 and 41.9/42.1 FPS on/off): the game thread still waited.
+- ForwardedCopies (1<<30): a guest memcpy of 256 bytes or more whose source overlaps GPU bytes of a watching readback is made by the GPU (Rasterizer::ForwardGuestCopy: on the command thread, ObtainBuffer + vkCmdCopyBuffer, in stream order after the solver), and the destination comes back with the submission's small-write readback. ~110 copies per 5 s (~0.8 MB), 0.03-0.06 ms each; read faults on GPU bytes: 0.
+
+Measured (all three bits, one session each, 3 rounds):
+- Street after the walk (~1,300 draws): 48.0 against 43.8 real FPS (+9.6%), each round higher (+3.5, +3.4, +5.8); p99 28.8-30.7 against 32.4-34.6 ms.
+- Crowded street (camera turned, ~2,500 draws): 51.4 against 45.0 (+14%), each round higher (+7.4, +5.9, +5.9); p99 27.9-30.6 against 30.2-32.9 ms; frames over 33 ms 3 against 6.
+- Screenshots: characters and their cloth look as before. 1080p (FG and Reflex off) after the change: 75-77 FPS in the crowded street, the GPU command thread fully busy (idle 0.3%): the next limit.
+
+The numbers above are from the initial forwarding prototype, not the subsequently hardened build. Source review found two correctness gaps: forwarding initially returned before the destination was read-protected, so an immediate CPU read could see old RAM; and a new readback could add a watcher to an early-opened page without restoring its protection (the watcher count was already nonzero). ForwardGuestCopy now queues an exact protected destination readback, submits it and establishes its watches before returning. PageManager tracks early-opened pages under the page lock and restores protection when a new read watch arrives. Forwarding refuses GPU-side callers, overlapping ranges, unaligned Vulkan copies and overflowing/oversized ranges.
+
+Further CPU work (not yet measured): RingAssociative (Disabled2 bit 31) uses 16,384 four-way sets for constant-ring snapshots instead of 4,096 direct-mapped slots. It retains the existing epoch, CPU/watch-token, GPU-write and ring-lifetime checks; no live guest pointers substitute for snapshots. ComputeSpecScratch (bit 32) reuses compute-specialization resource-vector storage, rebuilding every descriptor and runtime field on every dispatch. Profile st1: CollectRingBindings 31.6% inclusive, CopySparseMemory 13%, compute GetProgram 10.9% (specialization construction 6.1%).
+
+Rejected experiment: queued fault/cache commands on stage B instead of draining it (temporary bit 31, removed before RingAssociative). Street cs1 81.1/74.2 FPS on/off was invalid: draws varied from 488 to 2,816. Static gate cs2 94.2/95.8, no consistent gain. The code was removed, not left enabled.
+
+Not verified: performance of the hardened forwarding build; U1 and U2 (memcpy forwarding applies to any game, only when a source is under a readback watch); a long session; laptops. User requested fewer tests; no regression suite or stability soak run.
+
+Short hardened check `ringassoc1` (1080p gate, FG/Reflex off): 25.8 FPS with ring/spec optimizations off, 31.2 on; repeated "Stuck fault" readback landings at 0x103c561000, versus the earlier 94–96 FPS gate baseline. The user subsequently reported high external PC load during the tests: this comparison does NOT establish a regression or a useful ring-cache gain. Forwarding remains opt-in (`GOW3_FORWARD_COPIES=1`), preserving destination-read protection. The old 9–14% unsafe-prototype gain must not be claimed for the default build. `ringassoc2`, forwarding disabled: 82.1/88.2 FPS off/on in one six-to-ten-second comparison, external load unmeasured; preliminary only.
+
+Retest requested after the external-load report: C:\dev\bench\retest_cpu.py, one session, six-second windows, original-path baseline bracketing the changes. Records GetSystemTimes and per-process CPU deltas (external cores, total CPU and top external processes) for each window. No processes terminated except its own game. Gate windows compare constant-ring/spec changes and the opt-in stage-B command experiment; the backward market route then compares guest-read handling and protected forwarding. The stage-B path is restored as opt-in (`GOW3_COMMANDS_STAGE_B=1`, Disabled2 bit 34), with pending unknown task writes preventing stage-A snapshots ahead of the command. No repeated rounds or regression suite requested.
+
+`cpu_retest1` results (1080p DLAA K, FG/Reflex off, six-second windows; `C:\dev\bench\cpu_retest1.load.json` and `.boot.log`):
+
+| Location / enabled change | Real FPS | p99 ms | External CPU cores |
+|---|---:|---:|---:|
+| Gate, original path before | 88.4 | 15.5 | 2.05 |
+| Gate, snapshot cache + specialization scratch/direct variant checks | 97.3 | 15.9 | 1.47 |
+| Gate, stage-B commands only | 86.0 | 15.9 | 2.01 |
+| Gate, original path after | 81.3 | 18.6 | 2.45 |
+| Street, original path before | 77.0 | 17.3 | 1.73 |
+| Street, guest-read handling | 79.2 | 16.3 | 1.51 |
+| Street, forwarding enabled | 82.7 | 14.6 | 1.08 |
+| Street, original path after | 82.4 | 15.0 | 0.99 |
+
+Interpretation: the baseline itself moved materially with external load. Cache work is promising, not an isolated percentage gain. Stage-B commands have no demonstrated gain at comparable measured external load (86.0 vs 88.4). No "Forwarded guest copies" line occurred and GPU-byte fault counters stayed zero in this CPU-bound session: the forwarding window did not exercise forwarding and cannot validate its performance. A second short session at the player's 4K DLAA M + FG/Reflex settings is needed for that path; no extra CPU rounds. No stuck-fault/assert/device-loss lines in cpu_retest1. Toggle file restored to 0 0 and the test's game stopped.
+
+The direct compute-variant check (Disabled2 bit 33, ComputeVariantCheck) was added before this retest. Buffer-only compute variants validate all current descriptors, binding validity, stride/format/swizzle fields and RuntimeInfo against the previously used specialization; on any mismatch they run full construction. No resource addresses or contents are assumed immutable. It shares DescribeBuffer with the full constructor to avoid divergent field rules.
+
+`cpu_retest4k` (4K DLAA M, FG/Reflex on, backward route to the street, four six-second windows): original before 39.7 FPS (p99 32.8 ms, 1.17 external CPU cores); guest-read handling 43.6 (35.3 ms, 2.13 cores); protected forwarding 42.9 (32.7 ms, 1.55 cores); original after 44.1 (33.7 ms, 2.52 cores). Forwarding was exercised: 118 GPU copies / 5 s (~848 KB); GPU-byte read fault time fell to 151.7 ms in one reporting interval. However, this is NOT a valid FPS comparison: Streamline lost window focus during the guest-read/forwarding sequence (log: "game window does not have the focus", doubled fell from all frames to zero), and external CPU load also changed. Do not use these numbers as a gain/loss claim. The previous 25–31 FPS result was not reproduced, but its cause is not resolved. Eleven "Stuck fault" notices appeared across the whole run, including before the forwarding window; not attributable to forwarding alone. No assert/exception/device-loss report found. Game stopped and original toggle mask 0 0 restored. No further sessions started in that retest task: user requested fewer tests.
+
+## Structural crowd snapshots and output grouping (23 Oct 2026)
+
+The user authorized invasive structural experiments, provided the exact previous state remains
+recoverable. Local checkpoint **c48f91f** contains the preceding CPU experiments and engineering
+notes; its matching unstripped executable is `C:/dev/bench/cpu_before_structural_20261023.exe`.
+Nothing pushed and the installed playable package has not been replaced. Do not reset unrelated
+work to return: leave the new environment overrides unset (their paths are opt-in), or build the
+checkpoint separately / use the preserved executable for an exact executable-level comparison.
+
+**Persistent immutable mesh snapshots.** Only read-only slots 0..4 of crowd compute `8f067540`,
+1 KiB to STREAM_THRESHOLD, qualify. A bounded 64 MiB append-only mapped buffer never overwrites an
+allocation; CPU write/unmap watch versions invalidate lookups, not already queued GPU bytes.
+Each watch promotion gets a unique increasing version; a range checks every page and takes the
+maximum version, so dropping/re-watching ANY page changes its answer. The global watch generation
+avoids walking unchanged ranges. Exact address/size checks reject compact-key collisions.
+GPU-written, backing-written and pending-written inputs are refused, changing bone slot 5 stays
+on the original ring path, and capacity exhaustion falls back without reclaiming in-flight bytes.
+No generic asynchronous memcpy, live guest pointer or omitted shader work is used.
+
+`C:/dev/bench/staticmesh_ab.py`: one U3 session per version, backward market route ending on the
+street, 1080p DLAA K, FG/Reflex off, four eight-second OFF/ON/ON/OFF windows, external CPU load
+recorded. These are short CPU-isolation measurements, NOT the player's 4K settings and NOT
+independent replications or an A/A-calibrated gain:
+
+| Test / window | Real FPS (S events) | p99 ms | External CPU cores |
+|---|---:|---:|---:|
+| staticmesh1 off / on / on / off | 79.8 / 79.4 / 81.6 / 79.8 | 16.3 / 16.4 / 16.0 / 15.9 | 1.41 / 1.81 / 1.52 / 1.44 |
+| staticmesh2 off / on / on / off | 78.2 / 79.9 / 78.9 / 78.5 | 15.9 / 15.8 / 16.2 / 15.6 | 2.16 / 2.30 / 2.44 / 2.10 |
+
+staticmesh1 qualifies/reuses the pool but retains mapping/dirty checks per buffer; staticmesh2
+tries residency BEFORE those checks and adds sampled byte verification. Its `.boot.log` records
+985 uploads, ~4.5 MiB resident, about two million hits per full five-second ON interval, no
+capacity failures, **29,870 sampled byte comparisons and zero mismatches**. The `.png` records
+the actual street view. Neither test establishes a material overall FPS or p99 improvement.
+Keep this prototype opt-in (`GOW3_STATIC_MESH_SNAPSHOTS=1`, Disabled2 bit 35 restores transient
+snapshots live). `GOW3_STATIC_MESH_CHECK=1` samples every 256 uses, independently of the expensive
+full transient-ring check; a mismatch refuses the snapshot and takes the original path.
+
+**Per-dispatch output grouping.** The existing `prof_st1` stage-B sampling report 7 (matching
+executable in that folder; symbolized with `symprof_k.py`) attributes 23.5% inclusive to BindBuffers,
+15.4% to ObtainBuffer, 4.7% to GpuRangesAdd and 10.7% to CompleteReadbacks. This is an older profile,
+not a new measured speedup. The next experiment acquires/synchronizes slots 6..8's overlapping
++0/+12/+20 output views once per dispatch, while preserving every descriptor offset/size and
+exact per-view hazard range. Only the observed contiguous equal-size layout qualifies; no holes
+become GPU-written. Null, differently sized, unmapped, oversized or small-write
+history-threshold-crossing groups take the original path. No memo survives the dispatch.
+Opt-in `GOW3_SKINNING_WRITE_BATCH=1`; Disabled2 bit 36 restores separate acquisitions live.
+This is NOT dispatch fusion and does not reduce the shader dispatch count.
+
+`skinwrite1` did NOT exercise grouping: an unnecessarily strict formatted-store exclusion kept
+the output views on the original path. Source inspection of BufferCache::SynchronizeMemory
+shows its is_texel_buffer branch runs only for READS; written storage descriptors have the same
+acquisition semantics whether formatted or raw. The next version removes that exclusion.
+Do not claim the test's 1.9 -> 76.2 FPS transition as an improvement: its OFF window hit an
+existing severe stall before grouping could run. Log evidence: repeated 0.5-1.0 s frames,
+Wait profile `buffer_cache.cpp:2667` (CompleteReadbacks -> scheduler.Wait) up to 997.5 ms,
+low game CPU (0.57 cores), and a stuck read of page 0x103c561000. The cause of these long waits
+is NOT established by the log. Later ON/OFF windows, which both used separate acquisitions,
+were 79.8/81.1 FPS at 1.21/1.19 external cores. Retain this run as stutter evidence, not a
+performance comparison. Its `.on.png`/`.png` show the intended street scene.
+
+`skinwrite2` exercised grouping (1080p DLAA K, FG/Reflex off, static snapshots disabled):
+OFF/ON/ON/OFF 74.5/78.0/77.8/74.0 real FPS; p99 18.7/16.5/16.2/18.0 ms; external CPU
+2.22/1.97/1.99/2.40 cores. Full ON reporting intervals record ~594-606k groups and ~1.2M
+redundant acquisitions saved per five seconds, zero refusals. This verifies the path runs, NOT
+an isolated 5% gain (external load was lower ON). `skinning-writes-test` passed with asserts
+enabled, checking exact union coverage, offsets, unequal sizes, overflow, gaps and the 4 KiB
+history boundary. No assert/device-loss/stuck-fault line in that run; screenshots are limited
+visual evidence, not proof that every vertex/readback is correct. Other games/long sessions not
+tested. The feature stays opt-in.
+
+### Updated diagnosis at 4K, before further changes
+
+`C:/dev/bench/market_bottleneck1` is one short U3 backward-market diagnostic (4K DLAA M, Reflex
+on, FG off, 120 cap, MT on; BOTH new structural paths off). Contains matching executable,
+CPU stacks every five seconds at a 3 ms sampling interval, GPU-label timestamps, submit timeline,
+exact stationary window (`window.json`), start/end screenshots and boot log. Instrumented run:
+absolute FPS and costs are NOT a clean performance comparison. The GPU label "DLSS evaluate
+(NGX)" is a legacy hardcoded profiler string; startup confirms the Streamline backend.
+
+The saved street scene's last GPU windows show DLAA evaluation ~7.6-8.1 ms/frame, crowd compute
+~1.2-1.4 ms/frame for ~1,530 dispatches, and ~5-6 ms/frame BETWEEN submissions. The last term
+does not establish a CPU-saturation bottleneck: it includes CPU/guest dependencies, pacing and
+Reflex. The 16 s stationary window used 3.45 logical CPU equivalents for the game, 1.46 external
+(40.9% system CPU). Worker startup reports `6 (+1 scanner, 12 hardware threads)`; Available()
+counts the process's allowed affinity mask, so helpers are not restricted to six CPUs.
+
+Sample report 13 (1,394 command-thread / 1,399 stage-B samples): CollectRingBindings now 13.8%
+inclusive of the command thread, GetComputePipeline 6.2%, DrainDrawPipe 13.7%, and ProcessLoop
+kernel waiting ~23%; stage B's BindBuffers 14.3%, ObtainBuffer 9.1%, wait/backoff ~40.4%.
+These percentages are per-thread wall samples and overlap through inclusive callers; NEVER
+sum them into frame time. They do not support "add workers until all twelve CPUs are busy" as
+the fix at 4K. The earlier 31.6% CPU-bound profile is not the current 4K bottleneck ranking.
+
+The concrete guest dependency remains: one report records 107 reads of solver matrices at
+guest RIP 0xd23c6ec, ~1,016 ms summed guest-thread wait per five seconds; the average GPU wait
+for such a read was ~9.07 ms. A later interval has 69 reads / 689 ms. These are SUMS across
+threads, not seconds added directly to frame time. The CPU then copies the matrices into the
+skinning palette that the GPU reads. More idle CPU helpers cannot execute through that fence.
+The half-to-one-second stall from skinwrite1 did not reproduce in this diagnostic; its cause
+remains unverified.
+
+### Deferred guarded forwarding prototype
+
+To remove the per-copy submission/round trip without the earlier stale-destination window,
+`GOW3_FORWARD_COPY_DEFER=1` (also needs `GOW3_FORWARD_COPIES=1`, Disabled2 bit 37 restores the
+old submitted-copy path) queues the destination's readback and protects it BEFORE memcpy
+returns, including when its tick has not been submitted. CPU faults on an unsubmitted tick go
+to the command thread to submit it, never prewait for an unsignalled tick. Strict memcpy pages
+are excluded from both false-sharing opens and queued unwatch requests. CPU-only upload pieces
+use the backing RAM view in this mode, avoiding a copy-worker fault while submission waits for
+that worker. GPU ownership exclusions remain in the upload selection; no GPU-owned upload is
+replaced with stale CPU bytes.
+
+`GOW3_FORWARD_COPY_VERIFY=1` samples one accepted copy per 128: captures known source bytes,
+deliberately reads a destination-page neighbour then the destination immediately after the
+forwarded operation, compares bytes and asserts on mismatch. Only this diagnostic sample lands
+the source early; normal forwarded operations do not. Results below cover sampled runtime
+verification, not a general correctness or FPS claim. Generic copy forwarding remains
+opt-in and this is not a released market fix.
+
+`copydefer1` subsequently built and ran the guarded protocol (4K DLAA M, Reflex on, FG off,
+static pool/output grouping disabled). OFF here means the PREVIOUS protected GPU-forwarding
+path, not a no-forwarding baseline; both modes have GOW3_FORWARD_COPIES=1. Four six-second
+OFF/ON/ON/OFF windows: 39.8/39.7/40.0/42.2 real FPS, p99 30.2/31.2/31.1/34.3 ms, external
+0.95/0.73/1.40/3.20 CPU equivalents. No throughput or p99 improvement demonstrated. Around
+150-160 copies/five seconds ran; moving their submission did not materially accelerate the frame.
+14 diagnostic immediate-read byte comparisons passed, zero mismatches; four were in the deferred
+ON phase (10,320-byte copies). The other checks include a 1,584-byte case on the previous path.
+This verifies those samples only, not all races, map/unmap, other games or long sessions.
+Three stuck-fault notices occurred, including two before ON, no assert/exception/device loss
+found. Screenshots show the expected street scene. Mask restored to 0 0, INI bytes restored and
+the script's own game stopped. The final rebuild adds guard-allocation assertions and corrects
+the queued-age statistic for a strict false-sharing read (one diagnostic line had a zero epoch
+and printed an impossible age); no further game run for those diagnostic/assertion additions.
+
+**Conclusion after this experiment:** readback waits are real and a concrete synchronization
+cost, but eliminating/forwarding an individual wait is NOT proof it is the frame's critical
+path. Earlier statements treating that cost alone as the sustained-FPS cause were too strong.
+The updated 4K evidence shows the largest individual GPU pass is DLAA M, plus serialized
+CPU/guest/GPU dependencies and pacing gaps; there is no single proven whole-market fix yet.
+No new optimization is enabled by default and no released FPS gain is claimed.
+
+Submit timeline cross-check for the same 16 s stationary diagnostic: all three schedulers'
+GPU timestamp spans, aligned by the minimum host-done minus GPU-end offset and merged, cover
+12,482 ms of 16,000 ms (~78%); ~3,518 ms lies outside those spans. This is NOT ALU utilization
+and not evidence all gaps are avoidable. Instrumented S-event throughput 44.6 FPS, p99 32.1 ms.
+File modification times mapped to the monotonic clock confirm CPU reports 13 and 14 fit wholly
+inside the stationary window (not the backward walk). Raw evidence stays outside the repository.
+
+Final checks: runtime rebuild succeeded; `skinning-writes-test` passed again (asserts enabled),
+`git diff --check` clean apart from Git's CRLF-conversion notices; no game instance left running.
+No regression suite/FG comparison/other-game tests, following the request for fewer short tests.
+Structural source changes remain uncommitted; the earlier checkpoint remains c48f91f.
+
+## Reflex pacer: market frame rate (24 Oct 2026)
+
+Setup: U3 Cartagena market street after the mkt_back route, 4K DLAA model M, RTX 5070, cap 120.
+
+Cause (measured, `C:/dev/bench/market_bottleneck1`): the frame was paced by the Reflex sleep,
+not by GPU or CPU throughput. The driver/Streamline sleep averaged 12.7-14.6 ms per ~24 ms
+frame. GPU busy 17.5 ms of 22.4 ms per frame; the GPU sat idle ~9 ms before the next frame's first
+submission in ~43% of frames (262 gaps over 8 ms holding 2,687 ms of 16 s). Frame Generation
+forces Reflex on, so FG players always paid this. Inferred: this is why the 23 Oct CPU
+experiments (crowd dispatch fusion, fusion1: 43.8/43.3/43.3/42.0 FPS off/on/on/off, opt-in,
+0d209c7) showed no gain at 4K: the sleep, not the CPU work, set the frame time.
+
+Change (`gow3_pc/gpu/shim/gow3_reflex.cpp`): with Reflex effectively on, the guest thread no
+longer calls the driver's/Streamline's sleep. `PacerWait` waits until the draw scheduler's work
+timeline reaches frame (id-2)'s `ready_tick` (recorded lock-free by `FrameQueued` in
+`Presenter::PrepareFrame`), 50 ms timeout. The GPU always has the next frame queued and the CPU
+stays about one GPU frame ahead. Markers, Reflex mode and FG forcing are unchanged. `Disabled2`
+bit 39 (`ReflexPacer`, 549755813888) restores the driver sleep live. `GOW3_REFLEX_PACER_LAG`
+(1-4, default 2). The stats line adds `pacer=`, `pacer_waits=`, `pacer_avg_ms=`,
+`pacer_timeouts=`. EarlySubmit (SleepActive) is off while the pacer runs.
+
+Measurements (measured; `C:/dev/bench/reflex_ab.py`, one session each, 8 s windows in order
+A,B,B,A,A,B, real FPS from S events; external CPU load 0.4-2.6 cores, per window in the .json):
+
+| run | A | B | A FPS (p99 ms) | B FPS (p99 ms) |
+|---|---|---|---|---|
+| reflexfg1 (FG+Reflex) | driver sleep | no sleep at all | 42.1/42.3/42.2 (31.5-33.0) | 53.1/53.8/53.5 (24.5-25.0) |
+| pacerfg1 (FG+Reflex) | driver sleep | pacer | 51.7*/43.4/41.5 (29.4-32.2) | 54.9/55.0/54.7 (21.5-23.9) |
+| pacernofg1 (FG off, Reflex on, final build) | driver sleep | pacer | 59.9*/50.6/49.1 (25.5-29.0) | 62.3/63.8/64.2 (21.0-23.8) |
+
+\* first window, driver sleep still ramping (pacerfg1: 3.7 -> 13 ms). FG doubled every real frame
+in both arms. pacernofg1: `pacer_timeouts` 0, no assert/device-loss lines.
+
+Latency (measured from the Reflex log, simStart->gpuRenderEnd, pacerfg1, FG on; the driver's
+per-frame attribution under FG is not reliable): pacer p50 36.1 ms, p90 37.5; driver sleep
+p50 20.5, p90 46.0. Trade-off: about +15 ms p50, much shorter tail, +27-30% real FPS.
+
+Tried and removed: an adaptive extra delay after the wait (feedback from GPU-idle-at-submit).
+The first signal never fired (pacerfg2: delay saturated at 16 ms, 42-45 FPS). The fixed signal
+converged to 0-2.4 ms (pacerfg3: 53.7/54.1/53.9 FPS, latency p50 35.1 ms): no latency or FPS
+gain. Inferred: the CPU chain fills the frame, so there is no slack to trade for latency.
+
+Hitches, found, not fixed: the 0.5-1.5 s market hitches are the GPU holding one already-submitted
+submission for multiples of ~500 ms (skinwrite1/mkd/fusion1 logs; "GPU wait: 1 seconds,
+target=15768 completed=15767 submitted-next=15777"). The repeated "Stuck fault" on page
+0x103c561000 is a consequence. Cause not established. Next diagnostic: `GOW3_GPU_CHECKPOINTS=1` +
+`GOW3_SUBMIT_LOG` with a 200 ms WAIT_TIMEOUT in `vk_semaphore.cpp`, or an ETW/GPUView capture.
+
+Not verified: U1/U2, other U3 chapters, long sessions, input latency by an external tool,
+laptops/non-NVIDIA (the pacer only runs where Reflex is on, i.e. NVIDIA), the installed player
+package (not updated).
+
+## Market hitches: diagnostics, not reproduced (24 Oct 2026)
+
+Diagnostics added (opt-in except one stats line): `GOW3_WAIT_TIMEOUT_MS=<50..10000>` shortens the GPU semaphore wait poll in `vk_semaphore.cpp` (default 1000 ms as before) and prints, on every timeout (max 50 lines), "GPU wait: N ms ..." plus the stuck submission: scheduler (draw/present/flip, names set by `GOW3_SUBMIT_LOG`), tick, age since submit, each wait semaphore with its value and current counter, and the last 16 `bindSparse` calls when it waited on the sparse semaphore. Each scheduler keeps a 512-entry ring of submission records (O(1) write under the existing submit_mutex). `BufferCache::SubmitPendingArenaBinds` prints "Sparse binds (5 s): N submits, B binds, U unbinds, X MiB" (only in 5 s windows with binds). Bench script: `C:/dev/bench/hitch_hunt.py <tag> [RES=WxH] [GOW3_KEY=VALUE ...]` (120 s of movement in the street after mkt_back, lists frames over 150 ms).
+
+Hypothesis tested: a slow `bindSparse` holding the draw queue. Measured in hitch1: 3-208 bindSparse submits per 5 s, binds only, 0 unbinds.
+
+Not reproduced (measured, S-event intervals over 200 ms after the first 20 s of a session):
+- Today, build with the pacer: pacerfg1, pacerfg2, pacerfg3, pacernofg1, hitch1 (4K FG+Reflex, checkpoints on), hitch2 (4K Reflex/FG off, checkpoints on), hitch3 (1080p DLAA K, Reflex/FG off, checkpoints off, the skinwrite1 conditions): 0 in all seven; largest street frame 146 ms. hitch3's only long interval was 14 s of initial loading at 1.2 s, before gameplay.
+- Earlier sessions (22-23 Oct builds): 6 of 28 had street hitches: skinwrite1 17 (0.5/1.0 s, Reflex off, 1080p), mkd 7, mky 2, mkab1 1, fusion1 1, ringassoc1 1.
+- 0 of 7 against an earlier rate of about 6 in 28 is not significant (chance about 0.2-0.3); the hitch is NOT shown fixed. In skinwrite1 the first stall (453 ms, "GPU ticks 439.6 ms", 0 compiles, 0 faults) precedes any read fault: the GPU stopped finishing an already-submitted submission; the stuck faults on page 0x103c561000 follow from it.
+
+Next time it happens: run with `GOW3_WAIT_TIMEOUT_MS=150 GOW3_SUBMIT_LOG=<file>` (optionally `GOW3_GPU_CHECKPOINTS=1`) and read the "GPU wait: stuck" lines.
+
+## U3 Sully shirt stretched: LDS out of bounds (24 Oct 2026)
+
+Report: U3 ch. 2 Cartagena, young Sully's back shirt tail hung as a long strip to knee height
+(player video 24 Oct). Long-standing: also in the 20 Oct build (ab_ring_base.exe).
+
+Ruled out (user visual check each): 30 FPS/FG off; Disabled2 bits 28-33; GOW3_STALE_READBACK=0 +
+GOW3_DEFERRED_READBACK=0 + MT off; GOW3_LDS_BARRIERS_MULTIWAVE=1 and + GOW3_LDS_BARRIER_REGIONS=1.
+GOW3_CLOTH_PEEK: solvers 1c957b01/809864d3 0 exploded, 0 outliers.
+
+Cause: cs 1c957b01 runs 1024-thread groups with 2 KiB LDS declared; it zeroes lds[tid] up to 1023
+and reads lds[tid+512]. GCN drops LDS writes past the allocation and reads 0; the port's SPIR-V
+shared array had the declared size (+ wave64 scratch) and no bounds check, so NVIDIA corrupted the
+reductions. Evidence: a temporary build with an 8 KiB array brought 1c957b01 output maxima from
+slot0 305 -> 2.7, slot3 49-86 -> 1.8, slot17 5-16 -> 0.2, slot23 55-68 -> 0.07, and the user saw a
+normal shirt. GOW3_WAVE64_ALL_BALLOTS=1 made 1c957b01 explode every dispatch (waist hole),
+confirming the tail comes from it.
+
+Fix: shader_recompiler/ir/passes/shared_memory_bounds_pass.cpp (SharedMemoryBoundsPass, before
+LowerWave64BallotPass): compute-shader game LDS loads past the declared size read 0,
+writes/atomics go to an 8-byte dummy slot behind it (atomics return 0); GDS and in-range
+immediates untouched; wave64 scratch starts after the dummy. GOW3_LDS_BOUNDS: default all compute
+shaders, 0 off, or hex list. SPIR-V cache names get "_ldsb" (all shaders recompile once).
+
+Verified: user saw a normal shirt with the fix at the player's settings (1440p, 165 cap, FG on);
+runtime build ok; street ~57-59 FPS in that run, no assert/device-loss lines.
+
+Limits (from an adversarial review): the pass is skipped when the 8-byte dummy would push the shader
+past the device's shared memory limit (a shader declaring exactly maxComputeSharedMemorySize keeps
+the old unchecked accesses). LDS that SharedMemoryToStoragePass moves to a storage buffer (runs
+earlier) gets no bounds handling, as before. Without explicit workgroup layout, u64 LDS ops split
+into u32 halves are checked per half.
+
+Not verified: U1/U2, other U3 scenes, performance A/B of the extra compare/select per LDS access,
+AMD GPUs.
+
+## 24 October 2026: launcher overhaul
+
+The launcher was rebuilt around a sidebar (launcher/uncharted_launcher.pyw; the palette and the
+drawing/widget helpers moved to launcher/widgets.py). The CHANGELOG's Unreleased entries dated
+24 Oct 2026 carry the player-facing wording; this is the technical record.
+
+What changed:
+
+- Layout: the games and the settings sections sit in a sidebar on the left; the launcher opens the
+  section used last. Sections renamed (SECTIONS/OLD_SECTIONS): Quick Setup -> Home (page_setup),
+  Cheats -> Gameplay (page_cheats), Advanced -> System (page_advanced). The window fits a 1280x720
+  screen (1080p at 150% scaling); pages scroll on a short screen and PLAY stays at the bottom
+  right. Long hints wrap at the window's width; a choice list with more than 9 options (the frame
+  rate limit) is a menu instead of a segmented control.
+- Home: a "Ready to play" checklist above the presets (readiness(), kept a plain function for
+  tests) checks the game files, update 1.02 and whether its files are intact
+  (install_update.py check_update), the NVIDIA DLSS / Frame Generation DLLs, the drive's speed
+  (slow_drive_reason) and a new launcher release; each line that needs attention carries the
+  buttons that fix it. The NVIDIA file buttons moved here from Display; adding one no longer needs
+  a restart (rebuild_sections() rebuilds the Display and Performance pages in place, since their
+  option lists depend on the DLLs). The slow checks (update archive, drive) run one at a time in
+  the background (refresh_home) and are re-asked if the state changed meanwhile.
+- ? hints: every setting row has a one-line `short` hint; the full text sits behind a round ?
+  (InfoTip, hover/click/Space). Settings shared by the three games (language, speakers, the
+  unlocks, the cheats, the performance log, update checks, idle game threads) carry an ALL GAMES
+  badge; per-game settings stay in the game's own ini.
+- Greyed options: the dependent Display choices (DEPENDENT_OPTIONS = preset/dlss_model/frame_gen)
+  are disabled with an orange note line under them (refresh_dependencies) while their condition is
+  missing; nothing is reset, values survive and the rows wake up when a matching anti-aliasing is
+  chosen, in the launcher or in the in-game menu.
+- Apply to all games: a button at the top right of Display and Performance copies the selected
+  game's graphics and performance settings to the other two (controls untouched); it asks first
+  and is disabled while a game runs. Changing the resolution, aspect ratio, multithreading or
+  graphics card while a game runs now notes it applies at the next game start.
+- Themed dialogs: Dialog/Toast (widgets.py) replace the native message boxes - dark windows in the
+  launcher's colours, Enter answers the highlighted button, Esc cancels, long details get a Copy
+  button, short confirmations are corner toasts. The game-crash dialog offers Open log folder and
+  Copy report (the error, the game and its version, the GPU, the main settings); it also covers
+  the desktop game shortcuts (`--play`).
+- Keyboard: Tab/Shift+Tab with an orange focus ring, Space/Enter press, Left/Right change choices,
+  Down/Enter open a list; shortcuts Ctrl+1/2/3 (game), Ctrl+Tab / Ctrl+Shift+Tab (section),
+  Ctrl+Enter (play or stop). In Controls, Enter on a slot starts the key capture and Delete clears
+  the binding.
+- Controller: the SDL gamepad (Gamepads, already used for pad bindings) drives the whole launcher -
+  D-pad/left stick move, A presses, left/right change choices, B goes back, LB/RB switch the
+  section, Start plays or stops; in dialogs A presses the highlighted button. It only polls while
+  the launcher window has the focus and no game runs.
+
+Fixed along the way:
+
+- The mouse wheel stopped scrolling the pages after rebinding a key: the key capture bound the
+  wheel/keys sequences with bind_all and unbound them afterwards, which took the page scrolling
+  with it until the launcher restarted. <MouseWheel>, <KeyPress> and <ButtonPress> are bound once
+  for the whole session now (test_wheel_binding_survives_a_capture).
+- Reset (System -> TROUBLESHOOTING -> "Reset this game's settings") wrote the setting defaults but
+  left the controls as they were: reload_ini (at start, game switch) restores key_map/mouse_map/
+  pad_map from the game's ini, so the old bindings came back. Reset calls save_controls() now, as
+  Reset controls under Controls always did (test_reset_puts_the_default_controls_in_the_ini).
+- The launcher froze for seconds on blocking calls: the NVIDIA DLL signature check (up to 60 s of
+  PowerShell), shortcut creation, stopping the game (taskkill) and the Vulkan device list (a child
+  process, up to 10 s) moved into background work off the Tk thread; the Graphics card row joins
+  Display when the device list arrives.
+
+Contracts kept:
+
+- The per-game settings file (probe.ini, shared with the in-game menu) and all its keys are
+  unchanged; probe_uncharted.py turns them into the same GOW3_*/UNCHARTED_* variables.
+- launcher.json stays version 8 (no migration runs; version 7/8 already turned multithreading on
+  once and a later "off" stays off). The stored last-tab key is mapped through OLD_SECTIONS
+  (setup->home, cheats->gameplay, advanced->system; unknown -> home, test_old_tab_names_map_to_
+  sections), so an in-place update opens the section the player used last.
+- `--play u1|u2|u3` (desktop game shortcuts, GitHub #25) still starts the game directly with the
+  saved settings and no launcher window; the crash dialog also covers those starts.
+
+Tested: gow3_pc/tests/test_uncharted_launcher_ui.py (Tk, emulated input: readiness cases, every
+section builds, old tab mapping, apply-to-all, wheel during capture, reset, stop in a thread,
+dialog buttons, hint/badge coverage, greyed options, keyboard, controller steps).
+
+Not verified: real controller input (a controller in hand; the gamepad nav was checked with
+synthetic events only); real Tab traversal and the focus ring on screen (emulated); Ctrl+Tab on
+Windows with real key events (Tk's Control-Tab binding quirk; emulated only); 150% DPI on a real
+screen (the scale was emulated); Wine/Proton; a real game-crash dialog from a game that actually
+crashed (driven with a fake error); the Open log folder button; the FSR 4 / DLSS greyed rows seen
+on screen; the packaged zip carrying launcher/widgets.py (package_windows.sh copies it, the zip
+itself not built); an in-place launcher update from an older version (the updater path was not run
+after the change); the option search that was in the plan was dropped and not built.
+
+Merged with upstream 0.6.0 (origin/main 6870e36, 24 Oct 2026): its launcher changes were carried
+into the sidebar layout. The performance counter's rows (Show performance counter, What it shows
+with the item pills, corner, layout, size, background) are in Display; the pill widget (`Chip`)
+moved to launcher/widgets.py and takes the keyboard focus like Toggle. Save profile is in System
+with a short hint; vibration, the 4x/5x sensitivities and the Tk 9 side-button numbers came in
+unchanged. The crash note for a 1.00 game without the update is added to the reason before the
+themed crash dialog (show_crash) and names System -> GAME UPDATE. Not verified: these rows on
+screen (only the launcher UI tests ran).
+
+## U3 chapter 2 frame drop: player capture, stage B limit, two opt-ins re-measured (24 Oct 2026)
+
+Report (player): the frame rate falls and stays low in one stretch of U3 chapter 2 (Cartagena: alley, museum entrance, `col-call-to-friends-*`, `col-pipe-climb-a`). Player's settings: 1920x1080 output, DLSS preset 1 model K, Frame Generation and Reflex on (pacer), VSync on, cap 165; installed build 0.5.0 = main 4a489cf.
+
+Capture (measured; player's install, launcher diagnostics plus `GOW3_FRAME_LOG` through test-env.txt, 34 windows of 5 s, ~170 s from the chapter start):
+- Light windows: 80-106 real FPS at 500-1,700 draws/frame.
+- Heavy windows: 48.7-62 real FPS at 1,900-3,300 draws/frame, about 6,300-6,600 pipe items/frame (draws plus compute dispatches).
+- In every heavy window: stage B busy 84-90%, stage A waited 18-28%, GPU command thread idle 0.2%, pipe 300-380k items/s. FPS follows pipe items/s divided by items/frame. 0 compiles, no memory pressure (video memory 4.6 of 11.2 GB). Write faults on game threads ~380 ms per 5 s and DMA sync 111 ms per 5 s on the GPU thread: small next to the stage limit.
+- Verdict: CPU-bound on the serial draw pipe stages, the known limit ("Remaining CPU limit (profile)", 20 Oct), not the GPU.
+
+Profile (measured; C:/dev/bench/prof_cap1, mkprof.sh, Cartagena street after mkt_back, 1080p DLAA K, FG/Reflex off, GOW3_PROFILE=10 at 5 ms; stage B busy 88%): stage B window 7, 1,810 samples, inclusive: RunDrawPacket 83%, BindResources 45.4%, DispatchRecord 36.5%, DrawRecord 34.5%, BindBuffers 21.5%, ObtainBuffer 13.3%, CompleteReadbacks 10.2% (LandGuarded 7.6%), BindTextures 6.4%, GpuRangesAdd 4.4%, SynchronizeMemory 3.6%. Flat: no single hot spot.
+
+Crowd dispatch fusion (GOW3_DISPATCH_FUSION=1, player's own session, measured): no gain (54-64 real FPS in the same stretch, pipe items/s unchanged at ~360k). Cause (code reading): nearly every batch is a singleton (151 "singleton" lines = ~7M singles, ~80k/s; boundary Scheduler::SignalAfterHostCopies, vk_scheduler.cpp:209, because every Record() flushes the open deferred batch). Even when it fuses, AppendSkinningBatch runs after BindResources, so all per-dispatch binding work stays on stage B: it cannot shorten stage B. Left opt-in.
+
+Parallelizing stage B (design review, code reading only, estimates not measured): almost all of stage B's per-item work is ordered (ObtainBuffer, SynchronizeMemory copies, barrier tracker, readback landing and its on_landed guest fences, texture cache). A prepare thread for the pure part (V# fetch, garbage classification, ClampRangeSize, MakeUserData) removes an estimated 3-8% of stage B, 2-5% net after the handoff. A split by domain (cache bookkeeping vs recording) reopens the 18 Oct readback ownership race. Stage A is ~97% busy and waits on stage B ~20% of its time, so any stage B gain tops out near +20-25% FPS. Not done. Cheapest exact probe if this is picked up: stage A passes its compute V#s and clamp/garbage results in the dispatch packet (it already computes them in PostDraw), guarded by the guest memory table generation, behind a new Disabled2 bit with a verify mode; estimated 1.5-3.5% of stage B.
+
+Skinning write grouping (GOW3_SKINNING_WRITE_BATCH=1, Disabled2 bit 36), measured: C:/dev/bench/opt_ab.py (new: reflex_ab.py at the player's probe-u3.ini and 1080p, live toggle of one Disabled2 bit, 8 windows of 8 s ON/OFF/OFF/ON/ON/OFF/OFF/ON), Cartagena street after mkt_back, FG and Reflex on. The path ran: 640-750k groups and 1.28-1.50M acquisitions saved per 5 s, 0 refused. Result: on 81.3 vs off 80.9 real FPS (+0.4); per window 78.6-84.6, rising through the session; p99 15.3 vs 15.2 ms; external load 1.35-2.57 cores. Inside the noise: not turned on by default.
+
+Not verified: the player's exact worst spot (the bench street is lighter: ~80 FPS against his 48-55); U1 and U2; a second replicate of the A/B. Note: two other Claude sessions ran U3 benches on the same analysis/uncharted-user folder during this work (14:09-14:35); a first A/B attempt collided with them and was discarded. The profile at ~13:50 may have shared the CPU with them; its stage B 88% busy matches the player's capture.
+
+## Crowd skinning dispatch runs (24 Oct 2026, opt-in)
+
+Player report: in U3 chapter 2 Cartagena, crossing a line from the meat market gate into the crowded street drops the frame rate; the user wants the street to run like the rest. Tests at 4K output, DLSS Quality, Frame Generation + Reflex (pacer) on, RTX 5070, Ryzen 5 5600, bench save backup_ch2meat (gate) and route mkt_back (street).
+
+What the street adds (measured; C:/dev/bench/line1.*, line2.* with GOW3_DISPATCH_STATS=1, old build):
+- Gate 86 real FPS at 700 draws/frame, street 78 at 1,290 draws/frame. Both CPU-bound on the draw pipe (~400k pipe items/s; stage B 78-86% busy).
+- Both sides: crowd skinning cs 8f067540 = 1,522 dispatches/frame, 1x1x1, one consecutive run (max run 1,524), stage A 2.4 us + stage B 2.9 us each: ~3.7 ms of stage A and ~4.4 ms of stage B per 12-13 ms frame. The street only adds draws (stage B draw time 1.8 -> 3.3 ms/frame).
+
+Change (GOW3_DISPATCH_RUNS=1, Disabled2 bit 40 DispatchRuns, bit set = old path, read live; vk_rasterizer.cpp/.h, liverpool.cpp cut hooks, vk_compute_pipeline.cpp/.h, vk_dispatch_batch_spirv.cpp, vk_skinning_writes.h):
+- Stage A stages consecutive 8f067540 instances (same pipeline, queue, dims except dim_x grouping, unchanged registers, all read slots in the constant ring or static mesh snapshots, written views valid) into one PacketKind::DispatchRun packet of up to 64, with up to 4 RELEASE_MEM per instance staged into the run (their labels pending until the packet is committed). Any other packet, queued command, drain, yield, submission retire, end of queue or a refused instance cuts the run first, so stream order is unchanged.
+- Stage B records one vkCmdDispatch(dim_x, count, 1) with the batch SPIR-V (workgroup Y = instance; per-instance descriptor arrays, capacity 64, own descriptor pools recycled by tick, layout support checked). Written views are joined into exact spans (no gap becomes GPU-written); spans over 64 KiB are acquired as chunks in (32 KiB, 64 KiB] so no 1 MiB window tick is stamped (views over 64 KiB and views of 4 KiB or less are acquired one by one, as before); texture invalidation stays per view; write side effects run once the batch is certain; more than 32 spans, a moved tick that does not settle, metadata writes or anything unproven replays the instances through the unchanged DispatchRecord. pending_writes is pruned after every run flush.
+- GOW3_DISPATCH_RUN_VERIFY=1: stage B replays every run (frame on the old path) and compares the batch plan with the old bindings. It checks stage B's binding plan only, not stage A's staging or the bookkeeping side effects.
+- "Dispatch runs (5 s)" line with packets, instances, replays and cuts by reason, chunked spans, window-tick changes, re-acquisitions, pending_writes size and prunes.
+
+Measured:
+- Verify (runv5/runv6): ~500-560k dispatches compared per 5 s; descriptor, push data, tracked range and written byte mismatches 0 in every line; window-tick changes 0; no ASSERT/device lost/VK_ERROR.
+- Runs only (runv8): ~32.8k run packets of 18.6 dispatches per 5 s, 610k dispatches batched; replays 0 (over 32 spans 0, tick moved 0); window-tick changes 0. Pipe items ~396k -> ~182k/s.
+- Live A/B, C:/dev/bench/opt_ab.py with OPT_RES=3840x2160 (player's probe-u3.ini at 4K, 8 windows of 8 s alternating the bit, street after mkt_back): first build 80.7 vs 76.9 real FPS (runab4k); after the review fixes 84.4 vs 78.6 real FPS, +7.4%, every on window above every off window, p99 15.7 vs 16.1 ms (runab4k2).
+- With runs on in the street, PresentMon: GPU busy 9.9 of 12.3 ms (79%), still CPU-bound; GpuCommandProcessor (stage A) 91%, DrawRec 90%, VkRecorder 83%. Stage A is now the limit (profile C:/dev/bench/prof_runs: CollectRingBindings 26%, DrainDrawPipe 19.7%, LandDeferredFenceFor 11.7%, RefreshComputeKey 10.9%).
+- GOW3_STATIC_MESH_SNAPSHOTS=1 on top of runs (bit 35 A/B, meshab4k): 84.4 vs 83.1 real FPS, small but every on window at or above every off window.
+
+Reviews: two Opus reviews and a workflow review (two reviewers) found no corruption/hang/crash; their exactness items (per-view texture invalidation, window ticks on large spans, pending_writes prune starvation, side-effect order, pool lifetime, layout limits, hull over 32 spans, tick moving before Record) are fixed.
+
+Not verified: U1 and U2 (their treasure effects also run 8f067540, with garbage V#s that runs refuse); other U3 chapters; long sessions; the re-acquisition and over-32-spans branches never ran in a session (counters only); 1080p. The feature stays opt-in until those are checked.
+
+## Upstream 0.6.0 merged (24 Oct 2026)
+
+Merge of upstream v0.6.0 (7b04bac) into claude/merge-upstream-0.6.0 (base a77e0c6 = 0.5.0, ours 92e7b85). Four files conflicted; the other 27 upstream files merged on their own. Decisions (ours = fork kept, theirs = upstream taken):
+- tools/probe_uncharted.py, the GOW3_PIPELINE_BINARIES block: both. Ours keeps GOW3_DISPATCH_RUNS=1 and GOW3_STATIC_MESH_SNAPSHOTS=1; theirs sets GOW3_PIPELINE_BINARIES=0 (both sides had 1; upstream measured U2 15.5 GB RAM with them vs 7.0 GB without, 40 s vs 9.6 s pipeline load) and deletes the old pipeline-binaries folders on a background thread. Auto-merged in the same file: RUN_GROUP_PATCH (U2 0xd09665), GOW3_USER_ID (save profiles), GOW3_MIP_TARGETS=1 for U3, UNCHARTED_COOP_OVERLAY. The fork's U1 multithreading text (U1 follows the launcher) stays; upstream did not change that block.
+- Duplicate patch check: RUN_GROUP_PATCH's signatures (`4c8b27 488b4c24f8 4a8d1c31 ...`, particle run grouping, 1.02 U1 0x5fa2f0 / U2 0xd09580 / U3 0xf6bef0) match no fork table; the fork's tables added since 0.5.0 (1 ms job-worker wait in JOB_SLEEP_PATCHES, movie pacing hook in probe.c) are at other sites. No overlap, nothing dropped. The patch is a multi-change entry, so the fork's skip-on-mismatch in apply_patches does not change it.
+- tools/apply_update.py: both. Theirs (installed-files.txt manifest, carry_over moves every player file back, update-kept-* rescue folder) is the more complete fix; ours (CARRY copies nvngx_dlss.dll / nvngx_dlssg.dll inside the install step) is kept because it still holds when carry_over has to put all of gow3_pc aside: the DLLs are then already in the new gow3_pc\out, and carry_over skips them as present.
+- launcher/uncharted_launcher.pyw: INI_DEFAULTS both (ours: preset, dlss_model, gpu_id, anisotropy, reflex, frame_gen; theirs: overlay_* keys). GAME_SETTING_DEFAULTS: ours multithreaded=True plus their save_profile="1". Display page: our anisotropy and graphics card rows plus their "Show performance counter" toggle and overlay_panel; add_ngx (ours) and OVERLAY_ITEMS / overlay_panel (theirs) both kept as methods. Dropped upstream's second `import tkinter.font as tkfont` (the fork already imports it).
+- CHANGELOG.md: the fork's "Unreleased (fork, after 0.5.0)" section stays on top; upstream's 0.6.0 notes go into it as "From BilalReloaded's 0.6.0 (merged 24 Oct)", above the 0.4.1/0.5.0 subsection (as at the 0.5.0 merge). tools/github/CHANGELOG.md: theirs (identical to v0.6.0).
+- tools/VERSION: theirs, 0.6.0. The updater reads the fork's releases (REPOSITORY espindoIa/...), and the fork now contains 0.6.0; at 0.5.0 a fork package would call any 0.6.x fork release an update for the wrong reason and misstate what it holds.
+- shader_recompiler/resource.h (no textual conflict, one edit): upstream's new "base 0 or size 0 reads as null" rule in IsGarbageEffectBuffer returned before the fork's live gate, so Disabled2 bit 1024 (SpecGarbageSharps) no longer turned the whole filter off. It now returns `!garbage_sharp_filter_on || garbage_sharp_filter_on()`. Effect on dispatch runs: such V#s were already `unbound` for ClassifyGarbageSharp, so the run planner refuses them as before (ReplaySharps); they now also make fewer 8f067540 variants.
+- runtime_coop.c: built by the existing globs (build.sh `src/runtime*.c`, CMakeLists GOW3_RUNTIME); probe.c calls runtime_coop_install, off unless GOW3_COOP_CMD / GOW3_COOP_BOOT.
+
+Toggle bits: upstream 0.6.0 adds none (no Disabled/Disabled2 use in its diff); the fork's Disabled2 bits up to 1ull<<41 are unchanged. Fork pieces checked present after the merge: DispatchRun* / StageDispatchRun (vk_rasterizer.cpp), liverpool.cpp cut hooks and RunComputeReleaseMem (liverpool.cpp not touched by upstream), static mesh snapshots, gow3_reflex.cpp, Streamline backend, LDS bounds pass (none touched by upstream), launcher Reflex / FG / Streamline options.
+
+Not verified: any game run (boots are the user's); the save profile, vibration and overlay rows in the launcher GUI; direct mouse aim with the fork's aim patches; GOW3_MIP_TARGETS with the fork's scene-resolution and upscaler paths in U3; dispatch-run counts with upstream's null-V# rule; carry_over on a real update.

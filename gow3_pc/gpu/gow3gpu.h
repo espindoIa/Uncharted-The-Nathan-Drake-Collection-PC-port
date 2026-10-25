@@ -26,6 +26,9 @@ int gow3gpu_handle_fault(void *ucontext, void *address);
 /* The runtime is about to write [addr, addr+size) of guest memory itself (file reads): prepares
  * the range for a CPU write once, as a write fault does per page. 1 done, 0 not available. */
 int gow3gpu_prepare_cpu_write(void *addr, uint64_t size);
+/* A guest memcpy (runtime.c): 1 when the GPU made the copy (its source holds GPU bytes still on
+ * their way back), 0 when the caller copies as usual. */
+int gow3gpu_forward_copy(void *dst, const void *src, uint64_t size);
 /* GOW3_WRITE_LOG=1: prints the logged GPU-side writes to guest memory near the fault. */
 void gow3gpu_dump_guest_writes(void *ucontext);
 /* Keyboard text entry through the game window (IME dialog). begin returns 0 when
@@ -43,6 +46,11 @@ void gow3gpu_trophy_list(const char *pack_path, int list, const uint32_t earned[
 void gow3gpu_trophy_earned(int id);
 /* 1 while the in-game settings menu is open: the game's pad input is held neutral. */
 int gow3gpu_overlay_captures_input(void);
+/* gow3 22 Oct 2026, NVIDIA Reflex (gpu/shim/gow3_reflex.cpp): the guest is about to read the pad.
+ * The first read after a flip request waits for the driver's frame pacing (setting reflex 1 or 2;
+ * at most 40 ms) and marks the start of the frame's simulation and input sampling; every other
+ * read, and reflex 0 without a log, returns at once. Call it outside any lock. */
+void gow3gpu_reflex_input_sample(void);
 /* Mouse movement since the last call (pixels) and held sources (bit 0 left, 1 middle, 2 right,
  * 3 X1, 4 X2, 5 wheel up, 6 wheel down); returns 1 while the mouse is captured (gow3_mouse.h). */
 int gow3gpu_mouse_take(float *dx, float *dy, unsigned *buttons);
@@ -88,6 +96,7 @@ float gow3gpu_controls_mouse_sens(void);
 float gow3gpu_controls_mouse_aim_sens(void);
 float gow3gpu_controls_mouse_vertical(void);
 int gow3gpu_controls_mouse_invert_x(void);
+int gow3gpu_controls_vibration(void);
 int gow3gpu_controls_mouse_invert(void);
 float gow3gpu_controls_stick_speed(void);
 /* The games' draw and shadow distances (menu Image tab, percent of the game's own;

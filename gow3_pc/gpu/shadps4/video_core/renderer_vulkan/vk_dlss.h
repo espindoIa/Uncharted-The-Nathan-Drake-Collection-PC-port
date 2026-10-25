@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "common/types.h"
+#include "video_core/renderer_vulkan/frame_gen_camera.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
 namespace Vulkan {
@@ -35,6 +36,10 @@ public:
     [[nodiscard]] bool Available() const;
     /// Why DLSS cannot run on this system (empty when it can, or before device creation).
     [[nodiscard]] std::string Problem() const;
+    /// gow3 23 Oct 2026: the calls go through Streamline (it loaded, gow3_streamline.h)
+    /// instead of the NGX bridge. Frame generation then presents through Streamline's swapchain
+    /// hooks, not through FrameGenCreate / FrameGenEvaluate.
+    [[nodiscard]] bool ViaStreamline() const;
 
     struct Resource {
         vk::Image image;
@@ -68,7 +73,37 @@ public:
     /// Records the feature creation. The GPU must be done with the previous one.
     bool CreateFeature(vk::CommandBuffer command, const FeatureDesc& desc);
     bool Evaluate(vk::CommandBuffer command, const Frame& frame);
+    /// Super resolution only; frame generation keeps its own FrameGenRelease (22 Oct review).
     void ReleaseFeature();
+
+    // gow3 22 Oct 2026: DLSS Frame Generation (bridge ABI 3). Only with nvngx_dlssg.dll beside
+    // the exe and GOW3_FRAME_GEN_EXT not "0": then its extensions join those of super
+    // resolution; anything missing turns off frame generation only.
+    [[nodiscard]] bool FrameGenAvailable() const;
+    /// Available, the `frame_gen` setting on and toggle FrameGeneration clear (read every frame).
+    static bool FrameGenWanted();
+    /// Why frame generation cannot run (empty when it can).
+    [[nodiscard]] std::string FrameGenProblem() const;
+    struct FrameGenDesc {
+        u32 width, height;               ///< backbuffer and generated frame
+        u32 render_width, render_height; ///< depth and motion vectors
+        vk::Format format;               ///< backbuffer format
+
+        bool operator==(const FrameGenDesc&) const = default;
+    };
+    struct FrameGenFrame {
+        Resource backbuffer, depth, motion, output;
+        FrameGenCamera camera;
+        float jitter_x, jitter_y;
+        bool reset, hdr;
+    };
+    [[nodiscard]] bool HasFrameGenFeature(const FrameGenDesc& desc) const;
+    /// Records the feature creation. The GPU must be done with the previous one.
+    bool FrameGenCreate(vk::CommandBuffer command, const FrameGenDesc& desc);
+    /// One generated frame (2x) between the previous backbuffer and this one.
+    bool FrameGenEvaluate(vk::CommandBuffer command, const FrameGenFrame& frame);
+    /// The GPU must be done with the feature.
+    void FrameGenRelease();
 
 private:
     Dlss();

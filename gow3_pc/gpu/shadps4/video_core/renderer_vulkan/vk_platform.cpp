@@ -23,6 +23,7 @@
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
+#include "gow3_streamline.h"
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
@@ -274,6 +275,14 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     static vk::detail::DynamicLoader dl;
     VULKAN_HPP_DEFAULT_DISPATCHER.init(
         dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
+    // gow3 23 Oct 2026: when Streamline loads the instance is created by Streamline's own
+    // vkCreateInstance (its plugins' extensions); everything else stays vulkan-1's.
+    const bool streamline = window_type != Frontend::WindowSystemType::Headless &&
+                            Gow3Streamline::Init();
+    if (streamline) {
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(
+            Gow3Streamline::InstanceProc(nullptr, "vkCreateInstance"));
+    }
 
     const auto [available_version_result, available_version] =
         VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumerateInstanceVersion
@@ -423,6 +432,23 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
                vk::to_string(instance_result));
 
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*instance);
+    if (streamline) {
+        // Streamline maps the physical devices to this instance and sets up its plugins for the
+        // device its vkCreateDevice creates; the window's surface goes through it for frame
+        // generation's swapchain.
+        auto& d = VULKAN_HPP_DEFAULT_DISPATCHER;
+        const auto proc = [&](const char* name) {
+            return Gow3Streamline::InstanceProc(*instance, name);
+        };
+        d.vkEnumeratePhysicalDevices =
+            reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(proc("vkEnumeratePhysicalDevices"));
+        d.vkCreateDevice = reinterpret_cast<PFN_vkCreateDevice>(proc("vkCreateDevice"));
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+        d.vkCreateWin32SurfaceKHR =
+            reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(proc("vkCreateWin32SurfaceKHR"));
+#endif
+        d.vkDestroySurfaceKHR = reinterpret_cast<PFN_vkDestroySurfaceKHR>(proc("vkDestroySurfaceKHR"));
+    }
 
     return std::move(instance);
 }

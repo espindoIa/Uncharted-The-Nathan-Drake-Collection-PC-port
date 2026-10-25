@@ -178,6 +178,10 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
         problem = !dlss ? "not installed (DLSS files missing)"
                         : dlss->Problem();
         Gow3Settings::ConfigureDlssSupport(dlss && dlss->Available(), problem.c_str());
+        static std::string frame_gen_problem;
+        frame_gen_problem = !dlss ? "not installed (DLSS files missing)" : dlss->FrameGenProblem();
+        Gow3Settings::ConfigureFrameGenSupport(dlss && dlss->FrameGenAvailable(),
+                                               frame_gen_problem.c_str());
     }
     // Available unless GOW3_UPSCALER=none; on/off and the parameters are the menu's settings.
     const char* env = std::getenv("GOW3_UPSCALER");
@@ -553,8 +557,9 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
         .arrayLayers = 1,
         .samples = vk::SampleCountFlagBits::e1,
         .tiling = vk::ImageTiling::eOptimal,
+        // Transfer source: frame generation copies it (StashFrameGen).
         .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
-                 vk::ImageUsageFlagBits::eTransferDst,
+                 vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc,
         .initialLayout = vk::ImageLayout::eUndefined,
     });
     output_image = VideoCore::UniqueImage(device, allocator);
@@ -1147,6 +1152,7 @@ void TemporalUpscaler::Run() {
     runtime.FlushBarriers();
     vk::Image input_color = color.GetImage(), input_depth = depth.GetImage();
     vk::ImageView input_color_view = color_view, input_depth_view = depth_view;
+    vk::ImageUsageFlags input_depth_usage = depth.usage_flags;
     if (reduced) {
         VideoCore::ImageViewInfo ci;
         ci.format = color.info.pixel_format;
@@ -1157,6 +1163,7 @@ void TemporalUpscaler::Run() {
         input_depth = d.image;
         input_color_view = c.view;
         input_depth_view = d.view;
+        input_depth_usage = d.usage;
     }
     const auto cmdbuf = scheduler.CommandBuffer();
 
@@ -1223,6 +1230,7 @@ void TemporalUpscaler::Run() {
     }
     last_frame = now;
 
+    const bool was_reset = reset; // frame generation resets with the upscaler
     bool dispatched = false;
     if (Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa) {
         RecordTaa(cmdbuf, input_color_view, input_depth_view);
@@ -1399,7 +1407,154 @@ void TemporalUpscaler::Run() {
         cmdbuf.pushConstants(*merge_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
                              sizeof(mode), &mode);
         cmdbuf.dispatch((ow + 7) / 8, (oh + 7) / 8, 1);
+        StashFrameGen(cmdbuf, input_depth, depth_format, input_depth_usage, w, h, was_reset);
     }
+}
+
+bool TemporalUpscaler::TakeFrameGenInputs(FrameGenInputs& inputs) {
+    if (!frame_gen_fresh) {
+        return false;
+    }
+    frame_gen_fresh = false;
+    inputs = frame_gen_inputs;
+    return true;
+}
+
+void TemporalUpscaler::StashFrameGen(vk::CommandBuffer cmdbuf, vk::Image depth,
+                                     vk::Format depth_format, vk::ImageUsageFlags depth_usage,
+                                     u32 w, u32 h, bool was_reset) {
+    if (frame_gen_slots.empty() || !Dlss::FrameGenWanted()) {
+        frame_gen_fresh = false;
+        return;
+    }
+    const FrameGenCamera camera = camera_motion.GetFrameGenCamera();
+    if (!camera.valid || !(depth_usage & vk::ImageUsageFlagBits::eTransferSrc)) {
+        static bool printed = false;
+        if (!printed && camera.valid) {
+            printed = true;
+            std::printf("Frame generation: the scene depth cannot be copied (no transfer use)\n");
+        }
+        frame_gen_fresh = false;
+        return;
+    }
+    // 22 Oct 2026: the presenter reads these on the swap thread, possibly a frame or two after
+    // the next upscales. A ring of one more copy than the presenter has frames: a slot is reused
+    // only after as many flips took the slots after it (an untaken slot is overwritten in
+    // place), and the flip after the last of them waited (Presenter::GetRenderFrame) for the
+    // present of the frame that read this slot. The images the upscaler itself uses change
+    // every frame (motion) or belong to the game (depth).
+    if (!frame_gen_fresh) {
+        frame_gen_next = (frame_gen_next + 1) % u32(frame_gen_slots.size());
+    }
+    auto& slot = frame_gen_slots[frame_gen_next];
+    const auto device = instance.GetDevice();
+    if (!slot.depth || slot.width != w || slot.height != h || slot.format != depth_format) {
+        const auto make = [&](VideoCore::UniqueImage& image, vk::UniqueImageView& view,
+                              vk::Format format, vk::ImageAspectFlags aspect) {
+            view.reset();
+            image = VideoCore::UniqueImage(device, instance.GetAllocator());
+            image.Create(vk::ImageCreateInfo{
+                .imageType = vk::ImageType::e2D,
+                .format = format,
+                .extent = {w, h, 1},
+                .mipLevels = 1,
+                .arrayLayers = 1,
+                .samples = vk::SampleCountFlagBits::e1,
+                .tiling = vk::ImageTiling::eOptimal,
+                .usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
+                .initialLayout = vk::ImageLayout::eUndefined,
+            });
+            view = Check(device.createImageViewUnique({
+                .image = vk::Image(image),
+                .viewType = vk::ImageViewType::e2D,
+                .format = format,
+                .subresourceRange = {aspect, 0, 1, 0, 1},
+            }));
+        };
+        make(slot.depth, slot.depth_view, depth_format, vk::ImageAspectFlagBits::eDepth);
+        make(slot.motion, slot.motion_view, vk::Format::eR16G16Sfloat,
+             vk::ImageAspectFlagBits::eColor);
+        slot.width = w;
+        slot.height = h;
+        slot.format = depth_format;
+    }
+    const auto all = vk::PipelineStageFlagBits2::eAllCommands;
+    const auto transfer = vk::PipelineStageFlagBits2::eTransfer;
+    const auto layout = [](vk::Image image, vk::ImageAspectFlags aspect, vk::ImageLayout from,
+                           vk::ImageLayout to, vk::PipelineStageFlags2 src_stage,
+                           vk::AccessFlags2 src_access, vk::PipelineStageFlags2 dst_stage,
+                           vk::AccessFlags2 dst_access) {
+        return vk::ImageMemoryBarrier2{.srcStageMask = src_stage,
+                                       .srcAccessMask = src_access,
+                                       .dstStageMask = dst_stage,
+                                       .dstAccessMask = dst_access,
+                                       .oldLayout = from,
+                                       .newLayout = to,
+                                       .image = image,
+                                       .subresourceRange = {aspect, 0, 1, 0, 1}};
+    };
+    const auto depth_aspect = vk::ImageAspectFlagBits::eDepth;
+    const auto color_aspect = vk::ImageAspectFlagBits::eColor;
+    // Barriers cover both aspects of a depth/stencil image (no separate layouts assumed).
+    const bool stencil = depth_format == vk::Format::eD32SfloatS8Uint ||
+                         depth_format == vk::Format::eD24UnormS8Uint ||
+                         depth_format == vk::Format::eD16UnormS8Uint;
+    const vk::ImageAspectFlags depth_barrier =
+        stencil ? depth_aspect | vk::ImageAspectFlagBits::eStencil : depth_aspect;
+    // The sources stay in General: only their writes are made visible to the copy.
+    const std::array before{
+        layout(depth, depth_barrier, vk::ImageLayout::eGeneral, vk::ImageLayout::eGeneral, all,
+               vk::AccessFlagBits2::eMemoryWrite, transfer, vk::AccessFlagBits2::eTransferRead),
+        layout(vk::Image(motion_image), color_aspect, vk::ImageLayout::eGeneral,
+               vk::ImageLayout::eGeneral, all, vk::AccessFlagBits2::eMemoryWrite, transfer,
+               vk::AccessFlagBits2::eTransferRead),
+        layout(vk::Image(slot.depth), depth_barrier, vk::ImageLayout::eUndefined,
+               vk::ImageLayout::eTransferDstOptimal, all, vk::AccessFlagBits2::eNone, transfer,
+               vk::AccessFlagBits2::eTransferWrite),
+        layout(vk::Image(slot.motion), color_aspect, vk::ImageLayout::eUndefined,
+               vk::ImageLayout::eTransferDstOptimal, all, vk::AccessFlagBits2::eNone, transfer,
+               vk::AccessFlagBits2::eTransferWrite),
+    };
+    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = u32(before.size()),
+                             .pImageMemoryBarriers = before.data()});
+    cmdbuf.copyImage(depth, vk::ImageLayout::eGeneral, vk::Image(slot.depth),
+                     vk::ImageLayout::eTransferDstOptimal,
+                     vk::ImageCopy{.srcSubresource = {depth_aspect, 0, 0, 1},
+                                   .dstSubresource = {depth_aspect, 0, 0, 1},
+                                   .extent = {w, h, 1}});
+    cmdbuf.copyImage(vk::Image(motion_image), vk::ImageLayout::eGeneral, vk::Image(slot.motion),
+                     vk::ImageLayout::eTransferDstOptimal,
+                     vk::ImageCopy{.srcSubresource = {color_aspect, 0, 0, 1},
+                                   .dstSubresource = {color_aspect, 0, 0, 1},
+                                   .extent = {w, h, 1}});
+    // The sources' next writers synchronize with the stages the cache knows of (compute, not
+    // the copy): the copy is chained to all commands for them.
+    const std::array after{
+        layout(depth, depth_barrier, vk::ImageLayout::eGeneral, vk::ImageLayout::eGeneral,
+               transfer, vk::AccessFlagBits2::eNone, all, vk::AccessFlagBits2::eNone),
+        layout(vk::Image(motion_image), color_aspect, vk::ImageLayout::eGeneral,
+               vk::ImageLayout::eGeneral, transfer, vk::AccessFlagBits2::eNone, all,
+               vk::AccessFlagBits2::eNone),
+        layout(vk::Image(slot.depth), depth_barrier, vk::ImageLayout::eTransferDstOptimal,
+               vk::ImageLayout::eGeneral, transfer, vk::AccessFlagBits2::eTransferWrite, all,
+               vk::AccessFlagBits2::eShaderRead),
+        layout(vk::Image(slot.motion), color_aspect, vk::ImageLayout::eTransferDstOptimal,
+               vk::ImageLayout::eGeneral, transfer, vk::AccessFlagBits2::eTransferWrite, all,
+               vk::AccessFlagBits2::eShaderRead),
+    };
+    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = u32(after.size()),
+                             .pImageMemoryBarriers = after.data()});
+    // The jitter DLSS super resolution gets (RecordDlss; toggle 1 << 26 flips its sign).
+    const float sign = Gow3Toggle::Disabled(1u << 26) ? -1.0f : 1.0f;
+    frame_gen_inputs = {
+        .depth = {vk::Image(slot.depth), *slot.depth_view, depth_format, depth_aspect, w, h},
+        .motion = {vk::Image(slot.motion), *slot.motion_view, vk::Format::eR16G16Sfloat,
+                   color_aspect, w, h},
+        .camera = camera,
+        .jitter = {sign * jitter[0], sign * jitter[1]},
+        .reset = was_reset,
+    };
+    frame_gen_fresh = true;
 }
 
 vk::ImageView TemporalUpscaler::CachedView(const VideoCore::Image& image, vk::Format format,
@@ -1753,6 +1908,7 @@ void TemporalUpscaler::RunScaled() {
     // Views kept across frames: FSR 4 registers images by view in a registry of eight.
     vk::Image depth_image = depth.GetImage(), color_image = color.GetImage();
     vk::ImageView depth_view{}, color_view{};
+    vk::ImageUsageFlags depth_usage = depth.usage_flags;
     u32 source_width = iw, source_height = ih;
     if (!scaled_session) {
         VideoCore::ImageViewInfo ci, di;
@@ -1764,6 +1920,7 @@ void TemporalUpscaler::RunScaled() {
         color_view = cp.view;
         depth_image = dp.image;
         depth_view = dp.view;
+        depth_usage = dp.usage;
         source_width = w;
         source_height = h;
     } else {
@@ -1819,6 +1976,7 @@ void TemporalUpscaler::RunScaled() {
         frame_ms = 16.6f;
     }
     last_frame = now;
+    const bool was_reset = reset; // frame generation resets with the upscaler
 
     // gow3: FSR 4 writes its HDR-format output, copied into the output-size UI image.
     if (UseFsr4() || UseDlss() || Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa) {
@@ -1891,6 +2049,7 @@ void TemporalUpscaler::RunScaled() {
                     vk::PipelineStageFlagBits2::eColorAttachmentOutput, color_access);
             reset = false;
             dispatched_last_frame = true;
+            StashFrameGen(cmdbuf, depth_image, depth_format, depth_usage, w, h, was_reset);
             if (const int dump = DumpFrame(); dump >= 0) {
                 DumpImages(instance, scheduler, cmdbuf, dump,
                            {{color_image, source_width, source_height, 4, "input", "rgba"},
@@ -1983,6 +2142,7 @@ void TemporalUpscaler::RunScaled() {
         reset = false;
         dispatched_last_frame = true;
         ExtraSharpen(cmdbuf, vk::Image(ui_image), true, ow, oh);
+        StashFrameGen(cmdbuf, depth_image, depth_format, depth_usage, w, h, was_reset);
         // GOW3_DUMP_TRIGGER: the inputs, the motion with and without the characters' own and
         // the scene stencil (motion vector checks).
         if (const int dump = DumpFrame(); dump >= 0 && camera_motion.VelocityMode()) {

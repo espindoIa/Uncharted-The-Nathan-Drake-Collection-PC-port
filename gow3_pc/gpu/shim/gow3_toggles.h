@@ -169,6 +169,83 @@ enum : std::uint64_t {
     /// map (its find/assign were 3.5% of stage B; cs 8f067540 writes the same ~3 pages per
     /// dispatch every frame). GOW3_PAGETICK_VERIFY=1 checks each cached read against the map.
     PageTickCache = 4194304,
+    /// Bit set: NVIDIA Reflex is off (no low latency mode, no sleep before the first pad read of a
+    /// frame, no markers unless GOW3_REFLEX_LOG is set), whatever the `reflex` setting says: a live
+    /// A/B in one run (gow3_reflex.cpp, 22 Oct 2026).
+    ReflexSleep = 8388608,
+    /// Bit set: DLSS Frame Generation is off (real frames only, the plain frame limit), whatever
+    /// the `frame_gen` setting says: a live A/B in one run (vk_presenter.cpp, 22 Oct 2026).
+    FrameGeneration = 16777216,
+    /// Bit set: Reflex keeps its low latency mode and markers but never sleeps (diagnostic for
+    /// isolating the sleep's cost; the ReflexSleep bit still turns everything off), 22 Oct 2026
+    /// (gow3_reflex.cpp).
+    ReflexNoSleep = 33554432,
+    /// Bit set: DLSS Frame Generation's sleep between the generated and the real present (half the
+    /// last real interval) uses std::this_thread::sleep_until, which on Windows rounds to whole
+    /// milliseconds; clear, the high-resolution waitable timer. A live A/B (vk_presenter.cpp,
+    /// 22 Oct 2026).
+    FrameGenStdSleep = 67108864,
+    /// Bit set: old behaviour. Clear, while Reflex sleeps, the GPU command thread submits a
+    /// sceGnmSubmitDone batch's recorded work every GOW3_REFLEX_EARLY_DRAWS draws and dispatches
+    /// (default 80, 0 never) instead of only at its end. 22 Oct 2026 GPU profile (U3 ch.2, 4K
+    /// DLAA, RTX 5070): with the sleep the GPU idled 3.48 ms a frame before those end-of-batch
+    /// flushes, 0.21 ms without (liverpool.cpp, EarlySubmit).
+    ReflexEarlySubmit = 134217728,
+    /// Bit set: old behaviour. Clear, a guest read fault on a page that pending readbacks
+    /// read-protect, missing all of their GPU bytes (false sharing), makes the page readable on
+    /// the faulting thread; the command thread unwatches it later as before. 23 Oct 2026 U3
+    /// Cartagena street (4K, FG): ~35 such faults/s, ~1.3 ms each through the command thread.
+    GuestFalseSharing = 268435456,
+    /// Bit set: old behaviour. Clear, a guest read of GPU bytes still on their way back waits for
+    /// their submission on the faulting thread before asking the command thread to land them.
+    /// 23 Oct 2026 U3 Cartagena street: ~15 such faults/s, ~10 ms each with the command thread
+    /// waiting for the GPU (CompleteReadbacks) and feeding it nothing meanwhile.
+    GuestReadPrewait = 536870912,
+    /// Experiment, GOW3_FORWARD_COPIES=1 only (default off after the protected-destination
+    /// prototype regressed). Bit set: old behaviour. Clear, a guest memcpy whose source holds
+    /// GPU bytes still on their way back is made by the GPU instead, in stream order after the work that wrote them
+    /// (Rasterizer::ForwardGuestCopy). 23 Oct 2026 U3 Cartagena street: PrepareInstanceForRendering
+    /// (fg-draw-mgr.cpp, guest 0xe3c6e7) copies cloth-solver bone matrices into the frame's
+    /// skinning palette, ~20 times a second, each read waiting ~9.5 ms for the GPU.
+    ForwardedCopies = 1073741824,
+    /// 23 Oct 2026: stage-A snapshots use a four-way cache instead of one direct-mapped slot.
+    /// Keep the snapshots (not live guest pointers) across packets and reuse only with the
+    /// existing epoch/page tokens and constant-ring lifetime checks. Set: the old cache.
+    RingAssociative = 1ull << 31,
+    /// Rebuild compute specializations in reusable scratch storage, rather than initializing
+    /// and destroying their resource vectors for every dispatch. Set: old construction.
+    ComputeSpecScratch = 1ull << 32,
+    /// Validate the previous buffer-only compute variant directly against current descriptors
+    /// instead of constructing temporary specialization vectors. Set: full construction.
+    ComputeVariantCheck = 1ull << 33,
+    /// Opt-in experiment (GOW3_COMMANDS_STAGE_B=1): cache/fault commands execute in-order on
+    /// stage B rather than draining it on stage A. Set: original command-thread execution.
+    CommandsOnStageB = 1ull << 34,
+    /// Opt-in (GOW3_STATIC_MESH_SNAPSHOTS=1): immutable crowd inputs survive ring recycling in
+    /// an append-only GPU buffer. CPU write/unmap versions invalidate lookups, not queued bytes.
+    /// Set: original transient snapshots. 23 Oct short tests: no material FPS gain established.
+    StaticMeshSnapshots = 1ull << 35,
+    /// Opt-in (GOW3_SKINNING_WRITE_BATCH=1): acquire the overlapping output views of one crowd
+    /// dispatch together. Keeps each descriptor's offset/size and each exact barrier range.
+    CoalescedSkinningWrites = 1ull << 36,
+    /// Opt-in (GOW3_FORWARD_COPY_DEFER=1, also needs forwarded copies): protect a memcpy
+    /// destination before returning, but submit with normal work unless the CPU consumes it.
+    ForwardCopyDefer = 1ull << 37,
+    /// Opt-in (GOW3_DISPATCH_FUSION=1): one crowd workgroup per mesh instance, batched as Y
+    /// groups with per-instance descriptor/push-data arrays. Set: one dispatch per instance.
+    DispatchFusion = 1ull << 38,
+    /// Set: Reflex uses the driver's/Streamline's sleep (old behaviour). Clear: the GPU-gated pacer
+    /// (the guest waits until the GPU finished frame id - lag; default).
+    ReflexPacer = 1ull << 39,
+    /// Opt-in (GOW3_DISPATCH_RUNS=1): consecutive cs 8f067540 dispatches go to stage B as one pipe
+    /// packet per run of up to 64 and are recorded as one batched dispatch (24 Oct 2026 U3
+    /// Cartagena: 1,522 a frame, ~3.7 ms of stage A and ~4.4 ms of stage B). Set: one packet and
+    /// one dispatch each, read live on both stages (vk_rasterizer.cpp, DispatchRunRecord).
+    DispatchRuns = 1ull << 40,
+    /// Bit set: old behaviour (read live). Clear, the compute releases staged in a batched
+    /// dispatch run reach the Vulkan recorder as one signal (24 Oct 2026 U3 street: ~20 a run,
+    /// ~666k per 5 s, each with its own download pass, Record and kick on stage B).
+    RunReleaseBatch = 1ull << 41,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

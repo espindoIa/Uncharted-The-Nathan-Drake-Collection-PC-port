@@ -14,6 +14,31 @@ namespace Vulkan {
 
 class Instance;
 class Scheduler;
+class Semaphore;
+
+// gow3 24 Oct 2026: per-submission ring so a GPU wait timeout can name the stuck submission's waits.
+struct SubmitRecord {
+    u64 tick{};
+    s64 submit_ns{}; ///< steady_clock
+    u32 num_waits{};
+    vk::Semaphore waits[8];
+    u64 values[8]{};
+};
+
+struct SubmitDiag {
+    static constexpr u32 RING = 512;
+    const Semaphore* semaphore{};
+    int index{};
+    int log_id{-1}; ///< Scheduler::SetLogId: draw 0, present 1, flip 2
+    SubmitRecord ring[RING];
+};
+
+/// Registered at Scheduler construction, before any submit; never freed.
+SubmitDiag* RegisterSubmitDiag(const Semaphore* semaphore);
+/// BufferCache's bindSparse timeline semaphore (named "sparse" in the dump).
+void SetSparseSemaphore(vk::Semaphore semaphore);
+/// One bindSparse call (ring of the last 16, shown in the timeout dump).
+void NoteSparseBind(u64 tick, u32 binds, u32 unbinds, u64 bytes);
 
 class Semaphore {
 public:
@@ -50,6 +75,8 @@ public:
     bool WaitFor(u64 tick, u64 timeout_ns);
 
 protected:
+    void DumpStuckSubmission(u64 tick);
+
     const Instance& instance;
     vk::UniqueSemaphore semaphore;    ///< Timeline semaphore.
     std::atomic<u64> gpu_tick{0};     ///< Current known GPU tick.
