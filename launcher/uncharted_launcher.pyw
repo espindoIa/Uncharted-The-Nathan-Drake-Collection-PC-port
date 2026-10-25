@@ -1700,7 +1700,13 @@ class Launcher:
         stage = self.stage = tk.Canvas(self.root, bg=STAGE, highlightthickness=0, bd=0)
         stage.pack(fill="both", expand=True)
         stage.create_image(0, 0, anchor="nw", tags="bg")
-        stage.create_text(0, 0, text="UNCHARTED", font=self.f_wordmark, fill=TEXT, anchor="w", tags="wordmark")
+        # 25 Oct 2026: the lettering is drawn art (assets/wordmark.png, source in wordmark/src); the
+        # system font only stands in when the file is missing. 1x height 32 px: cap height ~23 px.
+        mark = art.wordmark(stage, self.px(32))
+        if mark is not None:
+            stage.create_image(0, 0, image=mark, anchor="w", tags="wordmark")
+        else:
+            stage.create_text(0, 0, text="UNCHARTED", font=self.f_wordmark, fill=TEXT, anchor="w", tags="wordmark")
         stage.create_text(0, 0, text=f"THE NATHAN DRAKE COLLECTION  ·  {EDITION.upper()}", font=self.f_subtitle,
                           fill=MUTED, anchor="w", tags="subtitle")
         stage.create_text(0, 0, text="YOUR GAMES  ·  DOUBLE-CLICK TO PLAY", font=self.f_caption, fill=DIM,
@@ -1767,7 +1773,7 @@ class Launcher:
         panel_x = m + col + px(self.GAP)
         boxes = {}
         # Top bar: the wordmark, the section tabs over the panel, GitHub (and UPDATE) on the right.
-        stage.coords("wordmark", m, px(31))
+        stage.coords("wordmark", m - (px(4) if stage.type("wordmark") == "image" else 0), px(31))
         stage.coords("subtitle", m + px(1), px(51))
         x = panel_x + px(4)
         for name, (canvas, label) in self.tab_buttons.items():

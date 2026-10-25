@@ -6,6 +6,10 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Launcher: the UNCHARTED title now has its own lettering** (wide, heavy capitals with cut
+  corners, a sandstone finish) in place of the system font. Redrawn by hand, not copied from the
+  games. If `launcher/assets/wordmark.png` is missing the launcher draws plain text as before.
+
 - **Fix: shadows cast by lamps no longer flicker on and off with DLSS, TAA or FSR.** With the
   anti-aliasing / upscaler on, the passes that draw lamp shadows now follow the same sub-pixel
   camera shift as the rest of the scene, as the sun shadows already did since 19 October. To

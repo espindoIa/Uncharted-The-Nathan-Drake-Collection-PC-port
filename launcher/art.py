@@ -65,6 +65,18 @@ def icon(widget, name, size, color):
     return photo(widget, ("icon", name, int(size), color), lambda: icon_image(name, size, color))
 
 
+def wordmark(widget, height):
+    """The UNCHARTED lettering (VectorCraft outlines + PhotoCraft finish, 25 Oct 2026) as a photo
+    `height` px tall, or None when the file is missing (the launcher then draws text)."""
+    path = ASSETS / "wordmark.png"
+    if not path.exists():
+        return None
+    def make():
+        image = Image.open(path)
+        return image.resize((round(image.width * height / image.height), height), Image.LANCZOS)
+    return photo(widget, ("wordmark", int(height)), make)
+
+
 @lru_cache(maxsize=96)  # the stage's panels come back on every game switch; callers never change the image
 def rounded_image(w, h, r, fill=None, outline=None, width=0, opacity=255):
     """RGBA rounded rectangle; `fill` "#rrggbb" or a vertical gradient (top, bottom)."""

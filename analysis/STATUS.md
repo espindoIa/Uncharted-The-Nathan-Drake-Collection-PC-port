@@ -4946,3 +4946,7 @@ game folder. Tab order: games, tabs, panel, PLAY, GitHub.
 Not verified: a real 3840x2160 monitor at 150%/200% Windows scaling (only Tk scaling here); a
 controller driving the new layout; the UPDATE pill with a real release; the packaged zip;
 Wine/Proton (Bahnschrift missing falls back to Segoe UI).
+
+## 25 October 2026: launcher wordmark
+
+The title "UNCHARTED" in the launcher header is `launcher/assets/wordmark.png` (1792x280 RGBA): nine glyph outlines drawn by hand in VectorCraft (`wordmark/src/wordmark.svg`, generated from path data; `wordmark-flat.png` is its raster), then noise plus gradient map in PhotoCraft. The games ship no logo file (sce_sys holds only key art), so the letters approximate the logo style and are not extracted. `art.wordmark()` scales it; the text font is the fallback. Checked: syntax, one Tk render of the image. Not checked: full launcher window at 150%, package zip.
