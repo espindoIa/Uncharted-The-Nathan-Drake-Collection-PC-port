@@ -6,6 +6,11 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Changed (25 Oct 2026): the launcher's sidebar has icons.** The compass sits beside the
+  UNCHARTED title, each section (Home, Display, Performance, Controls, Gameplay, System) has a line
+  icon that turns orange when the section is open, and the GitHub badge has a code icon instead of
+  text characters. The art was drawn as vectors (sources in `launcher/assets/src`).
+
 - **Added (24 Oct 2026): the launcher can be used with a controller.** The D-pad or the left stick
   move through the games, the sections, the settings and the buttons; A presses a button, flips a
   switch or opens a list, left and right change a choice, B goes back to the section list (and

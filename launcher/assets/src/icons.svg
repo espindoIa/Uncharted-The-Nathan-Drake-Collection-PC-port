@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="448" height="64" viewBox="0 0 448 64">
+  <title>Untitled-3</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path id="home0" d="M10 30 L32 10 L54 30" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="home1" d="M16 26 L16 52 L48 52 L48 26" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="home2" d="M27 52 L27 38 L37 38 L37 52" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="display0" d="M76 12 L116 12 C118.667 12 120 13.333 120 16 L120 40 C120 42.667 118.667 44 116 44 L76 44 C73.333 44 72 42.667 72 40 L72 16 C72 13.333 73.333 12 76 12 Z" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="display1" d="M88 54 L104 54" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="display2" d="M96 44 L96 54" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="performance0" d="M140 48 C132.265 37.686 133.641 23.181 143.178 14.506 C152.715 5.831 167.285 5.831 176.822 14.506 C186.359 23.181 187.735 37.686 180 48" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="performance1" d="M160 40 L171 23" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="performance2" d="M142 48 L148 48 M172 48 L178 48" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="controls0" d="M210 20 L238 20 C246 20 250 34 248 44 C247 50 241 50 238 46 L234 40 L214 40 L210 46 C207 50 201 50 200 44 C198 34 202 20 210 20 Z" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="controls1" d="M213 24 L213 34 M208 29 L218 29" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="gameplay0" d="M288 14 C297.931 14.028 305.964 22.094 305.95 32.025 C305.936 41.956 297.881 50 287.95 50 C278.019 50 269.964 41.956 269.95 32.025 C269.936 22.094 277.969 14.028 287.9 14 Z" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="gameplay1" d="M288 4 L288 14 M288 50 L288 60 M260 32 L270 32 M306 32 L316 32" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="system0" d="M330 18 L336 18 M348 18 L374 18" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="system1" d="M330 32 L356 32 M368 32 L374 32" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="system2" d="M330 46 L342 46 M354 46 L374 46" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="link0" d="M408 18 L394 32 L408 46" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="link1" d="M424 18 L438 32 L424 46" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="link2" d="M421 14 L411 50" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="btnA" d="M233 26 C233 24.343 234.343 23 236 23 C237.657 23 239 24.343 239 26 C239 27.657 237.657 29 236 29 C234.343 29 233 27.657 233 26 Z" fill="#ffffff"/>
+    <path id="btnB" d="M239 32 C239 30.343 240.343 29 242 29 C243.657 29 245 30.343 245 32 C245 33.657 243.657 35 242 35 C240.343 35 239 33.657 239 32 Z" fill="#ffffff"/>
+    <path id="hub" d="M156 40 C156 37.791 157.791 36 160 36 C162.209 36 164 37.791 164 40 C164 42.209 162.209 44 160 44 C157.791 44 156 42.209 156 40 Z" fill="#ffffff"/>
+    <path id="centre" d="M284 32 C284 29.791 285.791 28 288 28 C290.209 28 292 29.791 292 32 C292 34.209 290.209 36 288 36 C285.791 36 284 34.209 284 32 Z" fill="#ffffff"/>
+    <path id="knob0" d="M336 18 C336 14.686 338.686 12 342 12 C345.314 12 348 14.686 348 18 C348 21.314 345.314 24 342 24 C338.686 24 336 21.314 336 18 Z" fill="none" stroke="#ffffff" stroke-width="5" stroke-miterlimit="10"/>
+    <path id="knob1" d="M356 32 C356 28.686 358.686 26 362 26 C365.314 26 368 28.686 368 32 C368 35.314 365.314 38 362 38 C358.686 38 356 35.314 356 32 Z" fill="none" stroke="#ffffff" stroke-width="5" stroke-miterlimit="10"/>
+    <path id="knob2" d="M342 46 C342 42.686 344.686 40 348 40 C351.314 40 354 42.686 354 46 C354 49.314 351.314 52 348 52 C344.686 52 342 49.314 342 46 Z" fill="none" stroke="#ffffff" stroke-width="5" stroke-miterlimit="10"/>
+  </g>
+</svg>

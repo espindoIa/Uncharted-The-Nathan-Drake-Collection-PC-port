@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="512" height="512" viewBox="0 0 512 512">
+  <title>Untitled-2</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path id="ring" d="M71 256 C71 153.827 153.827 71 256 71 C358.173 71 441 153.827 441 256 C441 358.173 358.173 441 256 441 C153.827 441 71 358.173 71 256 Z" fill="none" stroke="#8ea3a6" stroke-width="14" stroke-miterlimit="10"/>
+    <path id="inner_ring" data-name="inner ring" d="M101 256 C101 170.396 170.396 101 256 101 C341.604 101 411 170.396 411 256 C411 341.604 341.604 411 256 411 C170.396 411 101 341.604 101 256 Z" fill="none" stroke="#3a5562" stroke-width="4" stroke-miterlimit="10"/>
+    <path id="cardinal_ticks" data-name="cardinal ticks" d="M256 40 L256 78 M256 434 L256 472 M40 256 L78 256 M434 256 L472 256" fill="none" stroke="#e6eeec" stroke-width="14" stroke-linecap="round" stroke-miterlimit="10"/>
+    <path id="minor_ticks" data-name="minor ticks" d="M131.3 131.3 L146 146 M380.7 131.3 L366 146 M131.3 380.7 L146 366 M380.7 380.7 L366 366" fill="none" stroke="#566b70" stroke-width="8" stroke-linecap="round" stroke-miterlimit="10"/>
+    <path id="needle_N_light" data-name="needle N light" d="M138.4 88.1 L220 281.2 L256 256 Z" fill="#ff8a3d"/>
+    <path id="needle_N_dark" data-name="needle N dark" d="M138.4 88.1 L292 230.8 L256 256 Z" fill="#c45c1c"/>
+    <path id="needle_S_dark" data-name="needle S dark" d="M373.6 423.9 L220 281.2 L256 256 Z" fill="#96a6a8"/>
+    <path id="needle_S_light" data-name="needle S light" d="M373.6 423.9 L292 230.8 L256 256 Z" fill="#e6eeec"/>
+    <path id="hub" d="M239 256 C239 246.611 246.611 239 256 239 C265.389 239 273 246.611 273 256 C273 265.389 265.389 273 256 273 C246.611 273 239 265.389 239 256 Z" fill="#0b1116" stroke="#e6eeec" stroke-width="6" stroke-miterlimit="10"/>
+  </g>
+</svg>

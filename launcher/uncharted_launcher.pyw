@@ -31,6 +31,9 @@ from widgets import (ACCENT, ACCENT_HI, BG, DIM, GOOD, HERO_DARK, HERO_GRID, HER
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "launcher" / "assets"
+# Cells of assets/icons.png, line icons drawn in VectorCraft (source: assets/src/icons.svg); the sheet
+# is white on transparent so each use tints it. assets/emblem.png is the sidebar's compass.
+GLYPHS = ("home", "display", "performance", "controls", "gameplay", "system", "link")
 # The Collection's regions the port is tested with: US (CUSA02320, the fork's own copy, with update
 # 1.02) and Europe (CUSA02344). Their 1.02 executables are the same; every patch finds its bytes in both.
 GAME_IDS = ("CUSA02320", "CUSA02344")
@@ -1470,6 +1473,7 @@ class Launcher:
         # The graphics card (as last detected; detect_gpu checks again) for the Home preset advice.
         self.gpu_name = self.config.get("gpu")
         self.recommended = gpu_tier(self.gpu_name)
+        self.glyph_photos = {}
         self.fonts()
         root.title(f"{APP_TITLE} - {EDITION}")
         root.configure(bg=BG)
@@ -1557,6 +1561,19 @@ class Launcher:
 
     def px(self, value):
         return int(value * self.s)
+
+    def glyph(self, name, size, color):
+        """A tinted icon of the sheet (`name` in GLYPHS) at `size` px, as a PhotoImage kept for the window's life."""
+        key = (name, size, color)
+        if key not in self.glyph_photos:
+            sheet = Image.open(ASSETS / "icons.png")
+            cell = sheet.width // len(GLYPHS)
+            left = GLYPHS.index(name) * cell
+            alpha = sheet.crop((left, 0, left + cell, sheet.height)).getchannel("A").resize((size, size), Image.LANCZOS)
+            image = Image.new("RGBA", (size, size), color)
+            image.putalpha(alpha)
+            self.glyph_photos[key] = ImageTk.PhotoImage(image)
+        return self.glyph_photos[key]
 
     def fonts(self):
         # Headings in Bahnschrift (Windows 10 and later: the condensed lettering of maps and road
@@ -1672,12 +1689,19 @@ class Launcher:
         w, pad = self.px(240), self.px(20)
         brand = tk.Frame(bar, bg=PANEL)
         brand.pack(side="top", fill="x", padx=pad, pady=(self.px(18), self.px(10)))
-        tk.Label(brand, text="UNCHARTED", font=self.f_wordmark, bg=PANEL, fg=TEXT, anchor="w", bd=0).pack(
+        # The compass emblem (drawn in VectorCraft) beside the wordmark.
+        emblem_size = self.px(46)
+        self.emblem_photo = ImageTk.PhotoImage(
+            Image.open(ASSETS / "emblem.png").convert("RGBA").resize((emblem_size, emblem_size), Image.LANCZOS))
+        tk.Label(brand, image=self.emblem_photo, bg=PANEL, bd=0).pack(side="left", anchor="n", padx=(0, self.px(10)))
+        titles = tk.Frame(brand, bg=PANEL)
+        titles.pack(side="left", anchor="n")
+        tk.Label(titles, text="UNCHARTED", font=self.f_wordmark, bg=PANEL, fg=TEXT, anchor="w", bd=0).pack(
             side="top", anchor="w")
-        tk.Label(brand, text="THE NATHAN DRAKE COLLECTION", font=self.f_subtitle, bg=PANEL, fg=MUTED,
+        tk.Label(titles, text="THE NATHAN DRAKE COLLECTION", font=self.f_subtitle, bg=PANEL, fg=MUTED,
                  anchor="w", bd=0).pack(side="top", anchor="w", padx=(self.px(2), 0))
         # The fork's edition as a flare-orange tag under the subtitle.
-        tk.Label(brand, text=EDITION.upper(), font=self.f_edition, bg=ACCENT, fg=INK, padx=self.px(8),
+        tk.Label(titles, text=EDITION.upper(), font=self.f_edition, bg=ACCENT, fg=INK, padx=self.px(8),
                  pady=self.px(1)).pack(side="top", anchor="w", padx=(self.px(2), 0), pady=(self.px(8), 0))
         # Bottom first: when the window is short, the section list gives way, not these.
         version = updater.installed_version(ROOT)
@@ -1728,7 +1752,9 @@ class Launcher:
         canvas.create_rectangle(0, 0, w, h, fill=PANEL_HI if selected or hover else PANEL, outline="")
         if selected:
             canvas.create_rectangle(0, 0, self.px(4), h, fill=ACCENT, outline="")
-        canvas.create_text(self.px(22), h // 2, text=label, font=self.f_tab, anchor="w",
+        canvas.create_image(self.px(22), h // 2, anchor="w",
+                            image=self.glyph(name, self.px(18), ACCENT if selected else TEXT if hover else MUTED))
+        canvas.create_text(self.px(52), h // 2, text=label, font=self.f_tab, anchor="w",
                            fill=TEXT if selected or hover else MUTED)
 
     def build_hero(self):
@@ -1804,9 +1830,8 @@ class Launcher:
             badge = round_rect(canvas, left, top, right, top + height, height // 2, fill=color, outline=HOVER_LINE,
                                tags=tag)
             canvas.tag_lower(badge, text)
-            # Icon: GitHub's code brackets in the flare orange.
-            icon_x = left + self.px(12)
-            canvas.create_text(icon_x + self.px(8), mid, text="</>", font=self.f_small, fill=ACCENT, tags=tag)
+            # Icon: GitHub's code brackets in the flare orange (the sheet's link glyph).
+            canvas.create_image(left + self.px(20), mid, image=self.glyph("link", self.px(18), ACCENT), tags=tag)
             canvas.tag_bind(tag, "<Button-1>", lambda e, u=url: webbrowser.open(u))
             canvas.tag_bind(tag, "<Enter>", lambda e, b=badge, c=hover: (canvas.itemconfig(b, fill=c, outline=ACCENT),
                                                                        canvas.config(cursor="hand2")))

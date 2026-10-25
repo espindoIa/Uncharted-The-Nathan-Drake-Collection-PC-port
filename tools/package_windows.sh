@@ -80,7 +80,7 @@ cp tools/pkgtool/PkgTool.exe tools/pkgtool/LibOrbisPkg.dll "$stage/tools/pkgtool
 cp launcher/uncharted_launcher.pyw launcher/updater.py launcher/widgets.py "$stage/launcher/"
 # The package's version (tools/VERSION; the launcher's updates compare it with the releases).
 cp tools/VERSION "$stage/VERSION"
-cp launcher/assets/uncharted.ico launcher/assets/icon.png "$stage/launcher/assets/"
+cp launcher/assets/uncharted.ico launcher/assets/icon.png launcher/assets/emblem.png launcher/assets/icons.png "$stage/launcher/assets/"
 # The runtime's optimizations known to break Uncharted (GOW3_TOGGLE_FILE).
 cp tools/defaults/disabled-optimizations.txt "$stage/analysis/uncharted-user/"
 cp tools/README-Windows.txt "$stage/README.txt"
