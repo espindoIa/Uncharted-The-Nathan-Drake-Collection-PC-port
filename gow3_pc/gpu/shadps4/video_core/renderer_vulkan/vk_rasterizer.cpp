@@ -3755,18 +3755,106 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // gow3: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
     draw_jitter = {};
-    if (upscaler->Enabled() && JitteredDepth(db_desc.first) &&
-        (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
+    const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    const bool full_screen = regs.num_indices <= 6 && regs.num_instances.NumInstances() <= 1;
+    // gow3 25 Oct 2026 (player: whole lamp shadows flicker on and off with DLSS, TAA or FSR,
+    // never without an upscaler): what this draw samples. bound_images holds its targets too;
+    // binding.is_bound marks the images BindTextures sampled (reset by ResetBindings). A pass
+    // that samples the jittered scene depth and tests against a shadow map (a compare sampler,
+    // or another depth-format image) rebuilds positions from depth rendered up to half a pixel
+    // away: where that exceeds the shadow bias, the whole shadow test flips every jitter step.
+    bool samples_scene_depth = false, samples_other_depth = false;
+    u32 compare_samplers = 0;
+    if (upscaler->Enabled() && ps && camera_motion->Depth()) {
+        for (const VideoCore::ImageId id : bound_images) {
+            const auto& image = texture_cache.GetImage(id);
+            if (!image.binding.is_bound || !image.info.props.is_depth) {
+                continue;
+            }
+            (JitteredDepth(id) ? samples_scene_depth : samples_other_depth) = true;
+        }
+        if (samples_scene_depth) {
+            for (const auto& sampler : ps->samplers) {
+                compare_samplers += sampler.is_depth ? 1u : 0u;
+            }
+        }
+    }
+    const bool shadow_candidate =
+        samples_scene_depth && (compare_samplers > 0 || samples_other_depth);
+    const bool shadow_jitter = !Gow3Toggle::Disabled2(Gow3Toggle::ShadowPassJitter);
+    // Full-screen passes: the jitter is in scene pixels. A pass drawn at another size (a
+    // half-resolution shadow mask) moves by the same fraction of the screen, not the same number
+    // of its own pixels (its viewport covers the screen the scene depth covers). ShadowPassJitter
+    // set: the old unscaled shift.
+    const auto full_screen_jitter = [&] {
+        auto jitter = upscaler->Jitter();
+        const auto& vp_ctl = regs.viewport_control;
+        const auto& vp = regs.viewports[0];
+        if (const auto depth = camera_motion->Depth(); shadow_jitter && depth &&
+            vp_ctl.xscale_enable && vp_ctl.yscale_enable && vp.xscale > 0.0f && vp.yscale != 0.0f) {
+            const auto& size = texture_cache.GetImage(depth).info.size;
+            jitter[0] *= 2.0f * vp.xscale / float(size.width);
+            jitter[1] *= 2.0f * std::abs(vp.yscale) / float(size.height);
+        }
+        return jitter;
+    };
+    if (upscaler->Enabled() && JitteredDepth(db_desc.first) && !full_screen) {
         draw_jitter = upscaler->Jitter();
-    } else if (const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-               ps && upscaler->Enabled() && JitterFullScreenPass(ps->pgm_hash) &&
+    } else if (ps && upscaler->Enabled() && JitterFullScreenPass(ps->pgm_hash) &&
                !Gow3Toggle::Disabled(Gow3Toggle::FullScreenPassJitter)) {
-        draw_jitter = upscaler->Jitter();
+        draw_jitter = full_screen_jitter();
         static bool noted = false;
         if (!noted) {
             noted = true;
             std::printf("Upscaler: full-screen pass %08x gets the scene jitter\n",
                         u32(ps->pgm_hash));
+        }
+    } else if (full_screen && shadow_candidate && shadow_jitter) {
+        // gow3 25 Oct 2026: the lamp (point, spot) shadow passes are other shaders than the sun's
+        // f614041e in GOW3_JITTER_PS; found by what they sample instead of by hash.
+        draw_jitter = full_screen_jitter();
+        static std::vector<u32> noted;
+        if (std::ranges::find(noted, u32(ps->pgm_hash)) == noted.end()) {
+            noted.push_back(u32(ps->pgm_hash));
+            std::printf("Upscaler: shadow pass %08x gets the scene jitter (auto)\n",
+                        u32(ps->pgm_hash));
+        }
+    }
+    // Diagnostics, once per pixel shader: shadow pass candidates, and jittered light volumes
+    // (geometry) that test shadows but may build their screen UV from FragCoord, which the
+    // viewport shift does not move (no behaviour change for those).
+    if (shadow_candidate) {
+        const bool jittered = draw_jitter[0] != 0.0f || draw_jitter[1] != 0.0f;
+        const bool light_volume = jittered && !full_screen && compare_samplers > 0;
+        static std::vector<u32> seen_shadow, seen_volume;
+        const u32 hash = u32(ps->pgm_hash);
+        const bool new_shadow = std::ranges::find(seen_shadow, hash) == seen_shadow.end();
+        const bool new_volume =
+            light_volume && std::ranges::find(seen_volume, hash) == seen_volume.end();
+        if (new_shadow || new_volume) {
+            u32 width = 0, height = 0;
+            if (cb_descs[0].first) {
+                const auto& size = texture_cache.GetImage(cb_descs[0].first).info.size;
+                width = size.width, height = size.height;
+            }
+            const u32 vs_hash = u32(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash);
+            if (new_shadow) {
+                seen_shadow.push_back(hash);
+                std::printf("Shadow pass candidate: ps %08x vs %08x indices %u instances %u "
+                            "jittered %d target %ux%u compare-samplers %u other-depth %d "
+                            "screen-space %d\n",
+                            hash, vs_hash, regs.num_indices, regs.num_instances.NumInstances(),
+                            int(jittered), width, height, compare_samplers,
+                            int(samples_other_depth), int(regs.IsClipDisabled()));
+            }
+            if (new_volume) {
+                seen_volume.push_back(hash);
+                std::printf("Light volume candidate: ps %08x vs %08x indices %u instances %u "
+                            "target %ux%u compare-samplers %u\n",
+                            hash, vs_hash, regs.num_indices, regs.num_instances.NumInstances(),
+                            width, height, compare_samplers);
+            }
+            std::fflush(stdout);
         }
     }
     UpdateDynamicState(pipeline, is_indexed);

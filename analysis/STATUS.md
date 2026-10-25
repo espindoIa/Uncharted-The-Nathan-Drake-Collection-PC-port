@@ -33,6 +33,7 @@ New entries go at the end, dated, measured numbers only.
 - Session recorder and engine flight recorder (retroactive per-flip CSV for one-frame flashes): `25 October 2026: session recorder`, `25 October 2026: engine flight recorder`
 - Upscaler history reset on camera cuts, flight `d_compiles` fix: `25 October 2026: history reset on camera cuts`
 - Scene LOD bias skips explicit-LOD samplers, forced anisotropy skips unmipped ones: `25 October 2026: scene LOD bias and anisotropy follow the shader's sampling`
+- Lamp shadow passes found by what they sample and jittered: `25 October 2026: lamp shadow passes get the scene jitter`
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
@@ -4689,3 +4690,59 @@ and the blur are gone (A/B with bits 43/44 and `GOW3_FRAME_DUMP_TRIGGER` dumps a
 DLAA wall sharpness is kept (Laplacian metric as on 21 Oct); FPS within noise; that the cache
 rebuild completes. U1 and U2 not checked. A sampler that pairs with a mipmapped image in one draw
 and a one-level image in another is decided per draw from the bound T#s.
+
+## 25 October 2026: lamp shadow passes get the scene jitter
+
+Why: the player reports that with any temporal upscaler (DLSS, TAA, FSR) whole shadows cast by
+lamps flicker on and off, in many places, always; with the upscaler off they do not.
+
+**Mechanism** (code reading, same as the sun fix of 19 Oct, #261). The jitter is a viewport shift
+(`UpdateViewportScissorState`, `viewport.x = ... + draw_jitter[0]`) given to geometry drawn with the
+jittered scene depth (>6 indices or >1 instance) and to full-screen passes only when their pixel
+shader is in `GOW3_JITTER_PS` (probe_uncharted.py lists only f614041e, the sun shadow pass). A
+full-screen pass that rebuilds world positions from the jittered scene depth with the game's
+unjittered matrices samples the shadow map at a position off by up to half a pixel, different every
+frame; on surfaces where that exceeds the shadow bias the whole shadow test flips. The lamp (point,
+spot) shadow passes are other shaders, so they were never jittered.
+
+**Rule** (vk_rasterizer.cpp `DrawRecord`, after `BindResources`):
+- Sampled images: `bound_images` holds the draw's targets and textures; `image.binding.is_bound`
+  is set only by `BindTextures` / `BindTexturesFromSet` (reset per draw in `ResetBindings`), so it
+  separates sampled images from targets. A sampled depth-format image (`info.props.is_depth`) is the
+  scene depth when `JitteredDepth(id)` (the scene depth, or in Uncharted its same-size same-format
+  copy), otherwise "another depth image" (a shadow map).
+- Depth-compare samplers: `Shader::SamplerResource::is_depth` of the pixel shader (set for the `_C`
+  sample opcodes in resource_patching_pass.cpp).
+- Shadow pass candidate: samples the jittered scene depth AND (a compare sampler OR another depth
+  image). A full-screen candidate (<=6 indices, 1 instance) not already in `GOW3_JITTER_PS` gets the
+  scene jitter; logged once per shader: `Upscaler: shadow pass %08x gets the scene jitter (auto)`.
+- Full-screen jitter scale: the jitter is in scene pixels; the shift was applied in the pass's own
+  pixels, so a pass drawn at half size moved twice as far across the screen as the scene. It is now
+  scaled by the viewport size over the scene depth size (`2 * xscale / depth width`), for the
+  `GOW3_JITTER_PS` passes too (no change for a full-size pass such as the sun's, if it is full size).
+- Toggle: Disabled2 bit 45 `ShadowPassJitter` (35184372088832), read live; bit set = old behaviour
+  (no automatic jitter and the unscaled shift). `GOW3_JITTER_PS` and bit 62 `FullScreenPassJitter`
+  keep working.
+
+**Diagnostics** (stdout, boot.log; once per pixel shader hash, a small vector of seen hashes; the
+per-draw cost is a walk of the draw's bound images while the upscaler is on):
+- `Shadow pass candidate: ps .. vs .. indices N instances N jittered D target WxH compare-samplers N
+  other-depth D screen-space D` for every candidate draw, full-screen or geometry.
+- `Light volume candidate: ...` for jittered geometry (>6 indices or >1 instance) that samples the
+  scene depth with a compare sampler. Variant 2: a deferred light volume builds its screen UV from
+  FragCoord, which the viewport shift does not move, so it reads depth rendered half a pixel away.
+  Only logged, no behaviour change.
+
+**Review notes.** Screen-space passes (clip disabled) ignore `draw_jitter` in the viewport code, so a
+candidate with `screen-space 1` is not moved by this change. A shader that samples the scene depth
+through a colour (R32F) image registered apart from the depth image is not seen as sampling the
+scene depth. A full-screen candidate that is not a shadow pass (fog or volumetric light that tests a
+shadow map) would get the jitter too: the log names each one, bit 45 turns it off.
+
+**Tests.** No game run. `gow3_pc/build.sh` 0 (vk_rasterizer.cpp recompiled, no warning on the new
+lines); `ninja -C out/gpu flight-test camera-cut-test` 0, `flight-test.exe` 0, `camera-cut-test.exe`
+0 (regression only: no unit test covers the draw-time rule).
+
+**Not verified.** That the lamp shadow flicker stops; which shaders the candidate logs name in U1,
+U2 and U3; whether the sun pass f614041e draws at full size (the scaling only changes it if not);
+whether lamp passes are full-screen or light volumes (variant 2 is not fixed); FPS within noise.

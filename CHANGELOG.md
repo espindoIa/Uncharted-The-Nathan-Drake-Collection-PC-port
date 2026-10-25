@@ -6,6 +6,11 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Fix: shadows cast by lamps no longer flicker on and off with DLSS, TAA or FSR.** With the
+  anti-aliasing / upscaler on, the passes that draw lamp shadows now follow the same sub-pixel
+  camera shift as the rest of the scene, as the sun shadows already did since 19 October. To
+  compare with the old behaviour, set bit 45 (35184372088832) in the second number of
+  `disabled-optimizations.txt`. Not tested in the game yet.
 - **Fix: lines at texture edges and some blurred or wrong-looking textures.** The forced
   anisotropic filtering (Anisotropy in the menu) no longer applies to textures that have only one
   detail level (texture atlases, decals, lookup tables), to samplers the game limits to the top

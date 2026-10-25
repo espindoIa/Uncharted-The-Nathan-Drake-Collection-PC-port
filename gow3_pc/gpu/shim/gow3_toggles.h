@@ -261,6 +261,11 @@ enum : std::uint64_t {
     /// an explicit LOD, clamped to MaxLod 0, or paired only with one-level images (atlases, LUTs,
     /// decals): anisotropy at level 0 reads across cell edges (25 Oct 2026, lines at edges).
     AnisoUnmipped = 1ull << 44,
+    /// Bit set: old behaviour (read live). Clear, a full-screen pass that samples the jittered
+    /// scene depth and a shadow map (a depth-compare sampler or another depth-format image) gets
+    /// the scene jitter like the GOW3_JITTER_PS passes, and full-screen jitter is scaled to the
+    /// pass's own size (25 Oct 2026, player: lamp shadows flicker on and off under DLSS/TAA/FSR).
+    ShadowPassJitter = 1ull << 45,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;
