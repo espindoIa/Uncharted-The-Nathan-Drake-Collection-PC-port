@@ -1797,13 +1797,12 @@ class Launcher:
         # Darker on the left, where the title sits.
         shade = Image.linear_gradient("L").rotate(90).resize((w, h))
         art = Image.composite(art, Image.new("RGB", (w, h), HERO_DARK), shade.point(lambda v: 90 + v * 165 // 255))
-        # A map grid over it, then the fade into the dark panel below.
-        draw = ImageDraw.Draw(art)
-        step = self.px(34)
-        for gx in range(step // 2, w, step):
-            draw.line([(gx, 0), (gx, h)], fill=HERO_GRID)
-        for gy in range(step // 2, h, step):
-            draw.line([(0, gy), (w, gy)], fill=HERO_GRID)
+        # Topographic contours over it (assets/topo.png, rendered in PhotoCraft: clouds, blur,
+        # posterize, find edges), then the fade into the dark panel below.
+        topo = Image.open(ASSETS / "topo.png").convert("L")
+        cover = max(w / topo.width, h / topo.height)
+        topo = topo.resize((max(w, int(topo.width * cover)), max(h, int(topo.height * cover))), Image.LANCZOS)
+        art = Image.composite(Image.new("RGB", (w, h), HERO_GRID), art, topo.crop((0, 0, w, h)))
         fade = Image.new("L", (w, h), 0)
         fade_draw = ImageDraw.Draw(fade)
         start = int(h * 0.55)

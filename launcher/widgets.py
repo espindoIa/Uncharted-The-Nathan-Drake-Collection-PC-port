@@ -19,7 +19,7 @@ ACCENT_HI = "#ffa45f"
 INK = "#1c0d02"
 STOP_RED = "#d9534f"
 GOOD = "#5fbf8f"  # a check that passed (Home's Ready to play list)
-# The hero's art in two tones (shadows, highlights) and its map grid.
+# The hero's art in two tones (shadows, highlights) and its contour lines.
 HERO_DARK = "#071016"
 HERO_LIGHT = "#6f9ea2"
 HERO_GRID = "#1d3440"
