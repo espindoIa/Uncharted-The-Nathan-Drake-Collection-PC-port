@@ -76,9 +76,10 @@ else
 fi
 [[ ! -e $stage/gow3_pc/out/NvLowLatencyVk.dll ]] || { echo "NvLowLatencyVk.dll must not be packaged" >&2; exit 1; }
 
-# HDR tone replacement, its source, exact include snapshot and MIT license.
-# The checked-in SPIR-V avoids making DXC a dependency of the runtime build.
-cp -R gow3_pc/hdr "$stage/gow3_pc/out/hdr"
+# HDR tone replacement: only the checked-in SPIR-V (its HLSL source stays in the repository; the
+# RenoDX license goes with the others below).
+mkdir -p "$stage/gow3_pc/out/hdr"
+cp gow3_pc/hdr/*.spv "$stage/gow3_pc/out/hdr/"
 cp gow3_pc/scripts/*.py "$stage/gow3_pc/scripts/"
 cp tools/probe_uncharted.py tools/hang_report.py tools/apply_update.py tools/play.py tools/install_update.py \
     tools/net_overlay.py "$stage/tools/"
@@ -180,14 +181,7 @@ if [[ -f gow3_pc/out/gow3_dlss.dll && ! -f $stage/gow3_pc/out/gow3_dlss.dll ]] &
         compgen -G "downloads/dlss-sdk-*/LICENSE.txt" > /dev/null; then
     cp gow3_pc/out/gow3_dlss.dll "$stage/gow3_pc/out/"
     mkdir -p "$licenses/nvidia-dlss" "$licenses/gow3-dlss-bridge"
-    dlss_license=${NVIDIA_DLSS_LICENSE:-}
-    if [[ -z $dlss_license ]]; then
-        for file in downloads/dlss-sdk-*/LICENSE.txt; do
-            [[ -f $file ]] && { dlss_license=$file; break; }
-        done
-    fi
-    [[ -f $dlss_license ]] || { echo 'Need the DLSS license (NVIDIA_DLSS_LICENSE).' >&2; exit 1; }
-    cp "$dlss_license" "$licenses/nvidia-dlss/LICENSE.txt"
+    cp downloads/dlss-sdk-*/LICENSE.txt "$licenses/nvidia-dlss/LICENSE.txt"
     cp gow3_pc/gpu/dlss_bridge/LICENSE.txt "$licenses/gow3-dlss-bridge/LICENSE.txt"
 fi
 [[ ! -e $stage/gow3_pc/out/nvngx_dlss.dll ]] || { echo "nvngx_dlss.dll must not be packaged" >&2; exit 1; }
@@ -222,7 +216,8 @@ if [[ -n $forbidden ]]; then
 fi
 
 rm -f dist/Uncharted-windows.zip
-"$python_home/python.exe" -m zipfile -c dist/Uncharted-windows.zip "$stage"
+(cd dist/stage && powershell -NoProfile -Command \
+    "Compress-Archive -Path Uncharted-windows -DestinationPath ../Uncharted-windows.zip")
 rm -rf dist/Uncharted-windows
 mv "$stage" dist/Uncharted-windows
 du -sh dist/Uncharted-windows dist/Uncharted-windows.zip
