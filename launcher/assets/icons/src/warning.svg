@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="24" height="24" viewBox="0 0 24 24">
+  <title>warning</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path id="warning" d="M12 3.5 L21.5 20 L2.5 20 Z M12 9.5 L12 14" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="warning-2" data-name="warning" d="M10.8 17.2 C10.8 16.537 11.337 16 12 16 C12.663 16 13.2 16.537 13.2 17.2 C13.2 17.863 12.663 18.4 12 18.4 C11.337 18.4 10.8 17.863 10.8 17.2 Z" fill="#ffffff"/>
+  </g>
+</svg>

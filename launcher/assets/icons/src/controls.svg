@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="24" height="24" viewBox="0 0 24 24">
+  <title>controls</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path id="controls" d="M7 7 L17 7 C18.586 7.043 20.058 7.837 20.966 9.139 C21.873 10.441 22.108 12.097 21.6 13.6 L20.4 16.8 C20.054 17.58 19.348 18.141 18.51 18.3 C17.671 18.46 16.808 18.198 16.2 17.6 L14.6 16 L9.4 16 L7.8 17.6 C7.192 18.198 6.329 18.46 5.49 18.3 C4.652 18.141 3.946 17.58 3.6 16.8 L2.4 13.6 C1.892 12.097 2.127 10.441 3.034 9.139 C3.942 7.837 5.414 7.043 7 7 Z M7.5 10 L7.5 14 M5.5 12 L9.5 12" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="controls-2" data-name="controls" d="M14.7 10.7 C14.7 10.092 15.192 9.6 15.8 9.6 C16.408 9.6 16.9 10.092 16.9 10.7 C16.9 11.308 16.408 11.8 15.8 11.8 C15.192 11.8 14.7 11.308 14.7 10.7 Z" fill="#ffffff"/>
+    <path id="controls-3" data-name="controls" d="M16.7 12.9 C16.7 12.292 17.192 11.8 17.8 11.8 C18.408 11.8 18.9 12.292 18.9 12.9 C18.9 13.508 18.408 14 17.8 14 C17.192 14 16.7 13.508 16.7 12.9 Z" fill="#ffffff"/>
+  </g>
+</svg>

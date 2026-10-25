@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="24" height="24" viewBox="0 0 24 24">
+  <title>help</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path id="help" d="M3 12 C3 7.029 7.029 3 12 3 C16.971 3 21 7.029 21 12 C21 16.971 16.971 21 12 21 C7.029 21 3 16.971 3 12 Z" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-miterlimit="10"/>
+    <path id="help-2" data-name="help" d="M9.6 9.3 C9.584 8.034 10.517 6.955 11.772 6.789 C13.028 6.623 14.209 7.422 14.522 8.649 C14.835 9.877 14.181 11.144 13 11.6 C12.3 12 12 12.5 12 13.4 L12 14" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="help-3" data-name="help" d="M10.8 17 C10.8 16.337 11.337 15.8 12 15.8 C12.663 15.8 13.2 16.337 13.2 17 C13.2 17.663 12.663 18.2 12 18.2 C11.337 18.2 10.8 17.663 10.8 17 Z" fill="#ffffff"/>
+  </g>
+</svg>

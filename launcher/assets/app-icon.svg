@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="linear-gradient-1" x1="6" y1="6" x2="250" y2="250" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d2730"/>
+      <stop offset="1" stop-color="#090c10"/>
+    </linearGradient>
+    <radialGradient id="radial-gradient-1" cx="128" cy="128" r="110" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#e0533d" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#e0533d" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <title>app-icon</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path d="M62 6 L194 6 C224.928 6 250 31.072 250 62 L250 194 C250 224.928 224.928 250 194 250 L62 250 C31.072 250 6 224.928 6 194 L6 62 C6 31.072 31.072 6 62 6 Z" fill="url(#linear-gradient-1)" stroke="#2c3843" stroke-width="4" stroke-miterlimit="10"/>
+    <path d="M18 128 C18 67.249 67.249 18 128 18 C188.751 18 238 67.249 238 128 C238 188.751 188.751 238 128 238 C67.249 238 18 188.751 18 128 Z" fill="url(#radial-gradient-1)"/>
+    <path d="M40 128 C40 79.399 79.399 40 128 40 C176.601 40 216 79.399 216 128 C216 176.601 176.601 216 128 216 C79.399 216 40 176.601 40 128 Z" fill="none" stroke="#c5d0d8" stroke-width="9" stroke-miterlimit="10"/>
+    <path d="M128 58 L128 70 M128 186 L128 198 M58 128 L70 128 M186 128 L198 128" fill="none" stroke="#c5d0d8" stroke-width="7" stroke-linecap="round" stroke-miterlimit="10"/>
+    <path d="M70.64 46.08 L110.8 140.05 L128 128 Z" fill="#ff7559"/>
+    <path d="M70.64 46.08 L145.2 115.95 L128 128 Z" fill="#c93a26"/>
+    <path d="M185.36 209.92 L110.8 140.05 L128 128 Z" fill="#8b9aa6"/>
+    <path d="M185.36 209.92 L145.2 115.95 L128 128 Z" fill="#e6edf2"/>
+    <path d="M117 128 C117 121.925 121.925 117 128 117 C134.075 117 139 121.925 139 128 C139 134.075 134.075 139 128 139 C121.925 139 117 134.075 117 128 Z" fill="#0d1116" stroke="#e6edf2" stroke-width="5" stroke-miterlimit="10"/>
+  </g>
+</svg>

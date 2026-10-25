@@ -80,10 +80,13 @@ cp Record-Session.cmd "$stage/"
 # PkgTool (LibOrbisPkg, LGPL-3.0): Advanced -> Install game update unpacks the player's own update PKG.
 mkdir -p "$stage/tools/pkgtool"
 cp tools/pkgtool/PkgTool.exe tools/pkgtool/LibOrbisPkg.dll "$stage/tools/pkgtool/"
-cp launcher/uncharted_launcher.pyw launcher/updater.py launcher/widgets.py "$stage/launcher/"
+cp launcher/uncharted_launcher.pyw launcher/updater.py launcher/widgets.py launcher/art.py "$stage/launcher/"
 # The package's version (tools/VERSION; the launcher's updates compare it with the releases).
 cp tools/VERSION "$stage/VERSION"
-cp launcher/assets/uncharted.ico launcher/assets/icon.png "$stage/launcher/assets/"
+cp launcher/assets/uncharted.ico launcher/assets/icon.png launcher/assets/grain.png "$stage/launcher/assets/"
+# The launcher's icons: the 192 px masters only (their VectorCraft sources in icons/src stay in the repo).
+mkdir -p "$stage/launcher/assets/icons"
+cp launcher/assets/icons/*.png "$stage/launcher/assets/icons/"
 # The runtime's optimizations known to break Uncharted (GOW3_TOGGLE_FILE).
 cp tools/defaults/disabled-optimizations.txt "$stage/analysis/uncharted-user/"
 cp tools/README-Windows.txt "$stage/README.txt"
