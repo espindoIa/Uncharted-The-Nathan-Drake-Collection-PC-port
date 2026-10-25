@@ -45,6 +45,10 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
 bool MultiwaveLdsBarriers(u64 pgm_hash);
 /// gow3: whether compute shader `pgm_hash` gets GCN-style LDS bounds handling (GOW3_LDS_BOUNDS).
 bool LdsBoundsEnabled(u64 pgm_hash);
+/// gow3: whether pixel shader `pgm_hash` is a text shader whose atlas reads get sharpened above
+/// one texel per pixel (GOW3_TEXT_SHARPEN, text_sharpen_pass.cpp).
+bool TextSharpenShader(u64 pgm_hash);
+void TextSharpenPass(IR::Program& program);
 void SharedMemoryBoundsPass(IR::Program& program, const RuntimeInfo& runtime_info,
                             const Profile& profile);
 void SharedMemorySimplifyPass(IR::Program& program, const Profile& profile);

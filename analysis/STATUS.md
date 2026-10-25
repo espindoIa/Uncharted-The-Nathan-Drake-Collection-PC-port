@@ -37,6 +37,8 @@ New entries go at the end, dated, measured numbers only.
 
 - Game FXAA skipped under temporal AA: `Game FXAA skipped under temporal AA (24 Oct 2026)`
 
+- Text and subtitles at 4K (font atlases, text shader sharpening): `Sharp text above 1080p (25 Oct 2026)`
+
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
 The game boots through the Collection menu and opening movie into gameplay.
@@ -4815,3 +4817,22 @@ lines); `ninja -C out/gpu flight-test camera-cut-test` 0, `flight-test.exe` 0, `
 **Not verified.** That the lamp shadow flicker stops; which shaders the candidate logs name in U1,
 U2 and U3; whether the sun pass f614041e draws at full size (the scaling only changes it if not);
 whether lamp passes are full-screen or light volumes (variant 2 is not fixed); FPS within noise.
+
+## Sharp text above 1080p (25 Oct 2026)
+
+Request: sharp interface and subtitles at 4K. Where the UI is drawn and why it was soft:
+- With the fork's default camera (flat) the game itself runs at the render size the launcher sets (3840x2160 here) and draws its HUD, menus and subtitles into that size after the post chain. The upscaler only reconstructs the HDR scene before the post (SceneTargets, between the camera-depth pass and cs aec539f0), so the DLSS/FSR preset does not lower the UI's resolution. Evidence: U3 pause-menu capture (frame_20261025-130015_1, DLAA): the UI pass #59 draws into the 3840x2160 R8G8B8A8Srgb target. (Code reading for the scaled presets; only DLAA was captured.)
+- The softness is the fonts: BMFont bitmap atlases made for 1080p, not distance fields. data.psarc fonts/ps4: U2/U3 main.fnt "Adelon-Serial DB" size 42 (U2 256x128, U3 256x256 RGBA, `packed=1`: one glyph per channel), U1 game3.fnt (same face, 256x128), plus symbol3/chinese/japanese/korean/russian. The cached U3 atlas (0x1148da8000, 256x256 R8G8B8A8) is byte-identical to main_00.tga. At 4K the game draws the text 2x larger: "Options" caps about 70 px from about 31-texel glyphs, so bilinear spreads each edge over 3-4 pixels (4K display dump).
+- Text shader ps 2e403aa4 (same hash in the U1, U2 and U3 shader caches; vs ad649c68): four atlas reads per pixel (the pixel, -0.375 and +0.375 pixel along x from quad derivatives for subpixel colour: R from the right read, G centre, B left, and a drop-shadow read 1.5 pixels up-left), channel picked by a per-vertex mask, alpha = vertex alpha x max(mean of the three, shadow x shadow opacity).
+
+Options considered: a larger atlas would need the texture cache to back a 256x256 T# with a bigger image (views, size checks, uploads) and glyph art the port cannot ship; drawing the UI after the upscaler is not needed (it is already at the game's size). Chosen: a shader-side remap, no new assets.
+
+Fix (shader_recompiler/ir/passes/text_sharpen_pass.cpp, after ResourcePatchingPass): in shaders listed by GOW3_TEXT_SHARPEN (default 2e403aa4; 0 = off; hex list), every ImageSampleImplicitLod result c becomes clamp((c - 0.5) x k + 0.5, 0, 1) per channel, k = max(1, 2^-lod) with lod the unclamped ImageQueryLod at the same coordinates (pixels per texel). Edges get back to about one pixel; at one texel per pixel or less (1080p and below) k = 1 and the output is unchanged. All four reads get it, so the shadow and the subpixel fringes keep their 1080p proportions. The SPIR-V cache name gains `_txt1` for these shaders (vk_pipeline_serialization.cpp), so cached unpatched binaries are not reused; with GOW3_TEXT_SHARPEN=0 the old names (and binaries) apply.
+
+Measured (worktree build, player's settings: 4K, DLAA model M, 120 cap, MT on; GOW3_FRAME_DUMP_TRIGGER display dumps 3840x2160; same exe with GOW3_TEXT_SHARPEN=0 as before; share of pixels between 20% and 80% of the crop's 5-95% luma range = soft edge pixels):
+- U3 pause menu, text-only crops on the menu panel: "Save Game" 3.3% -> 1.6%, "less than 1 minute ago" 5.3% -> 2.8%; mean gradient 3.34 -> 3.61, 6.89 -> 7.24.
+- U3 pub tutorial hint (bottom-centre, subtitle position, same shader; reached by the same inputs in both runs): "To throw a nearby" 20.6% -> 16.0%, "holding" 21.1% -> 14.2%, "while" 37.1% -> 33.3% (these crops include the busy floor behind the text). At 3x zoom the before edges are 3-4 px ramps, after about 1 px.
+- U2 and U1 pause menus: the patched shader is built in all three caches (`0x000000002e403aa4_0_ldsb_txt1.spv`); text renders normally. U1 still renders at 2880x1620 at a 4K setting (its render-target heap limit), so its UI is sharper in the 1620p image but then stretched to the window.
+- The patched SPIR-V (spirv-cross): `max(exp2(-textureQueryLod(...).y), 1.0)` per read, then the clamp(fma) remap.
+
+Not verified: a real cutscene subtitle (the hint text, drawn by the same shader at the subtitle position, stands in); 1440p; scaled DLSS/FSR presets (code reading says the UI stays at the game's size); performance (four extra LOD queries in a shader that covers only the text; not measured); a U3 boot stall seen once (live view stopped at frame 147 during boot, with GOW3_TEXT_SHARPEN=0, so the unpatched shader path; the retry ran normally). Not changed: the button icons inside text (symbol3 atlas, ps 4ad58d25) and other HUD pictures, which are colour images, not coverage.
