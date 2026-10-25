@@ -12,7 +12,7 @@ unless it sits behind the game-hooks gate (below).
 ## Agent rules
 
 - Never commit `gow3_pc/stat-multipliers-test.ini` or the dirty submodule `gow3_pc/gpu/third_party/fsr-vulkan`. Stage files by name.
-- No game files, dumps, saves or logs in commits (`export_github.sh` refuses them too).
+- No game files, dumps, saves or logs in commits (`export_github.sh` refuses them too). One exception, set by the owner on 25 Oct 2026: vector redraws of the games' UI art (font glyph outlines, button icons, HUD shapes as SVG) may be committed, only under `gow3_pc/assets/ui-vector/`. Raw textures, atlases, TGA/PNG extracts and pak/psarc content stay out. `README.md`, `CONTRIBUTING.md`, the PR template and `export_github.sh` still carry the old "no game files" wording and check; update them in the same commit that adds the first SVG.
 - Only one game instance at a time (the player may be playing too).
 - Push to `origin` only when explicitly asked; committing locally is fine.
 
