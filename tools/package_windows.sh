@@ -52,6 +52,9 @@ fi
 
 cp gow3_pc/scripts/*.py "$stage/gow3_pc/scripts/"
 cp tools/probe_uncharted.py tools/hang_report.py tools/apply_update.py tools/play.py tools/install_update.py "$stage/tools/"
+# Session recorder (a player runs Record-Session.cmd beside the game; it uses python\python.exe).
+cp tools/session_recorder.py "$stage/tools/"
+cp Record-Session.cmd "$stage/"
 # PkgTool (LibOrbisPkg, LGPL-3.0): Advanced -> Install game update unpacks the player's own update PKG.
 mkdir -p "$stage/tools/pkgtool"
 cp tools/pkgtool/PkgTool.exe tools/pkgtool/LibOrbisPkg.dll "$stage/tools/pkgtool/"

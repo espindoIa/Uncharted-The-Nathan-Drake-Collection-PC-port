@@ -3673,3 +3673,70 @@ Reviewed, not changed (24 Oct 2026). Each needs a game run (GOW3_UPSCALER_TRACE 
 7. Ring copies vs pending GDS stores / compute labels (vk_rasterizer.cpp:2051).
 8. No history reset after movie/load frames without a frame start, no camera-cut detection (vk_camera_motion.cpp:442).
 9. World-space single-quad draws get no jitter (vk_rasterizer.cpp:3445).
+
+## 25 October 2026: session recorder
+
+Why: bug reports from players arrive as a sentence and maybe a screenshot. Everything needed to
+read one (build, settings, log around the moment, memory growth, exit code) existed but was
+scattered over the install folder and overwritten by the next launch. `tools/session_recorder.py`
+(started with `Record-Session.cmd`; both are shipped in the package) collects it per run.
+
+**Design.** A separate stdlib-only process, below-normal priority, that never opens the game's
+log for writing, never reads the game's memory and never injects. It polls for `Uncharted.exe`,
+records one session, finalizes it when the process ends and waits for the next launch. The
+install root and the `out` dir come from the game's own command line (`<root>\analysis\<name>\boot-linked.bin`,
+read once through `Get-CimInstance Win32_Process`), so it works against an older installed
+package. `--root`, `--out-dir`, `--sessions-dir` override. Folder:
+`<root>\analysis\uncharted-user\sessions\<YYYYmmdd-HHMMSS>_<out dir name>\` (the time is the
+process creation time, so a recorder started late still names the run correctly).
+
+| File | What |
+| --- | --- |
+| `session.json` | Recorder version, start (local + UTC), Windows, CPU (registry), RAM, GPU (`nvidia-smi` csv with max clocks and power limit; `Win32_VideoController` if missing), resolution, power plan, game exe path/size/mtime/sha256, `VERSION`, git HEAD (reads `.git\HEAD` only), the process command line, `launcher.json`, the recorder's own `GOW3_*`/`UNCHARTED_*` variables. Written in stages, usable after each. |
+| `config\` | Copies of `probe-u1/u2/u3.ini`, `test-env.txt`, `disabled-optimizations.txt`. |
+| `boot.timed.log` | `boot.log` polled every 0.5 s, each new complete line prefixed `HH:MM:SS.mmm`. A shrinking file restarts from 0. Lines already in the log when the recorder attached are stamped `--:--:--.---`. |
+| `events.txt` | Lines matching warning/error/assert/unsupported/fail/Dropped/garbage/skipped/corrupt/mismatch/Hang watchdog/Texture cache: memory/first unsupported/exit code, plus Frame stats windows with a worst frame over 40 ms or any shader/pipeline compile. An identical line is written 20 times, then counted. |
+| `metrics.csv` | Every 2 s: process CPU % (of all cores) and cores busy (`GetProcessTimes` delta), working set, private bytes, threads (Toolhelp snapshot), handles, free system RAM, GPU util/memory/clock/temp/power (one long-running `nvidia-smi -lms 2000` child, several GPUs: the one with most memory in use), foreground window title. |
+| `marks\NN_<label>_<time>\` | `mark.json` (label, time, elapsed since process start, log byte offset and line number, last Frame stats line, latest metrics row, foreground window, game window rectangle, what the screenshot and the dump did), `log_tail.txt` (last 300 timed lines), `screen.png` (GDI `BitBlt` of the game window's rectangle from the screen DC; an all-black result is retried once from the whole primary screen and `mark.json` says so; PNG written by hand with zlib), `engine_dump\` (see below). |
+| `markers.log` | One line per mark. |
+| `boot.log`, `boot.json`, `frametimes.txt`, `framelog.txt`, `launcher-last-run.log` | Final copies at the end (skipped with a note when older than the session). |
+| `hang\` | `hang-*.txt` reports of the run; `.dmp` files are hundreds of MB and are only named in `summary.md`. |
+| `windows_events.txt` | Application-log events mentioning Uncharted in the session window (`wevtutil`). |
+| `summary.md` | Duration, exit code (0xC0000005-style statuses flagged, `1` noted as what STOP/taskkill leaves), marks, FPS min/median/avg and worst frame (counts are of 5 s windows, the log keeps only each window's worst frame), shader compiles, average/peak of the metrics, top repeated warnings, notes. |
+| `recorder.log` | Only created when a worker raised; every worker and finalize step is wrapped so one failure never loses the others. Files are flushed after each write, so a killed recorder leaves usable files. |
+
+**Hotkeys.** `RegisterHotKey` on a dedicated thread with its own message loop (`MOD_NOREPEAT`);
+default F7 texture, F8 geometry, F9 flash, F10 other, `--keys "F7=texture,..."` changes them.
+A key another application owns is reported and the others still work. The press runs in a worker
+thread (a mark takes seconds), the same key is ignored for 3 s. `winsound.Beep` gives feedback
+because the game is fullscreen: one short = captured, two = engine dump done too, low long = failed.
+Engine dump: if `<out>\dumps` exists (the game started with diagnostics) the recorder creates
+`<out>\dumps\trigger`; the presenter takes it (`GOW3_FRAME_DUMP_TRIGGER`, vk_presenter.cpp) and
+writes the next frame's guest display buffer and presented image as `name_index_WxH.raw`
+(32-bit pixels) to `GOW3_DUMP_DIR`. The recorder waits up to 4 s for new files, then until their
+sizes stop changing (the readback is deferred), moves them into the mark and removes a trigger the
+game did not take. Limits: `--max-engine-dumps` (20), `--no-engine-dump`, and less than 2 GB free on
+the session drive skips screenshots and dumps (noted in `mark.json`). `boot.timed.log` and
+`events.txt` stop at 200 MB each with a note. The recorder sets the console out of QuickEdit
+mode (a click in the window would otherwise block its printing).
+
+**Limits.**
+- No per-thread CPU: one `GetProcessTimes` delta for the whole process, to stay under 1 % of a core.
+- The game's own environment cannot be read from outside. `session.json` holds the recorder's variables and says so; what the game got follows from `config\` plus `test-env.txt`.
+- `boot.log` has no times: lines are stamped when seen, so +-0.5 s. A game that was already running when the recorder started has its earlier lines marked unknown.
+- The GDI screenshot can be black or stale for exclusive-fullscreen / flip-model Vulkan windows; then the engine dump is the reliable image. The raw dump is not a PNG.
+- The hotkeys are global and are taken from whatever has focus, so they clash with game or overlay keys (change with `--keys`).
+- A dump request makes the presenter copy two images to the host: expect one hitch of a frame or two on a mark.
+- Only the first `Uncharted.exe` found is recorded; sessions are sequential.
+
+**Tests.** `python tools/session_recorder.py --selftest` (temp fake root; a dummy `python` child that exits with code 3 stands in for the game; a fake presenter thread answers the trigger; the hotkey registration is skipped and the mark routine is called directly) and `gow3_pc/tests/test_session_recorder.py` (line classification, Frame stats parsing, duplicate collapsing, log tailing with partial lines and truncation, PNG encoding, BGRA conversion, command-line parsing, exit-code text, summary). Both ran green on the development machine (Windows 11, RTX 5070, `nvidia-smi` present: its field names were checked against the real tool).
+
+**Not verified.** No real game run: the hotkeys over a fullscreen Vulkan window (focus, whether
+`RegisterHotKey` keys arrive while the game has the keyboard), the screenshot of a real game
+window (black or not, DPI, borderless vs exclusive), a real engine dump through the trigger
+(only a fake presenter answered), the command-line parse against a real `Uncharted.exe` command
+line (tested on strings shaped like it), `boot.json` timing at a real exit, the overhead on the
+game (not measured; the design budget is one `GetProcessTimes`/Toolhelp pass every 2 s plus a
+0.5 s file poll), long-session behaviour, a killed game (STOP) and a crashed one (exit code
+from the handle), multi-GPU machines, non-NVIDIA machines (the `Win32_VideoController` fallback
+was not run), localized Windows beyond the OEM-codepage decode of tool output.

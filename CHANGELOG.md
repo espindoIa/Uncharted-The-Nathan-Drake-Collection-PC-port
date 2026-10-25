@@ -6,6 +6,19 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **New: a session recorder that writes down a play session so a problem can be reported with
+  evidence.** Start `Record-Session.cmd` (in the package folder) before or after the game and play
+  as usual; it records every game run until you close its window. When something looks wrong, press
+  **F7** (texture problem), **F8** (geometry: exploding or stretched shapes), **F9**
+  (flash, flicker, ghosting) or **F10** (anything else, a freeze or crash). One beep means the
+  moment was captured (screenshot and the last log lines); a second beep means the game's own
+  frame dump was saved too; a low long beep means it failed. Each run gets a folder in
+  `analysis\uncharted-user\sessions\` with your PC and settings, the game log with times,
+  a list of warnings and slow frames, CPU / memory / graphics card readings every 2 seconds, the
+  exit code if the game crashed, your marks, and `summary.md` to read first. Send that folder with
+  the bug report. The recorder runs as a separate program, changes nothing in the game, and the
+  hotkeys are taken from the game while it runs (they do not reach it). Not tested in game yet.
+
 - **Uncharted: GPU memory copies issued from the compute queue now wait for earlier queued uploads
   like the graphics queue's do, so a compute dispatch cannot read data from after the copy.** Found
   by code review, not seen in game, not tested in game.
