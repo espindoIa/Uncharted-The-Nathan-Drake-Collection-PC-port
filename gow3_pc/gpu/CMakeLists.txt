@@ -359,6 +359,9 @@ target_link_libraries(depth-stencil-state-test PRIVATE Vulkan::Headers fmt::fmt 
 add_executable(ui-composition-test EXCLUDE_FROM_ALL ../tests/test_ui_composition.cpp)
 target_compile_options(ui-composition-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(ui-composition-test PRIVATE ..)
+add_executable(hdr-session-test EXCLUDE_FROM_ALL ../tests/test_hdr_session.cpp)
+target_compile_options(hdr-session-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(hdr-session-test PRIVATE ..)
 
 add_executable(hud-layout-test EXCLUDE_FROM_ALL ../tests/test_hud_layout.cpp)
 target_compile_options(hud-layout-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
