@@ -11,18 +11,41 @@
 // button icons. GOW3_ATLAS_LOG=1 prints the hash of every candidate (to add atlases),
 // GOW3_ATLAS_HASHES=<hex>[,<hex>...] adds hashes for a test, GOW3_ATLAS_SCALE=1|2|4 (default 4)
 // sets the factor, 1 turns it off.
+//
+// Upscale prefers a pre-made vector redraw of the atlas: `<exe dir>/../assets/ui/fonts/<hash>.png`
+// (hash as 16 lowercase hex digits; gow3_pc/assets/ui/fonts in the source tree and in the package),
+// RGBA8, 4x the guest size per side, channels in the guest's byte order. It is used only after a
+// check against the guest: the asset box-downsampled to 1x must match the guest texels with a mean
+// absolute error under 4 levels (25 Oct 2026: vector redraws measure 0.6-1.4; another channel order
+// or game version is far above). Missing, unreadable or rejected assets fall back to the bicubic
+// path; each hash is checked and logged once. GOW3_ATLAS_ASSETS=0 skips the assets (A/B);
+// GOW3_ATLAS_ASSET_DIR=<folder> reads them from elsewhere (tests: UNCHARTED_PROBE_EXE builds run as
+// the main checkout's Uncharted.exe, whose ../assets is not the tested tree's).
 
 #include "gow3_atlas.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #include <xxhash.h>
 
 #include "gow3_atlas_resample.h"
+#include "gow3_png.h"
 #include "video_core/renderer_vulkan/scene_resolution.h"
 
 namespace Gow3Atlas {
@@ -96,6 +119,85 @@ bool Pow2(u32 v) {
     return v && !(v & (v - 1));
 }
 
+std::filesystem::path ExecutableDirectory() {
+    std::wstring path(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD length = GetModuleFileNameW(nullptr, path.data(), DWORD(path.size()));
+        if (length < path.size()) { // a truncated name fills the buffer: grow it and ask again
+            path.resize(length);
+            break;
+        }
+        path.resize(path.size() * 2);
+    }
+    return std::filesystem::path{path}.parent_path();
+}
+
+// The guest bytes HostScale hashes and Upscale reads (one range, so both see the same hash).
+size_t GuestBytes(u32 height, u32 width, u32 pitch, u32 tile_mode) {
+    return static_cast<size_t>(tile_mode == kTileThin1D ? width : pitch) * height * 4;
+}
+
+struct AssetEntry {
+    std::shared_ptr<const std::vector<u8>> x4, x2; // x4 null = no usable asset
+};
+
+// The asset of `hash` at `scale` (2 or 4), checked against the guest's linear texels; nullptr = use
+// bicubic. Loaded, checked and logged once per hash.
+std::shared_ptr<const std::vector<u8>> Asset(u64 hash, const u8* linear, u32 width, u32 height, u32 scale) {
+    static std::mutex mutex;
+    static std::unordered_map<u64, AssetEntry> cache;
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_ATLAS_ASSETS");
+        return !(env && env[0] == '0');
+    }();
+    if (!enabled) {
+        return nullptr;
+    }
+    std::scoped_lock lock{mutex};
+    auto it = cache.find(hash);
+    if (it == cache.end()) {
+        AssetEntry entry;
+        char name[32];
+        std::snprintf(name, sizeof(name), "%016llx.png", static_cast<unsigned long long>(hash));
+        const char* dir = std::getenv("GOW3_ATLAS_ASSET_DIR");
+        const auto path = (dir && *dir ? std::filesystem::u8path(dir)
+                                       : ExecutableDirectory() / ".." / "assets" / "ui" / "fonts") / name;
+        const std::string shown = path.string();
+        std::ifstream file(path, std::ios::binary);
+        if (!file) {
+            if (Logging()) {
+                std::printf("Atlas asset %s: missing\n", shown.c_str());
+            }
+        } else {
+            const std::vector<unsigned char> bytes{std::istreambuf_iterator<char>(file), {}};
+            Gow3Png::Image image;
+            if (!Gow3Png::DecodeRgba(bytes.data(), bytes.size(), image)) {
+                std::printf("Atlas asset %s: rejected, cannot decode\n", shown.c_str());
+            } else if (image.width != static_cast<int>(width * 4) || image.height != static_cast<int>(height * 4)) {
+                std::printf("Atlas asset %s: rejected, %dx%d is not 4x %ux%u\n", shown.c_str(), image.width,
+                            image.height, width, height);
+            } else {
+                const auto small = BoxDownsample(image.rgba.data(), width * 4, height * 4, 4);
+                const float mae = MeanAbsError(small.data(), linear, small.size());
+                const float outliers = OutlierFraction(small.data(), linear, small.size(), 48);
+                // 25 Oct 2026: vector redraws measure MAE 0.6-1.4; a wrong channel order or game version is far above.
+                // Outliers catch a redraw that is right on average but wrong in a few glyphs.
+                const bool ok = mae < 4.0f && outliers <= 0.005f;
+                std::printf("Atlas asset %s: %s, MAE %.2f, %.3f%% of values off by more than 48%s\n", shown.c_str(),
+                            ok ? "accepted" : "rejected", mae, outliers * 100.0f,
+                            ok ? "" : " (channel order or game version?)");
+                if (ok) {
+                    entry.x4 = std::make_shared<const std::vector<u8>>(std::move(image.rgba));
+                    entry.x2 = std::make_shared<const std::vector<u8>>(BoxDownsample(entry.x4->data(), width * 4, height * 4, 2));
+                }
+            }
+        }
+        std::fflush(stdout);
+        it = cache.emplace(hash, std::move(entry)).first;
+    }
+    return scale == 4 ? it->second.x4 : it->second.x2;
+}
+
 } // namespace
 
 u32 HostScale(VAddr address, u32 width, u32 height, u32 pitch, u32 num_bits, u32 levels, u32 layers,
@@ -108,7 +210,7 @@ u32 HostScale(VAddr address, u32 width, u32 height, u32 pitch, u32 num_bits, u32
         !Pow2(width) || !Pow2(height) || width < 128 || width > 1024 || height < 128 || height > 1024) {
         return 1;
     }
-    const u64 hash = XXH3_64bits(reinterpret_cast<const void*>(address), guest_size);
+    const u64 hash = XXH3_64bits(reinterpret_cast<const void*>(address), GuestBytes(height, width, pitch, tile_mode));
     const char* name = "";
     const bool known = Known(hash, name);
     if (Logging()) {
@@ -139,6 +241,15 @@ std::shared_ptr<const Texels> Upscale(VAddr address, u32 width, u32 height, u32 
     auto texels = std::make_shared<Texels>();
     texels->width = width * scale;
     texels->height = height * scale;
+    // Recomputed here, not remembered from HostScale: the memory at `address` may hold another image by now.
+    const u64 hash = XXH3_64bits(guest, GuestBytes(height, width, pitch, tile_mode));
+    const char* name = "";
+    if ((scale == 2 || scale == 4) && Known(hash, name)) {
+        if (const auto asset = Asset(hash, linear.data(), width, height, scale)) {
+            texels->data = *asset;
+            return texels;
+        }
+    }
     // A glyph edge is one source texel wide, Magnification() screen pixels: contrast = that, so it is
     // about one pixel again (the 1080p look) whatever the render size. GOW3_ATLAS_CONTRAST=<x> (tests).
     static const float contrast = [] {

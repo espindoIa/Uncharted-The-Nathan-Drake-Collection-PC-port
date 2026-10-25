@@ -33,6 +33,9 @@ ldd gow3_pc/out/gow3-probe.exe | awk '/clang64/ {print $3}' | sort -u | while re
     cp "$dll" "$stage/gow3_pc/out/"
 done
 
+# The games' UI art (vector font atlases that gow3_atlas.cpp loads from <exe dir>/../assets/ui).
+[[ ! -d gow3_pc/assets/ui ]] || { mkdir -p "$stage/gow3_pc/assets"; cp -r gow3_pc/assets/ui "$stage/gow3_pc/assets/"; }
+
 # DLSS (optional): DLSS_BRIDGE=<gow3_dlss.dll, built with MSVC from gow3_pc/gpu/dlss_bridge> and
 # DLSS_SDK=<NVIDIA DLSS SDK root, for its license> add the bridge next to the runtime. NVIDIA's
 # nvngx_dlss.dll is never packaged (18 Oct: its license does not fit the GPL runtime): players

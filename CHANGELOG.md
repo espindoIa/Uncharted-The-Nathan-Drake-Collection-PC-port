@@ -10,9 +10,11 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   in all three games are drawn from font pictures made for 1080p, which the game stretches at
   1440p and 4K, so letters had soft, blurry edges. Their edges are now as crisp at 4K as at 1080p
   (same letters, colours and shadow; nothing changes at 1080p and below). At 1440p and 4K the main
-  font of each game (menus, subtitles, hints) is also redrawn at 2x or 4x size from the player's own
-  files when the game starts, so curves have fewer visible steps. Button icons and other HUD
-  pictures are unchanged. `GOW3_TEXT_SHARPEN=0` and `GOW3_ATLAS_SCALE=1` restore the old look.
+  font of each game (menus, subtitles, hints) is also replaced by a vector redraw of the same letters
+  at 4x size, so curves are smooth outlines instead of pixel steps; it is used only when it matches
+  the game's own font picture (otherwise the old smoothing applies). Button icons and other HUD
+  pictures are unchanged. `GOW3_TEXT_SHARPEN=0`, `GOW3_ATLAS_ASSETS=0` and `GOW3_ATLAS_SCALE=1`
+  restore the old look step by step.
 
 - **Added (24 Oct 2026): the launcher can be used with a controller.** The D-pad or the left stick
   move through the games, the sections, the settings and the buttons; A presses a button, flips a

@@ -36,6 +36,45 @@ inline void ReadLinear32(const uint8_t* src, uint32_t pitch, uint32_t width, uin
     }
 }
 
+// RGBA8 shrunk by an integer factor: every output texel is the rounded mean of a factor x factor block
+// (exact for coverage; width and height are the source's, multiples of factor).
+inline std::vector<uint8_t> BoxDownsample(const uint8_t* src, uint32_t width, uint32_t height, uint32_t factor) {
+    const uint32_t out_w = width / factor, out_h = height / factor;
+    std::vector<uint8_t> out(static_cast<size_t>(out_w) * out_h * 4);
+    for (uint32_t y = 0; y < out_h; ++y) {
+        for (uint32_t x = 0; x < out_w; ++x) {
+            for (uint32_t c = 0; c < 4; ++c) {
+                uint32_t sum = 0;
+                for (uint32_t j = 0; j < factor; ++j) {
+                    for (uint32_t i = 0; i < factor; ++i) {
+                        sum += src[(static_cast<size_t>(y * factor + j) * width + x * factor + i) * 4 + c];
+                    }
+                }
+                out[(static_cast<size_t>(y) * out_w + x) * 4 + c] = static_cast<uint8_t>((sum + factor * factor / 2) / (factor * factor));
+            }
+        }
+    }
+    return out;
+}
+
+// Mean absolute difference (in 0..255 levels) over `count` bytes.
+inline float MeanAbsError(const uint8_t* a, const uint8_t* b, size_t count) {
+    uint64_t sum = 0;
+    for (size_t i = 0; i < count; ++i) {
+        sum += static_cast<uint64_t>(std::abs(static_cast<int>(a[i]) - static_cast<int>(b[i])));
+    }
+    return count ? static_cast<float>(static_cast<double>(sum) / static_cast<double>(count)) : 0.0f;
+}
+
+// Fraction of the `count` bytes where a and b differ by more than `limit` levels.
+inline float OutlierFraction(const uint8_t* a, const uint8_t* b, size_t count, int limit) {
+    size_t n = 0;
+    for (size_t i = 0; i < count; ++i) {
+        n += std::abs(static_cast<int>(a[i]) - static_cast<int>(b[i])) > limit;
+    }
+    return count ? static_cast<float>(n) / static_cast<float>(count) : 0.0f;
+}
+
 // Catmull-Rom weights for the four taps around a position `t` in [0, 1) past the second tap.
 inline void CubicWeights(float t, float (&w)[4]) {
     w[0] = ((-0.5f * t + 1.0f) * t - 0.5f) * t;

@@ -5,7 +5,8 @@
 #              submodules are pinned as gitlinks at the commits checked out here
 #   tools/ launcher/ Start-Uncharted.cmd analysis/STATUS.md
 # Nothing from the game or a player is copied: no game/, *.pkg, analysis/ binaries, dumps, saves,
-# logs or shader caches; a final check refuses the commit if such a file slipped in.
+# logs or shader caches (exception: the games' UI art under gow3_pc/assets/ui/; executables, ELF/eboot
+# images, PKGs, whole pak/psarc archives, saves, dumps and logs are refused there too); a final check refuses the commit if such a file slipped in.
 # usage: tools/export_github.sh [destination] [commit message]
 set -euo pipefail
 cd -- "$(dirname -- "$0")/.."
@@ -60,8 +61,10 @@ done <<< "$submodules"
 forbidden=$(cd "$dest" && find . -path ./.git -prune -o \( -iname eboot.bin -o -iname '*.elf' \
     -o -iname sce_sys -o -iname savedata -o -iname '*.log' -o -iname 'probe*.ini' -o -iname '*.pkg' \
     -o -iname '*.psarc' -o -iname '*.pak' -o -iname 'boot*.bin' -o -iname '*.spv' -o -iname '*.dmp' \
-    -o -iname 'content.bin' -o -iname 'entry.bin' -o -iname '*.sav' \
-    -o -iname window_icon.bmp \) -print)  # 20 Oct 2026 audit: generated from Sony's icon0.png
+    -o -iname '*.sav' \) -print
+    # 25 Oct 2026: extracted UI art under gow3_pc/assets/ui/ may carry these generic names
+    find . -path ./.git -prune -o -path ./gow3_pc/assets/ui -prune -o \( -iname 'content.bin' \
+        -o -iname 'entry.bin' -o -iname window_icon.bmp \) -print)  # 20 Oct 2026 audit: window_icon.bmp is generated from Sony's icon0.png
 if [[ -n $forbidden ]]; then
     echo "The export holds files that must not be pushed:" >&2
     echo "$forbidden" >&2

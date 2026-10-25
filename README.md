@@ -13,7 +13,8 @@ whose releases up to 0.3.1 are merged in. What changed and when: [CHANGELOG.md](
 How commits and pull requests are written: [CONTRIBUTING.md](CONTRIBUTING.md). The plan up to
 1.0: [ROADMAP.md](ROADMAP.md).
 
-> **No game files are in this repository or its builds.** You need your own copy of the game
+> **No game executables, archives, saves or dumps are in this repository or its builds** (the
+> games' UI art under `gow3_pc/assets/ui/` is the one exception). You need your own copy of the game
 > (the dumped CUSA02320 or CUSA02344 folder). This project is not affiliated with Sony, Naughty Dog or
 > Bluepoint Games.
 

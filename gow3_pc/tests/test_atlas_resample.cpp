@@ -1,4 +1,4 @@
-// Detile and bicubic upscale of gow3_atlas_resample.h (font atlases at a larger host size).
+// Detile, bicubic upscale, box downsample and error metric of gow3_atlas_resample.h (font atlases at a larger host size).
 #include <cassert>
 #include <cstdio>
 #include <vector>
@@ -96,6 +96,30 @@ int main() {
     };
     assert(width_of_ramp(sharp) < width_of_ramp(soft));
     assert(sharp[(8 * (w * 4) + 2) * 4] == 0 && sharp[(8 * (w * 4) + w * 4 - 3) * 4] == 255);
+
+    // Box downsample: block mean (rounded), size, and a 4x nearest copy of an image comes back exactly.
+    std::vector<uint8_t> blocks(4 * 4 * 4, 0);
+    for (uint32_t i = 0; i < 4; ++i) {
+        blocks[(0 * 4 + i) * 4] = 10; // row 0 = 10, row 1 = 11: block mean 10.5 rounds to 11
+        blocks[(1 * 4 + i) * 4] = 11;
+    }
+    const auto half = BoxDownsample(blocks.data(), 4, 4, 2);
+    assert(half.size() == 2 * 2 * 4 && half[0] == 11 && half[4] == 11 && half[8] == 0);
+    std::vector<uint8_t> big4(w * 4 * h * 4 * 4);
+    for (uint32_t Y = 0; Y < h * 4; ++Y) {
+        for (uint32_t X = 0; X < w * 4; ++X) {
+            std::copy_n(want.data() + ((Y / 4) * w + X / 4) * 4, 4, big4.data() + (Y * w * 4 + X) * 4);
+        }
+    }
+    assert(BoxDownsample(big4.data(), w * 4, h * 4, 4) == want);
+
+    // Mean absolute error: identical 0, one byte off by 4 in 8 is 0.5.
+    uint8_t ma[8] = {0, 10, 20, 30, 40, 50, 60, 70}, mb[8] = {4, 10, 20, 30, 40, 50, 60, 70};
+    assert(MeanAbsError(ma, ma, 8) == 0.0f && MeanAbsError(ma, mb, 8) == 0.5f);
+
+    // Outliers: only differences strictly above the limit count.
+    uint8_t oa[4] = {0, 0, 0, 0}, ob[4] = {48, 49, 0, 255};
+    assert(OutlierFraction(oa, ob, 4, 48) == 0.5f && OutlierFraction(oa, oa, 4, 48) == 0.0f);
 
     std::puts("atlas resample ok");
     return 0;

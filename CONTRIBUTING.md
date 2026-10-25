@@ -95,8 +95,12 @@ Co-Authored-By: ...
 - A commit does one thing that can be explained in its subject. A fix and an unrelated clean-up are
   two commits.
 - Every commit builds. Run the checks (below) before committing.
-- Never commit game files, dumps, saves, logs, `nvngx_dlss.dll`,
+- Never commit game files (executables, ELF/eboot images, PKGs, whole pak/psarc archives), dumps, saves, logs,
+  shader caches, `nvngx_dlss.dll`,
   `gow3_pc/stat-multipliers-test.ini` or the `gow3_pc/gpu/third_party/fsr-vulkan` submodule state.
+  One exception: the games' UI art (font glyph outlines, button icons, HUD shapes as SVG, and the source
+  textures, atlases, TGA/PNG extracts and files taken out of pak/psarc archives they come from) may be
+  committed, only under `gow3_pc/assets/ui/`.
   Stage files by name (`git add <file>`), not `git add -A`.
 
 `.gitmessage` holds the body layout. To have Git open it for every commit:
@@ -124,7 +128,7 @@ fills in the layout; keep its headings.
 - **How it was tested**: games, settings and GPU, what you did in the game, and the result.
   Screenshots or frame-time numbers for visual or performance changes.
 - **Risk and not tested**: what might break, and what nobody checked.
-- **Checklist**: build, tests, CHANGELOG, STATUS, no game files.
+- **Checklist**: build, tests, CHANGELOG, STATUS, no game files (UI art under `gow3_pc/assets/ui/` excepted).
 
 Merging:
 
