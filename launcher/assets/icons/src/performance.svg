@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="24" height="24" viewBox="0 0 24 24">
+  <title>performance</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path id="performance" d="M4.5 17 C3.266 13.675 4.368 9.933 7.209 7.809 C10.05 5.685 13.95 5.685 16.791 7.809 C19.632 9.933 20.734 13.675 19.5 17 M12 15 L16 9" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="performance-2" data-name="performance" d="M10.5 15 C10.5 14.172 11.172 13.5 12 13.5 C12.828 13.5 13.5 14.172 13.5 15 C13.5 15.828 12.828 16.5 12 16.5 C11.172 16.5 10.5 15.828 10.5 15 Z" fill="#ffffff"/>
+  </g>
+</svg>

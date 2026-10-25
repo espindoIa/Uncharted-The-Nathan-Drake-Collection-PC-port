@@ -9,8 +9,9 @@ By **BilalReloaded** ([YouTube](https://www.youtube.com/@BilalReloaded/videos),
 [GitHub](https://github.com/bc160201983)), October 2026. What changed and when:
 [CHANGELOG.md](CHANGELOG.md).
 
-> **No game files are in this repository or its builds.** You need your own copy of the game
-> (the dumped CUSA02344 folder). This project is not affiliated with Sony, Naughty Dog or
+> **No game files are in this repository or its builds**, except some of the games' UI art in
+> `gow3_pc/assets/ui/` (their text font and the Collection logo, for the launcher). You need your
+> own copy of the game (the dumped CUSA02320 or CUSA02344 folder). This project is not affiliated with Sony, Naughty Dog or
 > Bluepoint Games.
 
 ## Status

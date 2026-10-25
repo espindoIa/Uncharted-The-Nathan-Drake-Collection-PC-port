@@ -4,7 +4,9 @@ Run: py -m unittest test_uncharted_launcher_ui  (from gow3_pc/tests; needs Tk an
 """
 import importlib.machinery
 import importlib.util
+import io
 import os
+import struct
 import sys
 import tempfile
 import time
@@ -149,6 +151,12 @@ class LauncherUiTest(unittest.TestCase):
             self.launcher.show_tab(name, save=False)
             self.root.update()
             self.assertEqual(self.launcher.section, name)
+
+    def test_fonts_fall_back_when_the_game_font_is_not_installed(self):
+        with mock.patch.object(uncharted_launcher.tkfont, "families", return_value=("Segoe UI",)):
+            self.launcher.fonts()
+        self.assertEqual(self.launcher.f_body, ("Segoe UI", 10))
+        self.assertEqual(self.launcher.f_wordmark, ("Segoe UI", 22, "bold"))
 
     def test_refresh_home_with_a_folder_that_is_not_a_game(self):
         launcher, mod = self.launcher, uncharted_launcher
@@ -483,6 +491,154 @@ class LauncherUiTest(unittest.TestCase):
     def test_launcher_uses_no_native_message_box(self):
         text = (LAUNCHER / "uncharted_launcher.pyw").read_text(encoding="utf-8")
         self.assertNotIn("messagebox.", text.split('if __name__ == "__main__"')[0])
+
+
+@unittest.skipIf(uncharted_launcher is None, f"launcher needs tkinter and Pillow: {IMPORT_ERROR}")
+class ArtTest(unittest.TestCase):
+    """launcher/art.py (25 Oct 2026 redesign): the trophy pack reader, the icons and the accent."""
+
+    def setUp(self):
+        self.art = sys.modules["art"]
+
+    def trp(self, files):
+        """A PS4 trophy pack: a 0x60 byte header, 0x40 byte entries (name[32], offset, size), the data."""
+        header = bytearray(0x60)
+        header[:4] = b"\xdc\xa2\x4d\x00"
+        header[0x10:0x18] = struct.pack(">II", len(files), 0x40)
+        entries, data, offset = b"", b"", 0x60 + 0x40 * len(files)
+        for name, payload in files:
+            entries += name.encode().ljust(32, b"\0") + struct.pack(">QQ", offset + len(data), len(payload)) + bytes(16)
+            data += payload
+        return bytes(header) + entries + data
+
+    def test_trophy_pack_gives_the_coin(self):
+        from PIL import Image
+        coin = Image.new("RGBA", (40, 30), (0, 0, 0, 0))
+        coin.paste((200, 160, 60, 255), (10, 5, 30, 25))  # the coin, in a transparent frame
+        png = io.BytesIO()
+        coin.save(png, "PNG")
+        game = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(game, ignore_errors=True))
+        (game / "sce_sys" / "trophy").mkdir(parents=True)
+        (game / "sce_sys" / "trophy" / "trophy02.trp").write_bytes(
+            self.trp([("TROP.ESFM", b"x" * 7), ("GR001.PNG", png.getvalue())]))
+        self.assertEqual(self.art.trophy_file(game / "sce_sys" / "trophy" / "trophy02.trp", "TROP.ESFM"), b"x" * 7)
+        self.assertEqual(self.art.game_coin(game, "2").size, (20, 20))  # cropped to the coin
+        self.assertEqual(self.art.coin_image(game, "2", 64, "#e5553f").size, (64, 64))  # enlarged
+        self.assertIsNone(self.art.game_coin(game, "1"))  # no pack: a drawn medallion instead
+        self.assertEqual(self.art.coin_image(game, "1", 64, "#e5553f").size, (64, 64))
+        (game / "bad.trp").write_bytes(b"not a trophy pack")
+        self.assertIsNone(self.art.trophy_file(game / "bad.trp", "GR001.PNG"))
+
+    def test_icons_are_tinted_masters_at_any_size(self):
+        names = {p.stem for p in (LAUNCHER / "assets" / "icons").glob("*.png")}
+        self.assertTrue({"home", "display", "performance", "controls", "gameplay", "system", "play", "stop",
+                         "update", "code", "info", "warning", "error", "help", "check"} <= names)
+        for size in (16, 48):
+            image = self.art.icon_image("home", size, "#e5553f")
+            self.assertEqual(image.size, (size, size))
+            self.assertEqual(image.getpixel((size // 2, size // 2))[:3], (0xe5, 0x55, 0x3f))
+        self.assertEqual(self.art.mix("#000000", "#ffffff", 0.5), "#808080")
+
+    def test_selecting_a_game_turns_the_accent_to_its_colour(self):
+        mod, widgets = uncharted_launcher, sys.modules["widgets"]
+        try:
+            root = tk.Tk()
+        except tk.TclError as error:
+            self.skipTest(f"no Tk display: {error}")
+        self.addCleanup(root.destroy)
+        root.withdraw()
+        label = tk.Label(root, bg=widgets.ACCENT)
+        widgets.set_accent(root, "#123456")
+        self.assertEqual((widgets.ACCENT, label.cget("bg")), ("#123456", "#123456"))
+        widgets.set_accent(root, "#e6b44c")
+        self.assertEqual(label.cget("bg"), "#e6b44c")
+        self.assertEqual(len({g["accent"] for g in mod.GAMES}), 3)
+
+
+@unittest.skipIf(uncharted_launcher is None, f"launcher needs tkinter and Pillow: {IMPORT_ERROR}")
+class SvgReaderTest(unittest.TestCase):
+    """art.svg_contours / svg_mask / wordmark: the small SVG reader behind the launcher's logo."""
+
+    def setUp(self):
+        self.art = sys.modules["art"]
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def svg(self, body, view='viewBox="0 0 10 10"', name="t.svg"):
+        path = Path(self.tmp.name) / name
+        path.write_text(f"<svg {view}>{body}</svg>", encoding="utf-8")
+        return path
+
+    def contours(self, d, attrs=""):
+        return self.art.svg_contours(self.svg(f'<path {attrs}d="{d}"/>'))[1]
+
+    def test_absolute_and_relative_commands_give_the_same_contour(self):
+        square = [(1.0, 1.0), (5.0, 1.0), (5.0, 5.0), (1.0, 5.0)]
+        self.assertEqual(self.contours("M1 1L5 1L5 5L1 5Z"), [square])
+        self.assertEqual(self.contours("m1 1l4 0l0 4l-4 0z"), [square])
+        curve = self.contours("M0 0C0 4 4 4 4 0Z")[0]
+        self.assertEqual(self.contours("m0 0c0 4 4 4 4 0z")[0], curve)
+        self.assertEqual(len(curve), 17)  # start + 16 steps
+        self.assertEqual(curve[-1], (4.0, 0.0))
+
+    def test_extra_pairs_after_m_and_l_are_lines(self):
+        square = [(1.0, 1.0), (5.0, 1.0), (5.0, 5.0), (1.0, 5.0)]
+        self.assertEqual(self.contours("M1 1 5 1 5 5 1 5Z"), [square])
+        self.assertEqual(self.contours("M1 1L5 1 5 5 1 5Z"), [square])
+        self.assertEqual(self.contours("m1 1 4 0 0 4 -4 0z"), [square])
+
+    def test_m_after_z_is_relative_to_the_subpath_start(self):
+        first, second = self.contours("M0 0L2 0L2 2Zm5 5l2 0l0 2z")
+        self.assertEqual(first, [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0)])
+        self.assertEqual(second, [(5.0, 5.0), (7.0, 5.0), (7.0, 7.0)])
+
+    def test_open_subpaths_are_kept_as_filled(self):
+        self.assertEqual(self.contours("M0 0L2 0L2 2"), [[(0.0, 0.0), (2.0, 0.0), (2.0, 2.0)]])  # end of d
+        both = self.contours("M0 0L2 0L2 2M5 5L7 5L7 7")  # next M
+        self.assertEqual([len(c) for c in both], [3, 3])
+        self.assertEqual(self.contours("M0 0L2 0"), [])  # a line has no area
+
+    def test_d_may_be_any_attribute_but_id_is_not_d(self):
+        triangle = [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0)]
+        self.assertEqual(self.contours("M0 0L2 0L2 2Z", 'fill="#000" '), [triangle])
+        self.assertEqual(self.contours("M0 0L2 0L2 2Z", 'id="x" '), [triangle])
+        path = self.svg('<path id="M0 0L9 0L9 9Z"/><path fill="red"/>')
+        self.assertEqual(self.art.svg_contours(path)[1], [])  # id="..." is not a path; no d at all is skipped
+
+    def test_unsupported_or_misplaced_input_raises_value_error(self):
+        for d in ("M0 0H5V5Z", "M0 0L5 0V5Z", "M0 0S1 1 2 2Z", "M0 0Q1 1 2 2Z", "M0 0A1 1 0 0 1 2 2Z",
+                  "5 5L1 1Z", "M0 0L5", "M0 0Z5 5"):
+            with self.subTest(d=d), self.assertRaises(ValueError):
+                self.contours(d)
+        with self.assertRaises(ValueError):
+            self.art.svg_contours(self.svg('<path d="M0 0L2 0L2 2Z"/>', view=""))  # no viewBox
+
+    def test_real_wordmark_mask(self):
+        mask = self.art.svg_mask(self.art.GAME_UI / "wordmark.svg", 28)
+        self.assertEqual((mask.size, mask.mode), ((218, 28), "L"))
+        self.assertIsNotNone(mask.getbbox())
+
+    def test_wordmark_is_none_when_missing_malformed_or_empty(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as error:
+            self.skipTest(f"no Tk display: {error}")
+        self.addCleanup(root.destroy)
+        root.withdraw()
+        folder = Path(self.tmp.name) / "ui"
+        folder.mkdir()
+        with mock.patch.object(self.art, "GAME_UI", folder):
+            self.assertIsNone(self.art.wordmark(root, 28))  # missing
+            for body in ('<path d="M0 0H5V5Z"/>', "", '<path d="M0 0L5 0"/>'):  # malformed, no path, no area
+                (folder / "wordmark.svg").write_text(f'<svg viewBox="0 0 10 10">{body}</svg>', encoding="utf-8")
+                for _ in range(2):  # a failure is not cached
+                    self.assertIsNone(self.art.wordmark(root, 28))
+            (folder / "wordmark.svg").write_text("<svg><path d=\"M0 0L5 0L5 5Z\"/></svg>", encoding="utf-8")  # no viewBox
+            self.assertIsNone(self.art.wordmark(root, 28))
+            (folder / "wordmark.svg").write_bytes(b"\xff\xfe\x00")  # not UTF-8
+            self.assertIsNone(self.art.wordmark(root, 28))
+        self.assertIsNotNone(self.art.wordmark(root, 28))  # the shipped file still works
 
 
 @unittest.skipIf(uncharted_launcher is None, f"launcher needs tkinter and Pillow: {IMPORT_ERROR}")

@@ -3,34 +3,62 @@ import ctypes
 import tkinter as tk
 from tkinter import font as tkfont
 
-# Palette (the fork's own, "expedition at night"): night blue and slate panels, a signal-flare
-# orange for what is selected or pressed. tools/make_launcher_icon.py draws the icon in the same
-# colours.
-BG = "#0b1116"
-PANEL = "#111b22"
-PANEL_HI = "#18262f"
-LINE = "#22343f"
-HOVER_LINE = "#3a5562"
-TEXT = "#e6eeec"
-MUTED = "#8ea3a6"
-DIM = "#566b70"
-ACCENT = "#ff8a3d"
-ACCENT_HI = "#ffa45f"
-INK = "#1c0d02"
+import art  # launcher/art.py: anti-aliased shapes and icons (25 Oct 2026)
+
+# Palette ("cinematic", 25 Oct 2026 redesign): near-black glass over the Collection's art, and each
+# game's own colour (GAME_ACCENTS in the launcher, set_accent) for what is selected or pressed.
+# tools/make_launcher_icon.py builds the icon from a master drawn in the same colours.
+STAGE = "#07090c"  # the window behind the panels
+BG = "#0e1318"  # the section panel
+PANEL = "#151c23"
+PANEL_HI = "#1e2730"
+LINE = "#26313b"
+HOVER_LINE = "#3a4855"
+TEXT = "#eef3f6"
+MUTED = "#8b9aa6"
+DIM = "#5b6873"
+ACCENT = "#e6b44c"
+ACCENT_HI = "#ebc370"
+INK = "#160b04"
 STOP_RED = "#d9534f"
-GOOD = "#5fbf8f"  # a check that passed (Home's Ready to play list)
-# The hero's art in two tones (shadows, highlights) and its map grid.
-HERO_DARK = "#071016"
-HERO_LIGHT = "#6f9ea2"
-HERO_GRID = "#1d3440"
+GOOD = "#6fcf97"  # a check that passed (Home's Ready to play list)
+INFO = "#7fb6d9"
+# Dialog and toast text; the launcher swaps in the games' font when it loads (fonts()).
+BODY_FONT, BOLD_FONT = ("Segoe UI", 10), ("Segoe UI Semibold", 11)
+
+
+def set_accent(root, color):
+    """The selected game's colour becomes the accent: widgets read ACCENT when they draw, and every
+    Tk option still holding the old accent (a selected label, a focus ring) takes the new one."""
+    global ACCENT, ACCENT_HI
+    if color == ACCENT:
+        return
+    swap = {ACCENT: color, ACCENT_HI: art.mix(color, "#ffffff", 0.2)}
+    ACCENT, ACCENT_HI = swap[ACCENT], swap[ACCENT_HI]
+    stack = [root]
+    while stack:
+        widget = stack.pop()
+        for option in ("bg", "fg", "highlightcolor", "highlightbackground", "activebackground", "selectbackground"):
+            try:
+                value = str(widget.cget(option))
+            except tk.TclError:
+                continue
+            if value in swap:
+                widget.configure(**{option: swap[value]})
+        stack.extend(widget.winfo_children())
 
 # ---------------------------------------------------------------------------------------------
 # Drawing helpers and widgets
 
-def round_rect(canvas, x1, y1, x2, y2, r, **kw):
-    points = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2, x2 - r, y2,
-              x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
-    return canvas.create_polygon(points, smooth=True, **kw)
+def scale_of(widget):
+    return max(1.0, widget.winfo_fpixels("1i") / 96.0)
+
+
+def draw_image(canvas, x, y, image, **kw):
+    """An image at canvas (x, y), anchored at its top left by default, past the focus ring's border
+    (a Tk canvas' coordinates start under its highlight border)."""
+    edge = int(canvas.cget("highlightthickness")) + int(canvas.cget("bd"))
+    return canvas.create_image(x + edge, y + edge, image=image, anchor=kw.pop("anchor", "nw"), **kw)
 
 
 def on_keys(widget, handlers):
@@ -51,16 +79,32 @@ def on_activate(widget, action):
     on_keys(widget, {sequence: action for sequence in ("<space>", "<Return>", "<KP_Enter>")})
 
 
-class Toggle(tk.Canvas):
+class FocusDrawn:
+    """A widget that draws its own focus ring (a rounded outline, 25 Oct 2026) instead of Tk's square
+    highlight border: draw() runs again when the focus comes or goes."""
+
+    def watch_focus(self):
+        self.bind("<FocusIn>", lambda e: self.draw(), add="+")
+        self.bind("<FocusOut>", lambda e: self.draw(), add="+")
+
+    def focused(self):
+        try:
+            return self.focus_get() is self
+        except (KeyError, tk.TclError):  # a menu's popup has the focus
+            return False
+
+
+class Toggle(FocusDrawn, tk.Canvas):
     def __init__(self, parent, scale, value, command):
         self.s = scale
         w, h = int(46 * scale), int(24 * scale)
-        # 24 Oct 2026: keyboard focus (Tab, Space/Enter); the focus ring is the 2 px highlight border.
-        super().__init__(parent, width=w, height=h, bg=parent["bg"], highlightthickness=2,
-                         highlightbackground=parent["bg"], highlightcolor=ACCENT, takefocus=1, cursor="hand2")
+        # 24 Oct 2026: keyboard focus (Tab, Space/Enter); 25 Oct: the ring is drawn round the track.
+        super().__init__(parent, width=w, height=h, bg=parent["bg"], highlightthickness=0, bd=0, takefocus=1,
+                         cursor="hand2")
         self.w, self.h, self.value, self.command, self.enabled = w, h, bool(value), command, True
         self.bind("<Button-1>", lambda e: self.click())
         on_activate(self, self.click)
+        self.watch_focus()
         self.draw()
 
     def click(self):
@@ -81,31 +125,34 @@ class Toggle(tk.Canvas):
 
     def draw(self):
         self.delete("all")
-        pad = max(1, int(2 * self.s))
-        track = (ACCENT if self.value else LINE) if self.enabled else (DIM if self.value else LINE)
-        round_rect(self, 1, 1, self.w - 1, self.h - 1, self.h // 2, fill=track, outline=track)
-        d = self.h - 2 * pad - 2
-        x = self.w - pad - d - 1 if self.value else pad + 1
-        knob = (INK if self.value else MUTED) if self.enabled else (PANEL if self.value else DIM)
-        self.create_oval(x, pad + 1, x + d, pad + 1 + d, fill=knob, outline="")
+        on, focus = self.value, self.focused()
+        track = (ACCENT if on else PANEL_HI) if self.enabled else (LINE if on else PANEL)
+        ring, width = (TEXT, 2 * self.s) if focus else (None if on else LINE, self.s)
+        draw_image(self, 0, 0, art.rounded(self, self.w, self.h, self.h / 2, track, ring, width))
+        pad = max(2, int(3 * self.s))
+        d = self.h - 2 * pad
+        knob = (INK if on else MUTED) if self.enabled else (MUTED if on else DIM)
+        x = self.w - pad - d if on else pad
+        draw_image(self, x, pad, art.photo(self, ("dot", d, knob), lambda: art.circle_image(d, knob)))
 
 
-class Chip(tk.Canvas):
+class Chip(FocusDrawn, tk.Canvas):
     """A small on/off pill, for the performance counter's items (Display section)."""
 
     def __init__(self, parent, scale, font, label, value, command):
         self.s, self.label, self.command = scale, label, command
         self.value = bool(value)
         self.font = tkfont.Font(font=font)
-        pad_x, pad_y = int(10 * scale), int(5 * scale)
+        pad_x, pad_y = int(12 * scale), int(5 * scale)
         w = self.font.measure(label) + 2 * pad_x
         h = self.font.metrics("linespace") + 2 * pad_y
         # Keyboard focus as Toggle (Tab, Space/Enter).
-        super().__init__(parent, width=w, height=h, bg=parent["bg"], highlightthickness=2,
-                         highlightbackground=parent["bg"], highlightcolor=ACCENT, takefocus=1, cursor="hand2")
+        super().__init__(parent, width=w, height=h, bg=parent["bg"], highlightthickness=0, bd=0, takefocus=1,
+                         cursor="hand2")
         self.w, self.h = w, h
         self.bind("<Button-1>", lambda e: self.set(not self.value, notify=True))
         on_activate(self, lambda: self.set(not self.value, notify=True))
+        self.watch_focus()
         self.draw()
 
     def set(self, value, notify=False):
@@ -116,47 +163,80 @@ class Chip(tk.Canvas):
 
     def draw(self):
         self.delete("all")
-        round_rect(self, 1, 1, self.w - 1, self.h - 1, self.h // 2, fill=ACCENT if self.value else PANEL,
-                   outline=ACCENT if self.value else LINE)
-        self.create_text(self.w / 2, self.h / 2, text=self.label, font=self.font,
-                         fill=INK if self.value else MUTED)
+        ring = TEXT if self.focused() else (ACCENT if self.value else LINE)
+        draw_image(self, 0, 0, art.rounded(self, self.w, self.h, self.h / 2, ACCENT if self.value else PANEL, ring,
+                                           2 * self.s if self.focused() else self.s))
+        self.create_text(self.w / 2, self.h / 2, text=self.label, font=self.font, fill=INK if self.value else MUTED)
 
 
-class Segmented(tk.Frame):
-    """A row of choices; the selected one is gold. One Tab stop: Left/Right change the choice, Home/End
-    pick the first/last."""
+class Segmented(tk.Canvas):
+    """A row of choices in a rounded tray; the selected one is a pill in the game's colour. One Tab
+    stop: Left/Right change the choice, Home/End pick the first/last. The choices are Labels (one
+    per option, self.labels) placed on the tray, each with its pill as an image behind the text."""
 
     def __init__(self, parent, options, value, command, font, recommended=None):
-        super().__init__(parent, bg=LINE, padx=1, pady=1, highlightthickness=2, highlightbackground=parent["bg"],
-                         highlightcolor=ACCENT, takefocus=1)
+        super().__init__(parent, bg=parent["bg"], highlightthickness=0, bd=0, takefocus=1)
         self.command, self.labels, self.value, self.recommended = command, {}, value, recommended
-        self.enabled = True
+        self.enabled, self.hover = True, None
+        self.font = tkfont.Font(font=font)
+        self.s = scale_of(self)
         on_keys(self, {"<Left>": lambda: self.move(-1), "<Right>": lambda: self.move(1),
                        "<Home>": lambda: self.move(to=0), "<End>": lambda: self.move(to=-1)})
-        for i, (option, label) in enumerate(options):
-            item = tk.Label(self, text=self.text(option, label), font=font, padx=12, pady=5, cursor="hand2", bd=0)
-            item.grid(row=0, column=i, padx=(0 if i == 0 else 1, 0))
+        for option, label in options:
+            item = tk.Label(self, text=self.text(option, label), font=font, bd=0, padx=0, pady=0, compound="center",
+                            cursor="hand2", bg=PANEL)
             item.bind("<Button-1>", lambda e, v=option: self.click(v))
-            item.bind("<Enter>", lambda e, w=item, v=option: self.enabled and v != self.value and w.config(bg=PANEL_HI))
-            item.bind("<Leave>", lambda e: self.restyle())
+            item.bind("<Enter>", lambda e, v=option: self.set_hover(v))
+            item.bind("<Leave>", lambda e: self.set_hover(None))
             self.labels[option] = item
-        self.restyle()
+        self.bind("<FocusIn>", lambda e: self.draw_tray())
+        self.bind("<FocusOut>", lambda e: self.draw_tray())
+        self.layout()
 
     def text(self, option, label):
         # The recommended choice carries a star.
         return f"{label}  ★" if option == self.recommended else label
+
+    def layout(self):
+        """Sizes the tray to the labels and places them on it."""
+        inset, pad_x = max(2, int(3 * self.s)), int(13 * self.s)
+        self.item_h = self.font.metrics("linespace") + int(10 * self.s)
+        self.widths = {o: self.font.measure(item.cget("text")) + 2 * pad_x for o, item in self.labels.items()}
+        self.tray_w = sum(self.widths.values()) + 2 * inset
+        self.tray_h = self.item_h + 2 * inset
+        self.config(width=self.tray_w, height=self.tray_h)
+        self.delete("all")
+        self.draw_tray()
+        x = inset
+        for option, item in self.labels.items():
+            self.create_window(x, inset, window=item, anchor="nw")
+            x += self.widths[option]
+        self.restyle()
+
+    def draw_tray(self):
+        self.delete("tray")
+        focus = self.focus_get() is self if self.winfo_exists() else False
+        image = art.rounded(self, self.tray_w, self.tray_h, self.tray_h / 2, PANEL, TEXT if focus else LINE,
+                            2 * self.s if focus else self.s)
+        self.create_image(0, 0, image=image, anchor="nw", tags="tray")
+        self.tag_lower("tray")
 
     def relabel(self, options):
         """New labels for the same choices (the resolutions at another aspect ratio)."""
         for option, label in options:
             if option in self.labels:
                 self.labels[option].config(text=self.text(option, label))
+        self.layout()
 
     def set(self, value, notify=False):
         self.value = value
         self.restyle()
         if notify:
             self.command(value)
+
+    def set_hover(self, option):
+        self.hover = option if self.enabled else None
+        self.restyle()
 
     def click(self, option):
         if self.enabled:
@@ -179,37 +259,61 @@ class Segmented(tk.Frame):
 
     def restyle(self):
         for option, item in self.labels.items():
-            selected = option == self.value
+            selected, w = option == self.value, self.widths[option]
             if self.enabled:
-                item.config(bg=ACCENT if selected else PANEL, fg=INK if selected else TEXT, cursor="hand2")
-            else:  # the selected one stays readable, but is not orange
-                item.config(bg=LINE if selected else PANEL, fg=MUTED if selected else DIM, cursor="arrow")
+                fill = ACCENT if selected else (PANEL_HI if option == self.hover else None)
+                fg = INK if selected else TEXT
+            else:  # the selected one stays readable, but is not in the game's colour
+                fill, fg = (LINE if selected else None), (MUTED if selected else DIM)
+            pill = art.rounded(self, w, self.item_h, self.item_h / 2, fill)
+            item.config(image=pill, fg=fg, cursor="hand2" if self.enabled else "arrow")
 
 
 class Dropdown(tk.Label):
-    """A choice from a longer list: the current one, and a menu of all on click."""
+    """A choice from a longer list: the current one on a rounded field, and a menu of all on click."""
 
     def __init__(self, parent, options, value, command, font):
-        super().__init__(parent, font=font, bg=PANEL, fg=TEXT, padx=12, pady=5, cursor="hand2", anchor="w",
-                         highlightthickness=2, highlightbackground=LINE, highlightcolor=ACCENT, takefocus=1)
-        self.options, self.command, self.font, self.enabled = options, command, font, True
+        super().__init__(parent, font=font, bg=parent["bg"], fg=TEXT, bd=0, padx=0, pady=0, compound="center",
+                         cursor="hand2", highlightthickness=0, takefocus=1)
+        self.options, self.command, self.font, self.enabled, self.hover = options, command, font, True, False
+        self.measure, self.s = tkfont.Font(font=font), scale_of(self)
         self.set(value)
         self.bind("<Button-1>", lambda e: self.open())
         on_keys(self, {sequence: self.open for sequence in ("<space>", "<Return>", "<KP_Enter>", "<Down>")})
         on_keys(self, {"<Left>": lambda: self.move(-1), "<Right>": lambda: self.move(1)})
-        self.bind("<Enter>", lambda e: self.enabled and self.config(bg=PANEL_HI))
-        self.bind("<Leave>", lambda e: self.config(bg=PANEL))
+        self.bind("<Enter>", lambda e: self.set_hover(True))
+        self.bind("<Leave>", lambda e: self.set_hover(False))
+        self.bind("<FocusIn>", lambda e: self.draw(), add="+")
+        self.bind("<FocusOut>", lambda e: self.draw(), add="+")
+
+    def set_hover(self, hover):
+        self.hover = hover and self.enabled
+        self.draw()
+
+    def draw(self):
+        """The field behind the text: as wide as the text, at least 140 px."""
+        try:
+            focus = self.focus_get() is self
+        except (KeyError, tk.TclError):
+            focus = False
+        w = max(int(140 * self.s), self.measure.measure(self.cget("text")) + int(28 * self.s))
+        h = self.measure.metrics("linespace") + int(14 * self.s)
+        field = art.rounded(self, w, h, int(9 * self.s), PANEL_HI if self.hover else PANEL, TEXT if focus else LINE,
+                            2 * self.s if focus else self.s)
+        self.config(image=field)
 
     def set_enabled(self, enabled):
         """Greyed out (a setting that does nothing now): shows its value, does not open."""
         self.enabled = bool(enabled)
-        self.config(fg=TEXT if self.enabled else DIM, bg=PANEL, cursor="hand2" if self.enabled else "arrow",
+        self.config(fg=TEXT if self.enabled else DIM, cursor="hand2" if self.enabled else "arrow",
                     takefocus=int(self.enabled))
+        self.draw()
 
     def set(self, value, notify=False):
         self.value = value
         label = next((label for option, label in self.options if option == value), value)
-        self.config(text=f"{label}   \u25be")
+        self.config(text=f"{label}   ▾")
+        self.draw()
         if notify:
             self.command(value)
 
@@ -229,7 +333,7 @@ class Dropdown(tk.Label):
         menu = tk.Menu(self, tearoff=0, bg=PANEL, fg=TEXT, activebackground=ACCENT, activeforeground=INK,
                        font=self.font, bd=0)
         for option, label in self.options:
-            menu.add_command(label=("\u2713  " if option == self.value else "     ") + label,
+            menu.add_command(label=("✓  " if option == self.value else "     ") + label,
                              command=lambda v=option: self.set(v, notify=True))
         menu.tk_popup(self.winfo_rootx(), self.winfo_rooty() + self.winfo_height())
 
@@ -238,7 +342,7 @@ class ScrollBar(tk.Canvas):
     """A thin scrollbar in the launcher's colors for a scrolling canvas (its yscrollcommand)."""
 
     def __init__(self, parent, scale, target):
-        super().__init__(parent, width=max(6, int(10 * scale)), bg=parent["bg"], highlightthickness=0)
+        super().__init__(parent, width=max(6, int(8 * scale)), bg=parent["bg"], highlightthickness=0)
         self.target, self.first, self.last, self.hover, self.grab = target, 0.0, 1.0, False, None
         self.bind("<Configure>", lambda e: self.draw())
         self.bind("<Enter>", lambda e: self.highlight(True))
@@ -260,12 +364,11 @@ class ScrollBar(tk.Canvas):
         w, h = self.winfo_width(), self.winfo_height()
         if h <= 1 or self.last - self.first >= 1:
             return
-        x1, x2, r = 2, w - 2, max(1, (w - 4) // 2)
-        round_rect(self, x1, 1, x2, h - 1, r, fill=PANEL, outline=PANEL)
-        top = min(int(self.first * h), h - 24)
-        bottom = min(h, max(int(self.last * h), top + 24))
+        least = 3 * w
+        top = min(int(self.first * h), h - least)
+        bottom = min(h, max(int(self.last * h), top + least))
         color = MUTED if self.hover or self.grab is not None else DIM
-        round_rect(self, x1, top + 1, x2, bottom - 1, r, fill=color, outline=color)
+        self.create_image(0, top, image=art.rounded(self, w, bottom - top, w / 2, color), anchor="nw")
 
     def press(self, event):
         position = event.y / max(1, self.winfo_height())
@@ -288,11 +391,11 @@ class Badge(tk.Canvas):
     """A small label with a rounded border ("ALL GAMES" next to a setting that all three games share)."""
 
     def __init__(self, parent, text, scale, font):
-        pad = int(7 * scale)
+        pad = int(8 * scale)
         measure = tkfont.Font(root=parent, font=font)
         w, h = measure.measure(text) + 2 * pad, measure.metrics("linespace") + int(4 * scale)
         super().__init__(parent, width=w, height=h, bg=parent["bg"], highlightthickness=0)
-        round_rect(self, 1, 1, w - 1, h - 1, h // 2, fill="", outline=LINE)
+        self.create_image(0, 0, image=art.rounded(self, w, h, h / 2, None, HOVER_LINE, scale), anchor="nw")
         self.create_text(w // 2, h // 2, text=text, font=font, fill=MUTED)
         self.text = text
 
@@ -322,8 +425,7 @@ class InfoTip(tk.Canvas):
 
     def draw(self, color):
         self.delete("all")
-        self.create_oval(1, 1, self.size - 1, self.size - 1, outline=color)
-        self.create_text(self.size // 2, self.size // 2, text="?", font=self.font, fill=color)
+        draw_image(self, 0, 0, art.icon(self, "help", self.size, color))
 
     def enter(self, event=None):
         self.draw(TEXT)
@@ -459,20 +561,42 @@ def copy_text(root, text):
 
 
 class DialogButton(tk.Label):
-    STYLES = {"primary": (ACCENT, ACCENT_HI, INK), "secondary": (LINE, HOVER_LINE, TEXT),
-              "danger": (STOP_RED, "#e46662", "#ffffff")}
+    """A rounded button (its pill is the Label's image, behind the text)."""
+
+    @staticmethod
+    def colors(style):
+        """(fill, hover fill, text) of a style, read when drawn: the accent follows the game."""
+        return {"primary": (ACCENT, ACCENT_HI, INK), "secondary": (PANEL_HI, HOVER_LINE, TEXT),
+                "danger": (STOP_RED, "#e46662", "#ffffff")}[style]
 
     def __init__(self, parent, text, command, style, font, scale):
-        bg, self.hover, fg = self.STYLES[style]
-        # 24 Oct 2026: a 2 px focus ring for the controller (D-pad left/right between buttons); the
-        # padding is 2 px less so the button keeps its size. Invisible until focused.
-        super().__init__(parent, text=text, font=font, bg=bg, fg=fg, cursor="hand2",
-                         padx=int(16 * scale) - 2, pady=int(7 * scale) - 2, highlightthickness=2,
-                         highlightbackground=parent["bg"], highlightcolor=TEXT)
-        self.normal, self.command = bg, command
+        fill, _, fg = self.colors(style)
+        super().__init__(parent, text=text, font=font, bg=parent["bg"], fg=fg, cursor="hand2", bd=0, padx=0, pady=0,
+                         compound="center", highlightthickness=0, takefocus=1)
+        self.style, self.command, self.s, self.hover = style, command, scale, False
+        measure = tkfont.Font(font=font)
+        self.w = measure.measure(text) + int(36 * scale)
+        self.h = measure.metrics("linespace") + int(16 * scale)
         self.bind("<Button-1>", lambda e: self.invoke())
-        self.bind("<Enter>", lambda e: self.config(bg=self.hover))
-        self.bind("<Leave>", lambda e: self.config(bg=self.normal))
+        self.bind("<Enter>", lambda e: self.set_hover(True))
+        self.bind("<Leave>", lambda e: self.set_hover(False))
+        # 24 Oct 2026: the focus ring shows where the controller's D-pad left/right is (drawn on the pill).
+        self.bind("<FocusIn>", lambda e: self.draw(), add="+")
+        self.bind("<FocusOut>", lambda e: self.draw(), add="+")
+        self.draw()
+
+    def set_hover(self, hover):
+        self.hover = hover
+        self.draw()
+
+    def draw(self):
+        fill, hover, fg = self.colors(self.style)
+        try:
+            focus = self.focus_get() is self
+        except (KeyError, tk.TclError):
+            focus = False
+        self.config(fg=fg, image=art.rounded(self, self.w, self.h, self.h / 2, hover if self.hover else fill,
+                                             TEXT if focus else None, 2 * self.s))
 
     def invoke(self):
         self.command()
@@ -482,8 +606,7 @@ class Dialog(tk.Toplevel):
     """A modal message in the launcher's colors. Dialog.ask(...) blocks and returns the value of the
     clicked button, or `cancel` for Escape and the close button. Enter clicks the default button.
     `detail` is a read-only monospace box (scrolls when long) with a Copy button."""
-    ICONS = {"info": ("ℹ", HERO_LIGHT), "warning": ("⚠", ACCENT), "error": ("✕", STOP_RED),
-             "question": ("?", ACCENT)}
+    ICONS = {"info": "info", "warning": "warning", "error": "error", "question": "help"}  # assets/icons
     WIDTH = 460
     current = None  # the dialog on screen (the controller navigation in the launcher sends its buttons here)
 
@@ -495,14 +618,14 @@ class Dialog(tk.Toplevel):
         width, pad = px(self.WIDTH), px(20)
         self.title(title)
         self.resizable(False, False)
-        body_font, bold_font = ("Segoe UI", 10), ("Segoe UI Semibold", 11)
+        body_font, bold_font = BODY_FONT, BOLD_FONT
         tk.Frame(self, width=width, height=0, bg=PANEL).pack()  # the dialog's width
         header = tk.Frame(self, bg=PANEL_HI)
         header.pack(fill="x")
         if icon in self.ICONS:
-            glyph, color = self.ICONS[icon]
-            tk.Label(header, text=glyph, font=("Segoe UI Symbol", 15), bg=PANEL_HI, fg=color).pack(
-                side="left", padx=(pad, px(10)), pady=px(12))
+            color = {"info": INFO, "error": STOP_RED}.get(icon, ACCENT)
+            tk.Label(header, image=art.icon(self, self.ICONS[icon], px(24), color), bg=PANEL_HI, bd=0).pack(
+                side="left", padx=(pad, px(10)), pady=px(14))
         tk.Label(header, text=title, font=bold_font, bg=PANEL_HI, fg=TEXT, anchor="w", justify="left",
                  wraplength=width - 2 * pad - px(40)).pack(side="left", fill="x", expand=True,
                                                           padx=(0 if icon in self.ICONS else pad, pad))
@@ -594,6 +717,8 @@ class Dialog(tk.Toplevel):
         self.geometry(f"{w}x{h}+{max(0, x)}+{max(0, y)}")
         self.deiconify()
         self.update()  # mapped now: the grab below needs a viewable window (wait_visibility could hang)
+        if not self.winfo_exists():  # answered (or closed) during that update
+            return self.result
         self.grab()
         self.focus_force()
         previous, Dialog.current = Dialog.current, self
@@ -641,14 +766,16 @@ class Toast(tk.Frame):
     """A short acknowledgement in the root's bottom-right corner (not a window): up to three stacked,
     newest on top, gone after DELAY ms or on a click. Does nothing while the root is withdrawn."""
     DELAY = 4000
-    KINDS = {"info": ACCENT, "ok": GOOD, "error": STOP_RED}
+    KINDS = {"info": ("info", None), "ok": ("check", GOOD), "error": ("error", STOP_RED)}  # icon, colour (None: accent)
     MAX = 3
 
     def __init__(self, root, text, kind, scale):
         super().__init__(root, bg=PANEL_HI, highlightthickness=1, highlightbackground=LINE)
         self.scale = scale
-        tk.Frame(self, bg=self.KINDS.get(kind, ACCENT), width=max(3, int(4 * scale))).pack(side="left", fill="y")
-        tk.Label(self, text=text, font=("Segoe UI", 10), bg=PANEL_HI, fg=TEXT, justify="left", anchor="w",
+        name, color = self.KINDS.get(kind, self.KINDS["info"])
+        tk.Label(self, image=art.icon(self, name, int(20 * scale), color or ACCENT), bg=PANEL_HI, bd=0).pack(
+            side="left", padx=(int(12 * scale), 0))
+        tk.Label(self, text=text, font=BODY_FONT, bg=PANEL_HI, fg=TEXT, justify="left", anchor="w",
                  wraplength=int(340 * scale), padx=int(12 * scale), pady=int(10 * scale)).pack(side="left")
         for widget in (self, *self.winfo_children()):
             widget.bind("<Button-1>", lambda e: self.hide())

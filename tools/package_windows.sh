@@ -34,7 +34,8 @@ ldd gow3_pc/out/gow3-probe.exe | awk '/clang64/ {print $3}' | sort -u | while re
 done
 
 # The games' UI art (vector font atlases that gow3_atlas.cpp loads from <exe dir>/../assets/ui).
-[[ ! -d gow3_pc/assets/ui ]] || { mkdir -p "$stage/gow3_pc/assets"; cp -r gow3_pc/assets/ui "$stage/gow3_pc/assets/"; }
+mkdir -p "$stage/gow3_pc/assets/ui/fonts"
+cp gow3_pc/assets/ui/fonts/[0-9a-f]*.png "$stage/gow3_pc/assets/ui/fonts/"
 
 # DLSS (optional): DLSS_BRIDGE=<gow3_dlss.dll, built with MSVC from gow3_pc/gpu/dlss_bridge> and
 # DLSS_SDK=<NVIDIA DLSS SDK root, for its license> add the bridge next to the runtime. NVIDIA's
@@ -77,13 +78,23 @@ fi
 
 cp gow3_pc/scripts/*.py "$stage/gow3_pc/scripts/"
 cp tools/probe_uncharted.py tools/hang_report.py tools/apply_update.py tools/play.py tools/install_update.py "$stage/tools/"
+# Session recorder (a player runs Record-Session.cmd beside the game; it uses python\python.exe).
+cp tools/session_recorder.py "$stage/tools/"
+cp Record-Session.cmd "$stage/"
 # PkgTool (LibOrbisPkg, LGPL-3.0): Advanced -> Install game update unpacks the player's own update PKG.
 mkdir -p "$stage/tools/pkgtool"
 cp tools/pkgtool/PkgTool.exe tools/pkgtool/LibOrbisPkg.dll "$stage/tools/pkgtool/"
-cp launcher/uncharted_launcher.pyw launcher/updater.py launcher/widgets.py "$stage/launcher/"
+cp launcher/uncharted_launcher.pyw launcher/updater.py launcher/widgets.py launcher/art.py "$stage/launcher/"
 # The package's version (tools/VERSION; the launcher's updates compare it with the releases).
 cp tools/VERSION "$stage/VERSION"
-cp launcher/assets/uncharted.ico launcher/assets/icon.png "$stage/launcher/assets/"
+cp launcher/assets/uncharted.ico launcher/assets/icon.png launcher/assets/grain.png "$stage/launcher/assets/"
+# The games' lettering for the launcher (tools/build_ui_art.py): the font and the wordmark only.
+mkdir -p "$stage/gow3_pc/assets/ui/fonts"
+cp gow3_pc/assets/ui/wordmark.svg "$stage/gow3_pc/assets/ui/"
+cp gow3_pc/assets/ui/fonts/drake-serial.ttf "$stage/gow3_pc/assets/ui/fonts/"
+# The launcher's icons: the 192 px masters only (their VectorCraft sources in icons/src stay in the repo).
+mkdir -p "$stage/launcher/assets/icons"
+cp launcher/assets/icons/*.png "$stage/launcher/assets/icons/"
 # The runtime's optimizations known to break Uncharted (GOW3_TOGGLE_FILE).
 cp tools/defaults/disabled-optimizations.txt "$stage/analysis/uncharted-user/"
 cp tools/README-Windows.txt "$stage/README.txt"

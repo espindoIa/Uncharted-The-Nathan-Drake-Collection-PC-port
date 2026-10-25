@@ -38,7 +38,7 @@ The toolchain is MSYS2 CLANG64. From Git Bash, wrap commands like this:
 - **Python tests:** `unittest` files in `gow3_pc/tests/` that import `paths.py`; run one from that folder, e.g. `python -m unittest test_prepare`.
 - **Launcher syntax check:** `python -c "import ast; ast.parse(open('launcher/uncharted_launcher.pyw', encoding='utf-8').read())"`.
 - **Run from source:** `Start-Uncharted.cmd` (launcher), or `python tools/probe_uncharted.py --boot --seconds 0 --executable big3-ps4_Shipping.elf --game <CUSA02320 or CUSA02344 folder>` (`eboot.bin` = U1 / Collection menu, `big2-…` = U2, `big3-…` = U3). Logs go to `analysis/<executable>/boot.log`.
-- **Package:** run from Git Bash, not the CLANG64 shell. In CLANG64 it picks MSYS2's Python, and Python copying fails. It needs a Windows Python 3.10+ with Pillow (`PYTHON_HOME` overrides; the `python` on PATH here is 3.12 and has no Pillow — 3.13 is installed):
+- **Package:** run from Git Bash, not the CLANG64 shell. In CLANG64 it picks MSYS2's Python, and Python copying fails. It needs a Windows Python 3.10+ with Pillow, by default the `python` on PATH (3.13 here since Python 3.12 was uninstalled, 25 Oct; `PYTHON_HOME` overrides):
   `DLSS_BRIDGE=/c/dev/uncharted/gow3_pc/out/gow3_dlss.dll DLSS_SDK=/c/dev/DLSS STREAMLINE_SDK=/c/dev/Streamline-bin/sdk tools/package_windows.sh` → `dist/Uncharted-windows.zip`. The pacman "Import PGP key?" lines in its output are noise. The zip must contain `gow3_dlss.dll` and must **not** contain `nvngx_dlss.dll` (NVIDIA's license does not fit the GPL; the launcher has the player add it). With `STREAMLINE_SDK` it also holds Streamline's `sl.*.dll` (MIT) but never its `nvngx_*` or `NvLowLatencyVk.dll`. Test it extracted into an empty folder.
 - **Release / public sync:** `tools/release.sh <version>` (needs `tools/release-notes/v<version>.md`); `tools/export_github.sh` copies source only (no game files) into a separate repo for GitHub Actions (`.github/workflows/build-windows.yml`).
 
@@ -46,6 +46,7 @@ The toolchain is MSYS2 CLANG64. From Git Bash, wrap commands like this:
 
 **Launch chain.**
 1. `launcher/uncharted_launcher.pyw` (Tkinter) writes per-game settings to `analysis/uncharted-user/probe-u{1,2,3}.ini`.
+   Its lettering is the games' own (`gow3_pc/assets/ui/`, built by `tools/build_ui_art.py` with a manual VectorCraft trace step): the menus' font as `drake-serial.ttf`, loaded privately by `art.load_game_font()` before Tk starts, and the Collection logo's UNCHARTED as `wordmark.svg`, rasterised at the exact size per screen scale by `art.svg_mask()`. Missing files fall back to Segoe UI / Bahnschrift and plain text.
 2. `tools/probe_uncharted.py` prepares the executable with `gow3_pc/scripts/` (patches, render-resolution rewrite, update 1.02 overlay). It turns the ini into `GOW3_*` environment variables and starts `gow3-probe.exe`. Some choices are decided there at start, which is why they need a restart: an upscaler on or off (camera source, scene size), the render resolution, readback modes.
 3. `UNCHARTED_*` variables and `analysis/uncharted-user/test-env.txt` override what it sets.
 
@@ -76,7 +77,7 @@ The toolchain is MSYS2 CLANG64. From Git Bash, wrap commands like this:
 **Runtime toggles and diagnostics.**
 - `analysis/uncharted-user/disabled-optimizations.txt` (`GOW3_TOGGLE_FILE`) is read live: "<first> <second>" bit masks, bit set = optimization off. The bits are the enums in `gpu/shim/gow3_toggles.h` (`Disabled()` / `Disabled2()`); new performance work goes behind a new bit so it can be A/B'd in one run. Reflex/FG bits (`Disabled2`): `ReflexSleep`, `FrameGeneration`, `ReflexNoSleep`, `FrameGenStdSleep`, `ReflexEarlySubmit`.
 - `GOW3_FRAME_LOG=<file>` logs flip events (S/P/Q/C, steady-clock ms); `GOW3_DISPLAY_LOG=<file>` logs on-screen times via VK_KHR_present_wait plus `<file>.gpu` GPU completion; `GOW3_FRAME_TIMES`, `GOW3_FRAME_STATS=1` add more.
-- `tools/play.py` drives a game from scripted input (replays, `--burst`, `--marks`) for closed-loop tests. It and the bench scripts need **Python 3.13 first on PATH**: 3.12 has no PIL (symptoms "No module named PIL", "no gameplay").
+- `tools/play.py` drives a game from scripted input (replays, `--burst`, `--marks`) for closed-loop tests. It and the bench scripts need a Python with Pillow first on PATH (3.13, the only one installed since 25 Oct; without PIL: "No module named PIL", "no gameplay").
 - CPU experiments (23 Oct, uncommitted work): `Disabled2` bits 28–34 are `GuestFalseSharing`, `GuestReadPrewait`, `ForwardedCopies`, `RingAssociative`, `ComputeSpecScratch`, `ComputeVariantCheck`, `CommandsOnStageB`. Forwarded copies additionally require `GOW3_FORWARD_COPIES=1`; stage-B commands require `GOW3_COMMANDS_STAGE_B=1` (both opt-in). Earlier 23 Oct gate benchmarks were **not** in the meat market: walk backwards from the save to reach it. `C:/dev/bench/retest_cpu.py` logs external CPU load per short comparison window; comparisons under unequal load are inconclusive.
 - Structural prototypes (23 Oct): exact pre-structural checkpoint `c48f91f`, matching exe `C:/dev/bench/cpu_before_structural_20261023.exe`. Disabled2 bits 35/36/37 are `StaticMeshSnapshots` / `CoalescedSkinningWrites` / `ForwardCopyDefer`, requiring `GOW3_STATIC_MESH_SNAPSHOTS=1` / `GOW3_SKINNING_WRITE_BATCH=1` / `GOW3_FORWARD_COPY_DEFER=1` (last also needs forwarded copies). All opt-in. At 4K DLAA M, `C:/dev/bench/market_bottleneck1` has updated CPU/GPU/timeline evidence: not CPU saturation across twelve threads; solver-matrix readback dependencies and GPU/DLAA cost remain. Do not claim the older CPU-bound profile is the 4K bottleneck ranking.
 
@@ -102,3 +103,23 @@ The toolchain is MSYS2 CLANG64. From Git Bash, wrap commands like this:
 - Code comments explain the why with dated evidence (e.g. "17 Oct profile: …"); match that density and style.
 - `.claude/ship.md` has the ship rules: the commit rules above, plus the build and test commands.
 - Game test runs: short by default (tens of seconds); long runs only for stability soaks or bug hunting. Performance claims need an A/B at the player's settings (4K, 120 FPS cap, DLAA, multithreading on) that beats run-to-run noise.
+
+## Repository upkeep
+
+Keep the documentation true and the tree clean as part of every task, in the same commit as the change that makes it necessary. The map of which document holds what is in README.md "Documentation".
+
+**Update rules (do them without being asked).**
+- A behaviour change: `CHANGELOG.md` (player wording, unreleased section) and an `analysis/STATUS.md` section with its line in the STATUS index. A STATUS section with no index line is unfinished.
+- A new or changed command, setting, `GOW3_*` variable, toggle bit, path or tool: the matching place in this file ("Commands", "Architecture", "Runtime toggles", "Measuring") and in `.claude/ship.md` when it is a build or test command. A new setting also reaches the launcher and `probe_uncharted.py` (the four places above).
+- A change players see in the package: `tools/README-Windows.txt` if it changes how they install or play, and `tools/github/README.md` / `tools/github/CHANGELOG.md` at release time (the public copies).
+- A new top-level folder, document or asset folder: README.md "Repository layout" / "Documentation".
+- A fact that changed on this PC (installed tools, paths, Python versions, SDK locations): fix every line that states the old one; grep for it.
+- Dated facts stay dated ("since 19 Oct"). When one stops being true, change the line instead of adding a contradicting one; history belongs in STATUS and the CHANGELOG, not in the guides.
+
+**Cleanup rules.**
+- Scratch work (probes, logs, one-off scripts, captures, extracted game files) goes in the session's scratchpad or `analysis/` (ignored), never in the tracked tree. Before committing, `git status --short` must show only the task's files.
+- A file, asset or setting that a change makes unused is deleted in the same commit, with every reference (grep the name: code, package script, docs, `.gitignore`). Superseded plans are marked as history at the top (as `analysis/PLAN.md`) rather than deleted when STATUS or the CHANGELOG link to them.
+- Opt-in experiments (toggle bits, `GOW3_*` opt-ins) that a measurement rejected are removed with their code once STATUS records the result; keep only those still under test, listed in this file.
+- Generated files are rebuilt, not committed, unless the build needs a manual step (e.g. the VectorCraft traces in `gow3_pc/assets/ui/`); `.gitignore` covers the rest.
+- Merged `claude/*` branches and their worktrees are removed after the merge; never delete an unmerged branch, a Codex branch or anything outside this repository without asking.
+- Before deleting anything, look at it: report files you did not create instead of removing them.

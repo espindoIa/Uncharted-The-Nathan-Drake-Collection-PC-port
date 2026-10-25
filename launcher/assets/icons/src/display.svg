@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="24" height="24" viewBox="0 0 24 24">
+  <title>display</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path id="display" d="M5 4.5 L19 4.5 C20.105 4.5 21 5.395 21 6.5 L21 14.5 C21 15.605 20.105 16.5 19 16.5 L5 16.5 C3.895 16.5 3 15.605 3 14.5 L3 6.5 C3 5.395 3.895 4.5 5 4.5 Z" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-miterlimit="10"/>
+    <path id="display-2" data-name="display" d="M12 16.5 L12 19.5 M8 20 L16 20" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

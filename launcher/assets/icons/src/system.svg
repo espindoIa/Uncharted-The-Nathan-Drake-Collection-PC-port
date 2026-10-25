@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="24" height="24" viewBox="0 0 24 24">
+  <title>system</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path id="system" d="M18.88 9.87 L21.17 10.43 L21.17 13.57 L18.88 14.13 L18.37 15.36 L19.59 17.37 L17.37 19.59 L15.36 18.37 L14.13 18.88 L13.57 21.17 L10.43 21.17 L9.87 18.88 L8.64 18.37 L6.63 19.59 L4.41 17.37 L5.63 15.36 L5.12 14.13 L2.83 13.57 L2.83 10.43 L5.12 9.87 L5.63 8.64 L4.41 6.63 L6.63 4.41 L8.64 5.63 L9.87 5.12 L10.43 2.83 L13.57 2.83 L14.13 5.12 L15.36 5.63 L17.37 4.41 L19.59 6.63 L18.37 8.64 Z" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="system-2" data-name="system" d="M9 12 C9 10.343 10.343 9 12 9 C13.657 9 15 10.343 15 12 C15 13.657 13.657 15 12 15 C10.343 15 9 13.657 9 12 Z" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-miterlimit="10"/>
+  </g>
+</svg>

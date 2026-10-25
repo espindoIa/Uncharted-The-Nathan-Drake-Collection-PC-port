@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "gow3_flight.h"
 #include "gow3_toggles.h"
 
 #include "video_core/host_shaders/camera_motion_comp.h"
@@ -362,6 +363,10 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
     camera.uv_to_view = {c[0], c[1], c[2], c[3]};
     camera.depth_to_z = {c[8], c[9]};
     std::copy_n(c + 12, 12, camera.to_world.begin()); // for GetFrameGenCamera
+    // gow3 25 Oct 2026: the camera for the flight recorder (a cut the upscaler misses); the
+    // projection scale as TaaDepthParameters gives it.
+    Gow3Flight::Camera(c + 12, c[0] != 0.0f ? 2.0f / c[0] : 0.0f, c[1] != 0.0f ? -2.0f / c[1] : 0.0f);
+    CheckCut(c + 12); // a cut: RecordVelocity writes zero motion (mode 3)
     camera.valid = c[9] != 0.0f &&
                    std::all_of(camera.to_previous_clip.begin(), camera.to_previous_clip.end(),
                                [](float v) { return std::isfinite(v); });
@@ -412,7 +417,7 @@ void CameraMotion::RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_
         .size = {float(width), float(height)},
         .jitter = jitter,
         .previous_jitter = previous_jitter,
-        .mode = objects ? 4u : camera.valid ? 2u : 3u,
+        .mode = camera_cut ? 3u : objects ? 4u : camera.valid ? 2u : 3u,
     };
     const vk::DescriptorImageInfo depth_info{.imageView = depth_view,
                                              .imageLayout = vk::ImageLayout::eGeneral};
@@ -457,6 +462,8 @@ void CameraMotion::OnConstants(const float* data) {
     std::memcpy(current.inv_view.data(), data + 180, 12 * sizeof(float));
     current.proj = {data[52], data[57], data[62], data[63]};
     current.valid = current.proj[0] != 0.0f && current.proj[1] != 0.0f;
+    Gow3Flight::Camera(current.inv_view.data(), current.proj[0], current.proj[1]); // 25 Oct 2026: flight recorder
+    CheckCut(current.inv_view.data());
     const std::array<u32, 2> size{u32(data[4]), u32(data[5])};
     if (size != render_size) {
         std::printf("Camera motion: scene render size %ux%u\n", size[0], size[1]);
@@ -479,6 +486,8 @@ bool CameraMotion::OnFlatConstants(const u32* data, std::size_t count,
     current.inv_view = camera->inv_view;
     current.proj = camera->proj;
     current.valid = true;
+    Gow3Flight::Camera(current.inv_view.data(), current.proj[0], current.proj[1]); // 25 Oct 2026: flight recorder
+    CheckCut(current.inv_view.data());
     const auto& image = texture_cache.GetImage(depth);
     const std::array<u32, 2> size{image.info.size.width, image.info.size.height};
     if (size != render_size) {
@@ -491,6 +500,24 @@ bool CameraMotion::OnFlatConstants(const u32* data, std::size_t count,
     return true;
 }
 
+void CameraMotion::CheckCut(const float* to_world) {
+    // gow3 25 Oct 2026: once per frame (the velocity pass may be drawn more than once). The
+    // detector always sees the camera, so switching the toggle live starts from a fresh pose.
+    if (cut_checked) {
+        return;
+    }
+    cut_checked = true;
+    const float pos[3] = {to_world[3], to_world[7], to_world[11]};
+    const float fwd[3] = {to_world[2], to_world[6], to_world[10]};
+    const double t = std::chrono::duration<double>(
+                         std::chrono::steady_clock::now().time_since_epoch()).count();
+    camera_cut = cut_detector.Check(pos, fwd, t) &&
+                 !Gow3Toggle::Disabled2(Gow3Toggle::CameraCutReset);
+    if (camera_cut) {
+        previous = current; // scene-constant and flat cameras: identity reprojection, zero motion
+    }
+}
+
 void CameraMotion::OnGBufferPass(VideoCore::ImageId depth) {
     depth_id = depth;
 }
@@ -499,8 +526,12 @@ void CameraMotion::OnDisplayPass(VideoCore::ImageId frame) {
     if (debug_overlay && frame && depth_id && current.valid && previous.valid) {
         Overlay(frame);
     }
+    // gow3 25 Oct 2026 (flight recorder): a frame without its camera. Velocity mode (Uncharted)
+    // never sets frame_has_camera, so its own camera decides there.
+    if (velocity_mode ? !velocity_camera.valid : !frame_has_camera) Gow3Flight::Event(Gow3Flight::NoCamera);
     if (!frame_has_camera) InvalidateHistory();
     frame_has_camera = false;
+    cut_checked = camera_cut = false;
     depth_id = {};
     velocity_camera.valid = false;
 }

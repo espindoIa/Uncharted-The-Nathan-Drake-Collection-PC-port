@@ -4,6 +4,7 @@
 #include <xxhash.h>
 #include "video_core/amdgpu/liverpool.h"
 
+#include "gow3_flight.h"
 #include "gow3_toggles.h"
 #include "common/assert.h"
 #include "common/debug.h"
@@ -1909,6 +1910,9 @@ void TextureCache::GarbageCollectImages() {
             ++downloads;
         }
         ++gc_evictions;
+        // gow3 25 Oct 2026: an image freed under memory pressure, for the flight recorder (an
+        // evicted texture reloaded a frame late is a flash suspect).
+        Gow3Flight::Count(Gow3Flight::GcEvictions), Gow3Flight::Event(Gow3Flight::TextureGcEvict);
         FreeImage(image_id);
         if (limits) {
             --num_deletions; // only freed images use the quota

@@ -138,6 +138,10 @@ public:
         return composite_frames;
     }
 
+    /// gow3 24 Oct 2026: true for the game's FXAA draw (GOW3_GAME_AA_PS) while a temporal AA is
+    /// active: the rasterizer skips it. Not with composite_frames (that draw chain is replaced).
+    [[nodiscard]] bool SkipsGameAa(u64 ps_hash) const;
+
     /// gow3 22 Oct 2026: DLSS Frame Generation's inputs from one upscaled frame: copies of its
     /// depth and motion vectors (render size, General layout), its camera, jitter and reset.
     struct FrameGenInputs {
@@ -185,6 +189,8 @@ private:
 
     void Run();
     void RunScaled();
+    /// gow3 25 Oct 2026: a camera cut this frame (CameraMotion::CameraCut) drops the history.
+    void NoteCameraCut();
     void RunUiOnly(VideoCore::ImageId color, VideoCore::ImageId depth);
     void EnsureUiResources(u32 width, u32 height, vk::Format color, vk::Format depth);
     void PrepareUiDepth(VideoCore::ImageId depth);
@@ -317,6 +323,8 @@ private:
     VideoCore::ImageId tonemap_target{};
     bool tonemap_pending = false;     ///< the next draw upscales tonemap_target
     bool composite_frames = false;  ///< OnComposite replaces the frame's display copy
+    u32 game_aa_ps = 0;             ///< GOW3_GAME_AA_PS: the game's FXAA pixel shader, skipped
+    mutable bool game_aa_logged = false;
     bool composite_done = false;    ///< this frame's OnComposite ran: its UI draws follow
     HostPasses::FsrPass fsr1_pass;  ///< FSR 1 (EASU) at OnComposite without a temporal upscale
     bool fsr1_created = false;

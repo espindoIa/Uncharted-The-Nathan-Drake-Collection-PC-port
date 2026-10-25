@@ -23,5 +23,7 @@ perf.data
 mods.json
 patches.json
 !launcher/gow3.png
-# 25 Oct 2026: the games' UI art (AGENTS.md exception) is tracked
+# The games' UI art (launcher: tools/build_ui_art.py, its trace sheet rebuilt by it; game fonts:
+# tools/ui_assets).
 !assets/ui/**/*.png
+assets/ui/fonts/src/sheet.*

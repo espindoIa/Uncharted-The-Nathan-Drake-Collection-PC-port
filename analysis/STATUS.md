@@ -30,7 +30,26 @@ New entries go at the end, dated, measured numbers only.
 - Market frame rate = Reflex sleep, pacer replaces it: `Reflex pacer: market frame rate (24 Oct 2026)`
 - Upstream merges: `21 October 2026 (night): upstream 0.5.0 merged`, `Upstream 0.6.0 merged (24 Oct 2026)`
 - Launcher overhaul (sidebar, Home checklist, keyboard/controller, dialogs): `24 October 2026: launcher overhaul`
+- Session recorder and engine flight recorder (retroactive per-flip CSV for one-frame flashes): `25 October 2026: session recorder`, `25 October 2026: engine flight recorder`
+- Upscaler history reset on camera cuts, flight `d_compiles` fix: `25 October 2026: history reset on camera cuts`
+- Scene LOD bias skips explicit-LOD samplers, forced anisotropy skips unmipped ones: `25 October 2026: scene LOD bias and anisotropy follow the shader's sampling`
+- Lamp shadow passes found by what they sample and jittered: `25 October 2026: lamp shadow passes get the scene jitter`
+- Game FXAA skipped under temporal AA: `Game FXAA skipped under temporal AA (24 Oct 2026)`
 - Text and subtitles at 4K (font atlases, text shader sharpening): `Sharp text above 1080p (25 Oct 2026)`
+- Freezes and crashes (20-21 Oct): `20 October 2026: freezes before cutscenes and with multithreading (U3), upstream's fixes`, `21 October 2026: freezes after cutscenes = garbage V#s specialized compute shaders`, `20 October 2026: U1 0x64011f crash (red zone) and the nested-task leak`, `20 October 2026 (afternoon): 10 player crash logs (downloaded with the user's OK)`, `Evidence (player's install logs, 20-21 Oct)`
+- Write faults and load stalls (21 Oct): `21 October 2026: chapter-load write faults from file reads`, `21 October 2026: write faults in gameplay: prewait for GPU-written pages`, `21 October 2026: first-gameplay-frame DLSS stall; slow-submit detail`, `21 October 2026 (afternoon): post-movie stall, alley-load stalls, chapter 2 FPS`, `21 October 2026 (evening): chapter 2 CPU limit, SRT pipe drains`
+- Laptops and memory (20 Oct): `20 October 2026 (evening): hybrid-laptop freezes = present under the submit lock (fix built)`, `20 October 2026 (night): laptop freezes = port on a USB exFAT drive`, `20 October 2026 (night): GitHub #95 memory, proper fix (built, laptop test pending)`, `20 October 2026 (night): CPU savings confirmed on the NVIDIA GPU; 780M memory placement`
+- Shader caches: `20 October 2026: pipeline cache carried over; U3 chapter 2 frame rate`, `21 October 2026 (night): U3 museum red floor = damaged shader cache pair (FIXED, verified)`, `21 October 2026: compile-storm leftovers in old shader caches (#92, #95)`
+- Upstream ports and PRs: `21 October 2026 (evening): upstream fixes ported (batch 1)`, `Upstream (BilalReloaded) 0.4.1 / 0.5.0 notes, merged 21 Oct`, `20 October 2026 (afternoon): PR #87 merged (job sleep on game version 1.00)`
+- US copy: `20 October 2026 (evening): US copy (CUSA02320) tested, E:\uncharted usa`
+- Multi-core phases 5b-6 (22 Oct): `21 October 2026 (late night): which compute shaders fill the pipe`, `22 October 2026: stage A per-dispatch memos (roadmap phase 5b)`, `22 October 2026: phase 5c, A-to-B draw pipe measurements`, `22 October 2026: what keeps stage A and B waiting for each other (roadmap phase 6 prep)`, `22 October 2026: page tick write-back cache (roadmap phase 6a, stage B)`, `22 October 2026: fence wait for its packet's position instead of a full drain (tried, not kept)`
+- GPU memory coherence fixes (24 Oct): `24 October 2026: CpuCleanToken re-checks the change counter`, `24 October 2026: DiscardCpuWritePage clears gpu_add_cache`, `24 October 2026: DMA_DATA skip only for address destinations`, `24 October 2026: compute DMA_DATA waits for host copies`
+- U3 visual and frame-rate reports (24 Oct): `Market hitches: diagnostics, not reproduced (24 Oct 2026)`, `U3 Sully shirt stretched: LDS out of bounds (24 Oct 2026)`, `U3 chapter 2 frame drop: player capture, stage B limit, two opt-ins re-measured (24 Oct 2026)`, `Crowd skinning dispatch runs (24 Oct 2026, opt-in)`, `U3 blur suspects: jitter and DOF diagnostics (24 Oct 2026)`
+- DLAA LOD bias: `21 October 2026 (night): DLAA texture LOD bias -1 (toggle bit 4096)`
+- U1 treasure models: `24 October 2026 (night): U1 treasure models, synchronous shaders again`
+- Launcher lettering (the games' font and logo, vector, `tools/build_ui_art.py`): `25 October 2026: launcher lettering from the games' files`
+
+- Launcher redesign (stage, per-game colour, 4K icons, trophy coins): `Launcher redesign and 4K-sharp drawing (25 Oct 2026)`
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
@@ -3663,6 +3682,116 @@ What would still cut the fence and fault-flush waits (not done):
 
 Not verified: no 4K run, no soak run, no GOW3_READBACK_RACE run; U1 and U2; other U3 chapters (one scene measured); each number is from one run.
 
+## 24 October 2026: CpuCleanToken re-checks the change counter
+
+Mechanism: `RegionManager::CpuCleanToken` read `cpu_changes_done` and `cpu_changes_started` (equal), then the CPU bits, and returned `started + 1` without reading `started` again (a seqlock without its second check). Stage B starts a change (started = n+1, `cpu.UnsetRange(P)`, protection not yet applied). Stage A reads the bits of P as clean and gets token n+1. A guest store to P lands after the ring copy (page still writable: no fault, no StampSet). Stage B then protects P and sets done = n+1. `CpuUnsetSince(stamp < token)` later passes and the stale ring copy is reused. Only sets leave a stamp, clears do not.
+
+Fix: after `cpu.AnyInRange`, `std::atomic_thread_fence(std::memory_order_acquire)`, then reload `cpu_changes_started` and return 0 if it differs from the first read (this also covers a change that started and finished in between). The fence is needed because the bit reads are not atomic loads of that member. No other behaviour change.
+
+Not verified: no game run; GOW3_RING_REUSE_CHECK=1 was not run after the change; race never observed (found by static review).
+
+## 24 October 2026: DiscardCpuWritePage clears gpu_add_cache
+
+Mechanism: `GpuRangesAdd` returns early on a `gpu_add_cache` hit (same address and size) without adding to `gpu_modified_ranges`. `GpuRangesSubtract` clears the entries overlapping the range, but `DiscardCpuWritePage` (21 Oct file-read path) called `gpu_modified_ranges.Subtract(page, 4096)` directly and left them. A later GPU write with the same address and size hit the stale entry, was not added back, and later downloads of that page skipped the GPU bytes. These were the only two Subtract call sites.
+
+Fix: the entry-clearing loop of `GpuRangesSubtract` is now `GpuAddCacheDrop(address, size)` (caller holds `gpu_ranges_mutex`). `GpuRangesSubtract` calls it after Subtract; `DiscardCpuWritePage` calls it with `(page, 4096)` right after its Subtract, inside the same lock block. No other behaviour change.
+
+Not verified: no game run; never observed (found by static review).
+
+## 24 October 2026: DMA_DATA skip only for address destinations
+
+Mechanism: commit e1df90a replaced `ASSERT(das == 0)` with a skip of every DMA_DATA packet whose `command.das` is set (RunDmaData, the graphics caller's NotePendingGpuWrite guard, the compute queue case). Per the AMD PM4 spec DAS (destination address space: memory or register) only applies when the destination is an address (dst_sel Memory or MemoryUsingL2). With dst_sel Gds it has no meaning and the packet must run, but the skip dropped such a GDS write silently.
+
+Fix: file-local `DmaDstIsRegister(d)` in liverpool.cpp returns `das != 0 && dst_sel in {Memory, MemoryUsingL2}`. RunDmaData and the compute case skip on it; the graphics caller's guard is `!DmaDstIsRegister(...)`. The once-only log now prints dst_sel too. Packets with dst_sel Gds run as before e1df90a. No other behaviour change.
+
+Not verified: no game run; no Uncharted scene known to send das=1.
+
+## 24 October 2026: compute DMA_DATA waits for host copies
+
+Mechanism: the graphics RunDmaData and the compute WriteData call `WaitHostCopies()` and `WaitDeferredSignals()` before they write guest memory. The compute-queue `case PM4ItOpcode::DmaData:` (Liverpool::ProcessCompute) did not: after the DmaDstIsRegister skip it ran the FillBuffer/CopyBuffer CPU paths on stage A at once. (a) An earlier dispatch's deferred guest->staging upload copy (recorder thread) could run after this DMA wrote the range, so that dispatch uploaded the post-DMA bytes. (b) A pipelined RELEASE_MEM label deferred to the recorder could be overtaken by this guest-visible write.
+
+Fix: `WaitHostCopies(); WaitDeferredSignals();` before the three branches that write guest memory with a Memory/MemoryUsingL2 destination: Data -> Memory, Gds -> Memory, and the non-patch CopyBuffer of Memory -> Memory. Not added: the Gds-destination branches (no guest write), the `indirect_patches.emplace_back` path (no guest write; a wait there would stall every dispatch), NoteOvertake (graphics-only helper). No other behaviour change.
+
+Not verified: no game run; not known how often U3 sends compute DMA_DATA to memory; never observed (found by static review).
+
+Reviewed, not changed (24 Oct 2026). Each needs a game run (GOW3_UPSCALER_TRACE / boot.log) or a shader-cache version bump before changing:
+1. FMask T# makes the resource list depend on the T# (resource_patching_pass.cpp:294-341, `descriptors.Add` skipped).
+2. The effect-family garbage rule nulls unbounded raw V#s (resource.h:116-134).
+3. BufferSpecialization lacks add_tid_enable.
+4. access_extent comes from permutation 0.
+5. Baked stride for a null-filtered slot.
+6. DumpConstRam memcpy without WaitHostCopies (liverpool.cpp:1418).
+7. Ring copies vs pending GDS stores / compute labels (vk_rasterizer.cpp:2051).
+8. No history reset after movie/load frames without a frame start, no camera-cut detection (vk_camera_motion.cpp:442).
+9. World-space single-quad draws get no jitter (vk_rasterizer.cpp:3445).
+
+## 25 October 2026: session recorder
+
+Why: bug reports from players arrive as a sentence and maybe a screenshot. Everything needed to
+read one (build, settings, log around the moment, memory growth, exit code) existed but was
+scattered over the install folder and overwritten by the next launch. `tools/session_recorder.py`
+(started with `Record-Session.cmd`; both are shipped in the package) collects it per run.
+
+**Design.** A separate stdlib-only process, below-normal priority, that never opens the game's
+log for writing, never reads the game's memory and never injects. It polls for `Uncharted.exe`,
+records one session, finalizes it when the process ends and waits for the next launch. The
+install root and the `out` dir come from the game's own command line (`<root>\analysis\<name>\boot-linked.bin`,
+read once through `Get-CimInstance Win32_Process`), so it works against an older installed
+package. `--root`, `--out-dir`, `--sessions-dir` override. Folder:
+`<root>\analysis\uncharted-user\sessions\<YYYYmmdd-HHMMSS>_<out dir name>\` (the time is the
+process creation time, so a recorder started late still names the run correctly).
+
+| File | What |
+| --- | --- |
+| `session.json` | Recorder version, start (local + UTC), Windows, CPU (registry), RAM, GPU (`nvidia-smi` csv with max clocks and power limit; `Win32_VideoController` if missing), resolution, power plan, game exe path/size/mtime/sha256, `VERSION`, git HEAD (reads `.git\HEAD` only), the process command line, `launcher.json`, the recorder's own `GOW3_*`/`UNCHARTED_*` variables. Written in stages, usable after each. |
+| `config\` | Copies of `probe-u1/u2/u3.ini`, `test-env.txt`, `disabled-optimizations.txt`. |
+| `boot.timed.log` | `boot.log` polled every 0.5 s, each new complete line prefixed `HH:MM:SS.mmm`. A shrinking file restarts from 0. Lines already in the log when the recorder attached are stamped `--:--:--.---`. |
+| `events.txt` | Lines matching warning/error/assert/unsupported/fail/Dropped/garbage/skipped/corrupt/mismatch/Hang watchdog/Texture cache: memory/first unsupported/exit code, plus Frame stats windows with a worst frame over 40 ms or any shader/pipeline compile. An identical line is written 20 times, then counted. |
+| `metrics.csv` | Every 2 s: process CPU % (of all cores) and cores busy (`GetProcessTimes` delta), working set, private bytes, threads (Toolhelp snapshot), handles, free system RAM, GPU util/memory/clock/temp/power (one long-running `nvidia-smi -lms 2000` child, several GPUs: the one with most memory in use), foreground window title. |
+| `marks\NN_<label>_<time>\` | `mark.json` (label, time, elapsed since process start, log byte offset and line number, last Frame stats line, latest metrics row, foreground window, game window rectangle, what the screenshot and the dump did), `log_tail.txt` (last 300 timed lines), `screen.png` (GDI `BitBlt` of the game window's rectangle from the screen DC; an all-black result is retried once from the whole primary screen and `mark.json` says so; PNG written by hand with zlib), `engine_dump\` (see below). |
+| `markers.log` | One line per mark. |
+| `boot.log`, `boot.json`, `frametimes.txt`, `framelog.txt`, `launcher-last-run.log` | Final copies at the end (skipped with a note when older than the session). |
+| `hang\` | `hang-*.txt` reports of the run; `.dmp` files are hundreds of MB and are only named in `summary.md`. |
+| `windows_events.txt` | Application-log events mentioning Uncharted in the session window (`wevtutil`). |
+| `summary.md` | Duration, exit code (0xC0000005-style statuses flagged, `1` noted as what STOP/taskkill leaves), marks, FPS min/median/avg and worst frame (counts are of 5 s windows, the log keeps only each window's worst frame), shader compiles, average/peak of the metrics, top repeated warnings, notes. |
+| `recorder.log` | Only created when a worker raised; every worker and finalize step is wrapped so one failure never loses the others. Files are flushed after each write, so a killed recorder leaves usable files. |
+
+**Hotkeys.** `RegisterHotKey` on a dedicated thread with its own message loop (`MOD_NOREPEAT`);
+default F7 texture, F8 geometry, F9 flash, F10 other, `--keys "F7=texture,..."` changes them.
+A key another application owns is reported and the others still work. The press runs in a worker
+thread (a mark takes seconds), the same key is ignored for 3 s. `winsound.Beep` gives feedback
+because the game is fullscreen: one short = captured, two = engine dump done too, low long = failed.
+Engine dump: if `<out>\dumps` exists (the game started with diagnostics) the recorder creates
+`<out>\dumps\trigger`; the presenter takes it (`GOW3_FRAME_DUMP_TRIGGER`, vk_presenter.cpp) and
+writes the next frame's guest display buffer and presented image as `name_index_WxH.raw`
+(32-bit pixels) to `GOW3_DUMP_DIR`. The recorder waits up to 4 s for new files, then until their
+sizes stop changing (the readback is deferred), moves them into the mark and removes a trigger the
+game did not take. Limits: `--max-engine-dumps` (20), `--no-engine-dump`, and less than 2 GB free on
+the session drive skips screenshots and dumps (noted in `mark.json`). `boot.timed.log` and
+`events.txt` stop at 200 MB each with a note. The recorder sets the console out of QuickEdit
+mode (a click in the window would otherwise block its printing).
+
+**Limits.**
+- No per-thread CPU: one `GetProcessTimes` delta for the whole process, to stay under 1 % of a core.
+- The game's own environment cannot be read from outside. `session.json` holds the recorder's variables and says so; what the game got follows from `config\` plus `test-env.txt`.
+- `boot.log` has no times: lines are stamped when seen, so +-0.5 s. A game that was already running when the recorder started has its earlier lines marked unknown.
+- The GDI screenshot can be black or stale for exclusive-fullscreen / flip-model Vulkan windows; then the engine dump is the reliable image. The raw dump is not a PNG.
+- The hotkeys are global and are taken from whatever has focus, so they clash with game or overlay keys (change with `--keys`).
+- A dump request makes the presenter copy two images to the host: expect one hitch of a frame or two on a mark.
+- Only the first `Uncharted.exe` found is recorded; sessions are sequential.
+
+**Tests.** `python tools/session_recorder.py --selftest` (temp fake root; a dummy `python` child that exits with code 3 stands in for the game; a fake presenter thread answers the trigger; the hotkey registration is skipped and the mark routine is called directly) and `gow3_pc/tests/test_session_recorder.py` (line classification, Frame stats parsing, duplicate collapsing, log tailing with partial lines and truncation, PNG encoding, BGRA conversion, command-line parsing, exit-code text, summary). Both ran green on the development machine (Windows 11, RTX 5070, `nvidia-smi` present: its field names were checked against the real tool).
+
+**Not verified.** No real game run: the hotkeys over a fullscreen Vulkan window (focus, whether
+`RegisterHotKey` keys arrive while the game has the keyboard), the screenshot of a real game
+window (black or not, DPI, borderless vs exclusive), a real engine dump through the trigger
+(only a fake presenter answered), the command-line parse against a real `Uncharted.exe` command
+line (tested on strings shaped like it), `boot.json` timing at a real exit, the overhead on the
+game (not measured; the design budget is one `GetProcessTimes`/Toolhelp pass every 2 s plus a
+0.5 s file poll), long-session behaviour, a killed game (STOP) and a crashed one (exit code
+from the handle), multi-GPU machines, non-NVIDIA machines (the `Win32_VideoController` fallback
+was not run), localized Windows beyond the OEM-codepage decode of tool output.
+
 ## Reflex and DLSS Frame Generation (22 Oct)
 
 Decisions.
@@ -4366,6 +4495,341 @@ Toggle bits: upstream 0.6.0 adds none (no Disabled/Disabled2 use in its diff); t
 
 Not verified: any game run (boots are the user's); the save profile, vibration and overlay rows in the launcher GUI; direct mouse aim with the fork's aim patches; GOW3_MIP_TARGETS with the fork's scene-resolution and upscaler paths in U3; dispatch-run counts with upstream's null-V# rule; carry_over on a real update.
 
+## Game FXAA skipped under temporal AA (24 Oct 2026)
+
+Evidence: U2 capture C:\dev\cap\frame_20261017-214933_3.txt, passes #54-#56. #54 (ps 484cdbf5 plus
+HUD draws) writes the frame into the display buffer (R8G8B8A8Srgb). #55 (ps 6bd1e015) copies it
+into a temp RGBA8Unorm with luma in alpha. #56 (ps 749bbec9) is FXAA 3.11 quality 39 (subpix
+0.75, edge thresholds 0.166/0.0833; decompiled from the shader dumps) and writes back into the
+display buffer. Same hash in the U1/U2/U3 caches. The port's upscaler runs earlier, at cs
+aec539f0 on the HDR scene, so FXAA softened an already anti-aliased image and the HUD.
+
+Design: tools/probe_uncharted.py sets GOW3_GAME_AA_PS=749bbec9 in the temporal-AA branch.
+TemporalUpscaler::SkipsGameAa(ps_hash) is true when it matches, Active(), !composite_frames and
+Disabled2(GameFxaa) is clear. The rasterizer's draw returns right after the OnComposite block when
+the draw's colour target is a display buffer and SkipsGameAa is true (bind_prepared cleared as in
+the OnComposite return); the frame-start gate is unchanged. #54's image stays in the display
+buffer; only alpha differs (0 instead of luma). The presenter ignores display alpha:
+vk_presenter.cpp:799 (view alpha swizzle eOne) and :810 (same on the upscaled path), swapchain
+composite alpha opaque (vk_swapchain.cpp:359); post_process.frag passes alpha through but sees 1.
+Toggle: Disabled2 bit GameFxaa = 1 << 46 (70368744177664; 1 << 40 and 1 << 41 are DispatchRuns and RunReleaseBatch). Bit 1 << 31 (2147483648) is already
+RingAssociative, so it could not be used. Set = the game's FXAA runs.
+
+Not verified: in-game A/B (pending), U1/U2/menu.
+
+Measured (24 Oct 2026, 14:14-14:16):
+
+- U3 bar after Continue, 2560x1440 DLAA, model K, frame dumps (GOW3_FRAME_DUMP_TRIGGER, display
+  buffer), Laplacian variance x1e4 of luma; wall crop 1100-1353 x 373-547 (the 21 Oct 4K crop
+  scaled to 1440p).
+- One valid pair (same pose): FXAA skipped wall 2.27 / frame 10.13; FXAA on wall 1.51 / frame
+  8.35 (+50% wall, +21% frame; run-to-run noise ~9% from 21 Oct).
+- Rounds 2-3 are not usable: Nate turned between dumps, then the game paused and the window was
+  closed by the player mid-run.
+- Not verified: more pairs, the player's DLSS Quality 3840x2160 setup, U1, U2, the menu, motion.
+
+## U3 blur suspects: jitter and DOF diagnostics (24 Oct 2026)
+
+Suspects: (A) scene draws left without the upscaler jitter, (B) the depth-of-field factor target.
+In DrawRecord the jitter goes to draws with the scene depth only when num_indices > 6 or more than
+one instance; smaller non-instanced draws (decals, quads) get none, so under DLSS they would sit
+about 1 px off the jittered scene. Three opt-in switches, all off by default (no behaviour change):
+
+- `GOW3_JITTER_STATS=1`: counts the draws with the scene depth under an upscaler (the
+  GOW3_JITTER_PS full-screen passes are left out). Every ~5 s: `Jitter stats: <frames> frames,
+  jittered x/frame, unjittered y/frame; top unjittered ps: <hash> x<count> (idx n inst m) ...`
+  (top 5, index and instance count of the last draw seen). Frames = Gow3Stats::gpu_frames delta.
+- Disabled2 bit `JitterSmallDraws` = 1 << 47 (140737488355328), inverted sense: set = those small
+  draws get the jitter too. Opt-in because a full-screen quad with the scene depth may leave an
+  edge column unwritten. Set it in disabled-optimizations.txt (second number) and A/B with the
+  stats line and a frame dump.
+- `GOW3_TARGET_DUMP_PS=<hex>[,<hex>...]` + `GOW3_TARGET_DUMP_TRIGGER=<file>`: creating the file
+  arms the next GPU frame; after each draw with a listed pixel shader (low 32 bits of the hash)
+  its colour target 0 (whole image, mip 0 layer 0) goes to `$GOW3_DUMP_DIR` (default out/dump) as
+  `target_<hash>_<frame>_<n>_<w>x<h>_<vkformat>.raw`, written when the GPU is done. At most 8 per
+  trigger. The pass ends after such a draw (the next draw begins a new one), so only use it to
+  measure.
+
+Not verified: none of the three was run (build only).
+
+Measured (24 Oct 2026, same run):
+
+- GOW3_JITTER_STATS: ~336 jittered and 5.0 unjittered scene-depth draws per frame; all unjittered
+  are 6-index single-instance draws of ps c11d3e2c (2/frame), 0bae6524, ab30daa9, f76d1599
+  (1/frame each). Not A/B'd with JitterSmallDraws; whether they are full-screen quads is not
+  checked.
+- DOF factor (ps 4c610459 target, 2560x1440 R8): 0 in every pixel of the gameplay frame, so the
+  tonemap's DOF blend is 0 there: suspect ruled out for this scene (aiming and cutscenes not
+  checked).
+
+## 25 October 2026: engine flight recorder
+
+Why: one-frame flashes, flickers and ghosts are reported but cannot be predicted, so no capture is
+running when one happens, and a key pressed afterwards (the session recorder's F9) only catches the
+frames after it. The engine already knows the numbers that would explain most of them (an upscaler
+reset or not, a camera cut, a draw dropped while its pipeline compiled, a texture evicted, a stall),
+but only prints 5 s summaries. The flight recorder keeps those numbers for every presented flip in a
+ring and writes the ring out after the fact. This also answers open item 8 of the 24 Oct audit list
+above ("no camera-cut detection"): the recorder does not fix it, it shows whether cuts go unnoticed.
+
+**Design** (`gow3_pc/gpu/shim/gow3_flight.{h,cpp}`).
+- `Gow3Flight::OnFlip(movie, frame_gen)` is called at the top of `VideoOutDriver::Flip` (driver.cpp), which the present thread runs once per presented guest flip (early presents included, their later completion not). It runs whenever `GOW3_FLIGHT` is not `0`, independent of `GOW3_FRAME_STATS`.
+- Hot path: an atomic-flag guard (a second caller drops its row, no mutex), one steady clock read, two `exchange`s (events and detail), ~17 relaxed loads of cumulative counters, 20 gauges, one 240-byte row written word by word into a preallocated ring slot under a per-slot sequence lock, the anomaly rules (a few float operations; a 32-value `nth_element` only when an interval is over 60 ms or the camera moved over the cut floor, 0.25 units; one `acos`). No lock, allocation, file access or print. Measured in flight-test (RelWithDebInfo, this machine, 25 Oct): `Record` 48 ns/call with a walking camera, 91 ns/call with the median run every flip, the whole `OnFlip` 65 ns/call. The first call allocates the ring, starts the dump thread and prints one `Flight:` line (once per process).
+- Hooks elsewhere are one-liners: `Gow3Flight::Event(bit, detail)` (`fetch_or`), `Gow3Flight::Count(id)` (`fetch_add`), `Gow3Flight::Gauge(id, value)` (store of the float bits), `Gow3Flight::Camera(view_to_world, proj_x, proj_y)`; with `GOW3_FLIGHT=0` each is one load of a const flag. None changes rendering.
+- Counters zeroed by the 5 s Frame stats printer (`g_gow3_compiles`, `g_gow3_pending_draws`, `tracker_faults`, `host_copy_waits`, `reduced_draws`, ...) are not read; the recorder counts compiles and skipped draws itself next to the same sites.
+- Dump thread (one, started at the first flip, polls every 50 ms): takes the trigger file (`Gow3TriggerFiles::Watch("GOW3_FLIGHT_TRIGGER")`, the shared 250 ms watcher), holds up to 4 requests, and writes a request once 60 more flips were recorded or 2 s passed (so a request still gets written when the flips stop). It copies the rows out of the ring (rows being rewritten are dropped by the sequence lock; at most a few of the oldest are lost while it copies), builds the CSV, writes `<name>.tmp` and renames it. A failed dump prints one `Flight: dump <reason> failed: ...` line and goes on; a written one prints `Flight: wrote <file> (<n> flips)`.
+- The trigger file is polled by the dump thread, not inside OnFlip as first planned: Take() locks a mutex when a file is pending, and a frozen game (no flips) could then never take an F10 "freeze" mark.
+
+**Hook sites.**
+
+| Site | Feeds |
+| --- | --- |
+| driver.cpp `VideoOutDriver::Flip` | OnFlip; MovieFrame (a movie frame decoded in the last 300 ms, `MovieActive`), fg_on (`Presenter::FrameGenActive`) |
+| vk_pipeline_cache.cpp `CompileTimer` | Count Compiles, PipelineCompiled |
+| vk_pipeline_cache.cpp `GetGraphicsPipeline` (both `++g_gow3_pending_draws`) | Count SkippedDraws, DrawSkippedPendingCompile |
+| vk_temporal_upscaler.cpp `OnFrameStart` | UpscalerReset 1 (settings changed) / 2 (not run last frame), only when `reset` was clear; out_w, out_h |
+| vk_temporal_upscaler.cpp `OnDispatch` | UpscalerReset 3 (trigger without scene color/camera), only when `reset` was clear |
+| vk_temporal_upscaler.cpp `EnsureResources` | UpscalerFeatureCreated, UpscalerReset 4 |
+| vk_temporal_upscaler.cpp `RunUiOnly` / `UpscaleToUi` (stretched) | StretchedOrUiFrame every such frame; UpscalerReset 5 / 6 when `reset` was clear |
+| vk_temporal_upscaler.cpp `RecordFsr4` / `EnsureDlssFeature` / `RecordDlss` | UpscalerReset 7 (FSR 4 fallback), UpscalerFeatureCreated + UpscalerReset 8 (DLSS feature created), UpscalerReset 9 (DLSS fallback) |
+| vk_rasterizer.cpp frame start (after `OnFrameStart`) | HistoryInvalidated (when OnFrameStart reports a change); jit_x, jit_y, lod_bias (`SceneMipBias`) |
+| vk_camera_motion.cpp `OnConstants`, `OnFlatConstants`, `OnVelocityConstants` | cam_*, fwd_*, proj_* (velocity mode: proj = 2/c0, -2/c1 as `TaaDepthParameters`) |
+| vk_camera_motion.cpp `OnDisplayPass` | NoCamera (velocity mode: no valid velocity camera this frame; it never sets `frame_has_camera`, so that flag would say "no camera" every Uncharted frame) |
+| texture_cache.cpp GC pass (`++gc_evictions`) | Count GcEvictions, TextureGcEvict |
+| gow3_flight.cpp OnFlip from `Gow3Settings` | scene_w/h (`active_render_width/height`), upscaler, preset, dlss_model |
+| vk_presenter.cpp `PresentLoadingFrame` (after the image is acquired) | LoadingFrame |
+| vk_presenter.cpp `Present` (own DLSS frame generation path) / `StreamlineFrameGen` | presents: 2 when `PresentGenerated` showed a generated frame, else 1; Streamline: `FgState::presented` (1 while its frame generation is unloaded or not wanted) |
+
+**Contract** (the Python side is written against it; names are stable, documented in the header comment of `gow3_flight.h`).
+- Environment: `GOW3_FLIGHT=0` disables everything (default on). `GOW3_FLIGHT_DIR=<dir>` output folder (default: `flight` next to `GOW3_DUMP_DIR`, i.e. `<parent of the dumps dir>\flight`, else `.\flight`). `GOW3_FLIGHT_TRIGGER=<file>`. `GOW3_FLIGHT_AUTO=0` disables anomaly dumps. `GOW3_FLIGHT_FRAMES=<n>` ring size (default 1024, clamped 64..8192). `GOW3_FLIGHT_CUT_MOVE=<units>` (default 0.25) and `GOW3_FLIGHT_CUT_DEG=<deg>` (default 30) tune the camjump rule; a value that is not a positive number keeps the default.
+- File: `<dir>/flight_<YYYYmmdd-HHMMSS>-<mmm>_<reason>.csv` (local time), written as `<name>.tmp` then renamed. Manual reasons are the trigger file's first line in lower case with every character other than `[a-z0-9_-]` dropped, at most 24, default `manual` (the same rule as `flight_label()` in tools/session_recorder.py, which finds the dump by it); automatic ones `auto-stall`, `auto-reset`, `auto-skipped`, `auto-camjump`.
+- Line 1: `# flight v1 unix_ms=<ms at dump> reason=<reason> frames=<rows> ring=<ring size> build=<exe file name>/<bytes>` (spaces in the exe name become `_`). Line 2: header. Then one row per flip, oldest first: the ring up to the request plus the next 60 flips.
+- Columns (47): `seq, unix_ms, t_ms, dt_ms, marker, events, event_names, event_detail, d_draws, d_dispatches, d_gpu_frames, d_compiles, d_skipped_draws, d_gc_evictions, d_images_registered, d_image_upload_mb, d_buffer_upload_mb, d_copy_mb, d_submissions, d_gc_ms, d_frame_wait_ms, d_present_ms, arena_mb, image_mb, images_live, cam_x, cam_y, cam_z, fwd_x, fwd_y, fwd_z, proj_x, proj_y, jit_x, jit_y, out_w, out_h, lod_bias, scene_w, scene_h, upscaler, preset, dlss_model, fg_on, cam_jump_deg, cam_move, presents`. `unix_ms` is the start's system clock plus the steady time (no system clock read per flip). `marker` is 1 on the row nearest the request (the stall, the reset, the cut, or the flip when a manual trigger was taken). `events` is a `0x`-prefixed hex mask (Python `int(x, 0)` reads it), `event_names` the names joined by `|`: UpscalerReset, HistoryInvalidated, NoCamera, DrawSkippedPendingCompile, PipelineCompiled, UpscalerFeatureCreated, StretchedOrUiFrame, FrameGenOnOff, TextureGcEvict, MovieFrame, LoadingFrame (bits 0..10). `event_detail` is the last detail of the flip, the UpscalerReset reason 1..9 (table above; 10 = camera cut since the next section). `d_*` are changes since the previous row (0 on the first row); `d_submissions`, `d_gc_ms`, `d_frame_wait_ms`, `d_present_ms` come from timers that only run with `GOW3_FRAME_STATS=1` and are 0 otherwise. `cam_jump_deg` / `cam_move` are the forward-axis turn and the position change vs the previous row (0 when either row has no camera). `presents` is the frames shown for the last present before the flip (1; 2 with frame generation 2x; under Streamline its own count, which it reports one more frame late; 0 when Streamline gave no state).
+- Automatic dumps (no `GOW3_FLIGHT_AUTO=0`): none in the first 5 s, 15 s cooldown per kind (skipped: 60 s), at most 30 per process, at most 4 pending requests in all. A "quiet frame" below is a row with MovieFrame, StretchedOrUiFrame or LoadingFrame (a row's events are those since the previous flip, so they cover the interval before it).
+  - stall: an interval over max(60 ms, 4x the median of the last 32 intervals) (with at least 8 intervals seen), unless the row is a quiet frame or a quiet frame came within 2 s before the interval began (a level load, a movie's end).
+  - reset: an UpscalerReset more than 5 s after start, with no quiet frame in the 2 s before; it is posted 2 s later, and dropped if such a frame comes in those 2 s (so the dump holds 2 s plus 60 flips after the marker).
+  - skipped: a flip with DrawSkippedPendingCompile in gameplay (no quiet frame in it or the 2 s before). Every row still counts the skipped draws (`d_skipped_draws`, the event).
+  - camjump: cam_jump_deg > 30 (`GOW3_FLIGHT_CUT_DEG`), or cam_move over 8x the median move of the last 32 flips and over a floor of 0.25 units (`GOW3_FLIGHT_CUT_MOVE`), with no UpscalerReset / HistoryInvalidated in the flip before, the flip itself or the 2 after (gauges are written on the GPU thread and events at the next frame start, so they can be a flip apart): the cut the upscaler did not notice, the flash suspect. The move rule is relative because the games' world units are not known; the floor only keeps a still camera's tiny moves from counting.
+- Python side (tools/probe_uncharted.py and tools/session_recorder.py, written separately against this contract): when diagnostics are on, probe_uncharted.py sets `GOW3_FLIGHT_DIR=<out>\flight` and `GOW3_FLIGHT_TRIGGER=<out>\flight.trigger`. On an F7-F10 mark the session recorder writes the mark label into the trigger file, waits for a new `flight_*_<label>.csv` in that folder (up to `FLIGHT_WAIT_S`, 8 s in its first version; the task asked for 3 s) and moves it into the mark folder's `flight\`; at the end of the session it copies the session's `*_auto-*` dumps. Timing of a manual dump: trigger watcher up to 250 ms, dump thread up to 50 ms, then 60 flips (0.5 s at 120 FPS, 2 s at 30 FPS: the 2 s cap), then the write.
+
+**Limits.**
+- Flips only: frames made by DLSS frame generation get no row of their own (fg_on and `presents` say when they exist). Loading frames the presenter draws itself (`PresentLoadingFrame`) are not flips either; they set LoadingFrame on the next row. `PresentLoadingFrame` is only called during the start-up pipeline warm-up (`Presenter` constructor, with `GOW3_BACKGROUND_WARMUP=0`), before the first flip, so level loads are silenced by the UI-only and movie frames around them, not by LoadingFrame. A load with neither (game frames, then a long gap, then game frames) still gives an auto-stall dump.
+- Numbers show causes, not pixels: a flash with no event and smooth gauges is not explained by this file.
+- Gauges are the latest values when the flip is recorded; the GPU command thread may already be in the next frame.
+- `UpscalerReset` 2 ("not run last frame") is reported once per streak, so a menu shows one reset, not one per frame.
+- No loading-screen detector apart from UI-only frames (StretchedOrUiFrame); MovieFrame is the driver's 300 ms movie-decode test.
+- No exposure gauge: the port passes no exposure value of its own (FSR 3/DLSS `preExposure` 1.0, FSR 4 auto exposure is an on/off setting), so there is nothing to record.
+
+**Tests.** `flight-test` (`gow3_pc/tests/test_flight.cpp`, CMake target `EXCLUDE_FROM_ALL`, no Vulkan): ring wrap-around (64-slot ring, 200 flips), deltas and the 47 columns of every row, the comment line, the marker (and the nearest row when the requested one is gone), stall in and after the 5 s grace, the 4x-median rule at 50 ms flips (150 ms no, 250 ms yes), the 15 s cooldown, reset with the 2 s quiet time before and after, skipped with its 60 s cooldown and the 30-dump cap, quiet frames (a 3 s gap with a loading frame and a hitch 1 s later: no stall, a hitch 2.5 s later: stall; a hitch 1 s after a movie: no stall; a reset 1 s after a loading frame: no dump; skipped during a movie or 1 s after a UI frame: no dump, 3 s after: dump), camera cuts (90 degree turn, a reset next flip cancels, a 10 degree turn does not count, a 50-unit move does; at 0.01 units per flip a 0.2 move does not count and a 0.5 move does; at 0.5 per flip a 0.5 move does not; the two environment variables and bad values), the overhead (200,000 `Record` calls in two camera cases and 200,000 `OnFlip` calls, printed, under 2000 ns asserted), label sanitising (same results as the Python `flight_label`, path characters removed), the file name, the .tmp-then-rename write (replace, and a folder that cannot be made). `ninja -C out/gpu flight-test && ./out/gpu/flight-test.exe` exits 0; the whole port (`gow3_pc/build.sh`) builds.
+
+**Not verified.** No game run (the player was playing): that OnFlip is reached at the expected rate, that a dump lands in `analysis\<game>\flight\`, the trigger round trip with the session recorder, the CSV of a real flash. The overhead is measured in flight-test only (synthetic rows, no game threads competing for the counters' cache lines), not in a game profile. Which gauges and events move at a real flash is unknown, and so is whether the camera gauges follow the shown camera in all three games (U1/U2 flat camera, velocity mode). The automatic rules' thresholds (60 ms / 4x median, 30 degrees, 8x median move over 0.25 units, 2 s quiet time, 60 s skipped cooldown) are untested on real sessions; whether Uncharted's level loads always show UI-only or movie frames (which now silence the stall rule) is not checked. `presents` was not seen with frame generation on.
+
+**Game run, 25 Oct 2026 10:05-10:25 (U3 chapter 2 meat market save, Continue, 4K, player's ini, build a5e6d10).**
+- OnFlip ran on every flip; `Flight: recording the last 1024 flips` printed once; with `GOW3_FLIGHT=0` no `Flight:` line at all.
+- Manual dump: a trigger file with "flash" was taken within ~1 s and `flight_..._flash.csv` (1022 flips) written. (The first try failed only because the test command lost a backslash in GOW3_FLIGHT_TRIGGER: the game watched `...flightflight.trigger`; read from the process environment.)
+- Automatic dumps at Continue (cold pipeline cache): auto-skipped, auto-stall (438 ms interval), auto-reset, then auto-camjump twice, then auto-stall every 40-60 s at 70-135 ms intervals.
+- First finding: the frame where the scene appears after the menu (11 draws/frame before, 434 after) moves the camera 161 degrees and 106 units with 115 draws skipped for pending compiles, and no UpscalerReset or HistoryInvalidated in that flip or the next two: the temporal history crosses the cut (the static review's "no history reset after a load" finding, now seen in numbers; not yet fixed).
+- `d_compiles` stayed 0 at the markers although PipelineCompiled events and skipped draws appeared: the Compiles counter hook in CompileTimer may not cover the background compiles (to check).
+- FPS with the recorder on / off, 30 s each after a 15 s settle, one boot each, same save: on 54.8, off 54.1, on 54.5, off 59.5. Boot-to-boot noise (about 5 FPS, the last run had the warmest cache) is far larger than any recorder cost; no cost is visible, none is proven.
+
+## 25 October 2026: history reset on camera cuts
+
+Why: the flight recorder's first game run (section above, U3 chapter 2 meat market save, Continue,
+4K) showed two unnoticed cuts per boot, the same in both boots: seq 184 (100 draws, 40 skipped for
+pending compiles) turning the camera 168.2 degrees and moving it 102.3 units, and the frame where
+the scene appears (434 draws, 115 skipped; seq 1848, and 1682 in the second boot) turning 161.5
+degrees and moving 106.5 units, with no UpscalerReset or HistoryInvalidated in that flip or the
+two after (auto-camjump dumps). The port had no camera-cut detection at all: the upscaler (DLSS, FSR 3/4, TAA) blended the
+history from before the cut into the first frames of the scene (open item 8 of the 24 Oct audit
+list).
+
+**Rule** (`gow3_pc/gpu/shim/gow3_camera_cut.h`, header-only `Gow3CameraCut::Detector`). Once per
+frame, on the frame's first camera (velocity pass constants c12..c23 in Uncharted's velocity mode,
+the scene-constant camera of U1, the flat camera of U2), compared with the previous frame's:
+- a cut when the forward axis turned more than 45 degrees, or
+- the position moved more than max(floor, 16x the median per-frame move of the last 32 non-cut
+  camera frames); floor 1.0 world unit, `GOW3_CUT_MOVE=<units>` changes it (a value that is not a
+  positive number keeps 1.0), or
+- the previous camera is older than 0.5 s (no camera frames in between: menus, movies, loads).
+- The first camera ever and a camera without a usable forward axis (length outside 0.5..2) are
+  not cuts; a cut's own move is kept out of the median.
+- Conservative on purpose: mouse flicks reach ~30 degrees per frame at 60 FPS; walking at 0.05
+  units a frame gives the 1.0 floor (16x would be 0.8), a vehicle at 0.5 a frame an 8-unit limit.
+- The flight recorder's camjump rule uses the same defaults (45 degrees, 16x over a 1.0 floor;
+  `GOW3_FLIGHT_CUT_DEG` / `GOW3_FLIGHT_CUT_MOVE` override) since 25 Oct, so a camjump dump means a
+  cut the upscaler did not reset for. Its first thresholds (30 degrees, 8x, 0.25) were stricter.
+
+**What a cut does** (`CameraMotion::CheckCut`, vk_camera_motion.cpp; `TemporalUpscaler::NoteCameraCut`,
+vk_temporal_upscaler.cpp).
+- CameraMotion sets `camera_cut` for the frame (cleared at the display pass). With the scene-constant
+  and flat cameras it sets `previous = current` (identity reprojection: zero camera motion); in
+  velocity mode `RecordVelocity` writes mode 3 (zero motion) that frame.
+- `Run` and `RunScaled` call `NoteCameraCut()` before the motion pass and before every read of
+  `reset` (TAA's reset flag, FSR 3/4 and DLSS `reset`, frame generation's `was_reset`): it sets
+  `reset`, raises the flight events UpscalerReset with the new reason 10 `ResetCameraCut` (only when
+  `reset` was clear, like the other sites) and HistoryInvalidated, and counts
+  `Gow3Stats::camera_cuts`. With `GOW3_FRAME_STATS=1` the 5 s printer adds `Camera cuts: N (upscaler
+  history reset)` when N > 0.
+- The decision does not depend on `GOW3_FLIGHT`.
+
+**Toggle.** Disabled2 bit 42 `CameraCutReset` (value 4398046511104, the next free bit after
+`RunReleaseBatch` 1<<41), read live; bit set = old behaviour (no cut detection). The detector keeps
+following the camera while the bit is set, so clearing it mid-run starts from the current pose.
+
+**`d_compiles` stayed 0: cause and fix.** The flight CSV mapping was right (`row.cum[CCompiles] =
+g_counters[Compiles]`, `delta(CCompiles)` in the right column). In the 25 Oct dumps PipelineCompiled
+appears only in row 1 and never again while hundreds of draws were skipped: the background
+compiles never reach `CompileTimer`. `CompileTimer` covers only the GPU thread's synchronous
+compiles (`CompileModule`, the synchronous branches of `GetGraphicsPipeline` / `GetComputePipeline`).
+The async shader jobs (`QueueShader`), the async graphics pipelines (`GetGraphicsPipeline`'s
+`AsyncGraphicsCompilation`) and the compute precompiles (`RunPrecompile`) run on compiler workers
+with only `PhaseTimer g_gow3_async_ns`. Fix (vk_pipeline_cache.cpp, `CountBackgroundCompile`): count
+Compiles and raise PipelineCompiled where the GPU thread publishes each result: `PublishShaders`
+(a shader or permutation registered), `PublishGraphics` (a pipeline emplaced), `Adopt` (a
+precompiled compute pipeline added; not when the GPU thread compiled it meanwhile). One count per
+completed compile; failed compiles are not counted. The 5 s `Frame stats` compile count
+(`g_gow3_compiles`, GPU-thread compile time) is unchanged. No flight-test change: the cause was
+outside gow3_flight.
+
+**Tests.** `camera-cut-test` (`gow3_pc/tests/test_camera_cut.cpp`, CMake `EXCLUDE_FROM_ALL`, no
+Vulkan): walking 0.05 units and 2 degrees a frame = no cut; a 35-degree flick = no cut; 161 degrees
+with 106 units = cut; 50 degrees alone and 106 units alone = cut; the same camera 0.6 s later = cut,
+0.4 s later = no cut; the 1.0 floor while walking; a zero forward axis ignored; a vehicle at 0.5 a
+frame: limit 8, 0.9 no cut, 9 cut; `GOW3_CUT_MOVE` 4 / -3 / abc and a 4-unit floor. Exit codes:
+`ninja -C out/gpu camera-cut-test flight-test` 0, `camera-cut-test.exe` 0, `flight-test.exe` 0
+(all passed), `gow3_pc/build.sh` 0.
+
+**Game check, 25 Oct 2026 10:36-10:40** (U3, walking with the left stick). Both Continue cuts
+(168.2 degrees / 102.3 units at seq 188; 161.5 degrees / 106.5 units at the scene's first frame)
+now carry UpscalerReset reason 10 + HistoryInvalidated. `d_compiles` now counts (87 and 149 in the
+first two dumps). Walking and fast stick turns (up to 22.7 degrees and 1.72 units per flip) caused
+no reset. One more reset came from the 0.5 s stale rule after an 812 ms hitch (turn 6.9 degrees,
+move 0.43), which is intended (history older than 0.5 s). Auto-camjump fired once on walking (11
+degrees, 0.73 units) with the old flight thresholds (30 degrees, 8x, 0.25 floor), while the
+detector correctly did not; hence the flight defaults now match the detector (45 degrees, 16x,
+1.0 floor). `flight-test` updated: small-unit worlds are tested with `GOW3_FLIGHT_CUT_MOVE=0.25`.
+
+**Not verified (before that game check).** No game run: that the cut fires at U3's Continue frame (and with which rule:
+stale, turn or move), that the ghost of the menu image is gone, how many cuts a normal session
+shows (cutscene shot changes should count; a fast vehicle or a respawn might too), and that no
+reset fires during ordinary play. U1's scene-constant and U2's flat cameras are not tested in a
+game either; their `previous = current` path is code reading only. The world units (and so the
+1.0 floor) are not known per game. With `RunScaled` called twice in a frame the cut would be
+counted twice in `Camera cuts` (the reset itself is idempotent). `d_compiles` after the fix was
+not seen in a CSV.
+
+## 25 October 2026: scene LOD bias and anisotropy follow the shader's sampling
+
+Why: the player reported lines/bleeding at texture edges and textures that look blurred or wrong.
+Two port features change every scene sampler and had never been checked per texture:
+- Forced anisotropy (`Rasterizer::ForceAnisotropy`, ca54d74, default 16x) raised every graphics
+  sampler with a mip filter, without looking at the image. One-level textures (atlases, LUTs,
+  decals, data textures) and samplers clamped to MaxLod 0 got 16x too; anisotropy at level 0 widens
+  the footprint along one axis and reads across atlas cells / LUT rows. Its own comment said
+  unmipped samplers keep the game's setup; the code did not.
+- The scene LOD bias (`TemporalUpscaler::SceneMipBias`, -1 at DLAA since 8fe10a4, log2(r/o)-1 for
+  DLSS) is the sampler's `mipLodBias`. Vulkan adds `mipLodBias` to explicit-LOD samples as well
+  (`image_sample_l`, `_lz`), so a shader that picks its mip on purpose (blur chains, detail blends,
+  lookups) read another level. Decision with the user: keep -1 at DLAA, stop applying it there.
+
+**What the recompiler records** (`Shader::SamplerResource`, shader_recompiler/resource.h; set in
+`PatchImageSharp`, resource_patching_pass.cpp, where `ImageSampleRaw` gets
+`image_binding | sampler_binding << 16`, so both bindings and the instruction flags are known):
+- `explicit_lod`: some sample uses `has_lod || force_level0` without gather or derivatives (the
+  same precedence as `PatchImageSampleArgs`); `implicit_lod`: some sample does not.
+- `image_mask`: bit per paired image binding; `~0u` (unknown) when a binding is >= 32.
+- Merged with OR in `Descriptors::Add`, not part of its dedupe key.
+- Info is serialized as raw bytes (`InfoPersistent`), so `ShaderMetaVersion` 13 -> 14 and
+  `PipelineKeyVersion` stays 5 (review: keys contain no Info). The legacy meta version (12, no
+  binary hash) is no longer accepted: no older meta has this layout. One-time shader cache rebuild
+  for players.
+
+**What the renderer does** (vk_rasterizer.cpp `BindSamplers`, `ForceAnisotropy`):
+- Bias: a non-depth sampler with `explicit_lod` gets no scene bias (one used both ways neither: the
+  safe side). Toggle Disabled2 bit 43 `BiasExplicitLod` (8796093022208), bit set = old behaviour.
+- Anisotropy, after the existing checks: skipped when the sampler is used only with an explicit
+  LOD, when the S#'s MaxLod is 0, or when every paired image's T# (prepared `image_sharps`, else
+  `ImageResource::GetSharp`) has `last_level == base_level`. An unknown mask keeps the old
+  behaviour. Toggle Disabled2 bit 44 `AnisoUnmipped` (17592186044416), bit set = old behaviour.
+- Both toggles are read live per bind.
+- With `GOW3_FRAME_STATS=1` the 5 s printer adds `Samplers (5 s): N scene-biased, M bias skipped
+  (explicit LOD, of which X mixed); K aniso raised, J aniso skipped (unmipped U, maxlod0 Z, explicit E)` (counts per
+  sampler bind, `Gow3Stats`). The flight recorder is unchanged.
+
+**Review.** Mixed samplers (both `explicit_lod` and `implicit_lod`) lose the bias for their
+implicit samples too: the safe side, counted as "of which X mixed" in the Samplers line. The first
+start after updating has a cold shader cache (metas 14 only), so it recompiles and stutters like a
+new install. `PipelineKeyVersion` stays 5: pipeline keys contain no Info. The sampler counters only
+count with frame stats on (`Gow3Stats::enabled`), so players without diagnostics pay no atomics.
+
+**Tests.** No game run. `gow3_pc/build.sh` 0; `ninja -C out/gpu flight-test camera-cut-test` 0,
+`flight-test.exe` 0, `camera-cut-test.exe` 0 (unchanged code, regression only). No unit test of the
+new fields: Info is written with one raw byte copy, so they round-trip with the struct; checked by
+reading `Info::Serialize` / `Deserialize`.
+
+**Not verified.** That the counters show nonzero "bias skipped" and "aniso skipped (unmipped)" in
+U3 (chapter 2 market, the player's flash marks of session 20261025-091021); that the edge lines
+and the blur are gone (A/B with bits 43/44 and `GOW3_FRAME_DUMP_TRIGGER` dumps at one spot); that
+DLAA wall sharpness is kept (Laplacian metric as on 21 Oct); FPS within noise; that the cache
+rebuild completes. U1 and U2 not checked. A sampler that pairs with a mipmapped image in one draw
+and a one-level image in another is decided per draw from the bound T#s.
+
+## 25 October 2026: lamp shadow passes get the scene jitter
+
+Why: the player reports that with any temporal upscaler (DLSS, TAA, FSR) whole shadows cast by
+lamps flicker on and off, in many places, always; with the upscaler off they do not.
+
+**Mechanism** (code reading, same as the sun fix of 19 Oct, #261). The jitter is a viewport shift
+(`UpdateViewportScissorState`, `viewport.x = ... + draw_jitter[0]`) given to geometry drawn with the
+jittered scene depth (>6 indices or >1 instance) and to full-screen passes only when their pixel
+shader is in `GOW3_JITTER_PS` (probe_uncharted.py lists only f614041e, the sun shadow pass). A
+full-screen pass that rebuilds world positions from the jittered scene depth with the game's
+unjittered matrices samples the shadow map at a position off by up to half a pixel, different every
+frame; on surfaces where that exceeds the shadow bias the whole shadow test flips. The lamp (point,
+spot) shadow passes are other shaders, so they were never jittered.
+
+**Rule** (vk_rasterizer.cpp `DrawRecord`, after `BindResources`):
+- Sampled images: `bound_images` holds the draw's targets and textures; `image.binding.is_bound`
+  is set only by `BindTextures` / `BindTexturesFromSet` (reset per draw in `ResetBindings`), so it
+  separates sampled images from targets. A sampled depth-format image (`info.props.is_depth`) is the
+  scene depth when `JitteredDepth(id)` (the scene depth, or in Uncharted its same-size same-format
+  copy), otherwise "another depth image" (a shadow map).
+- Depth-compare samplers: `Shader::SamplerResource::is_depth` of the pixel shader (set for the `_C`
+  sample opcodes in resource_patching_pass.cpp).
+- Shadow pass candidate: samples the jittered scene depth AND (a compare sampler OR another depth
+  image). A full-screen candidate (<=6 indices, 1 instance) not already in `GOW3_JITTER_PS` gets the
+  scene jitter; logged once per shader: `Upscaler: shadow pass %08x gets the scene jitter (auto)`.
+- Full-screen jitter scale: the jitter is in scene pixels; the shift was applied in the pass's own
+  pixels, so a pass drawn at half size moved twice as far across the screen as the scene. It is now
+  scaled by the viewport size over the scene depth size (`2 * xscale / depth width`), for the
+  `GOW3_JITTER_PS` passes too (no change for a full-size pass such as the sun's, if it is full size).
+- Toggle: Disabled2 bit 45 `ShadowPassJitter` (35184372088832), read live; bit set = old behaviour
+  (no automatic jitter and the unscaled shift). `GOW3_JITTER_PS` and bit 62 `FullScreenPassJitter`
+  keep working.
+
+**Diagnostics** (stdout, boot.log; once per pixel shader hash, a small vector of seen hashes; the
+per-draw cost is a walk of the draw's bound images while the upscaler is on):
+- `Shadow pass candidate: ps .. vs .. indices N instances N jittered D target WxH compare-samplers N
+  other-depth D screen-space D` for every candidate draw, full-screen or geometry.
+- `Light volume candidate: ...` for jittered geometry (>6 indices or >1 instance) that samples the
+  scene depth with a compare sampler. Variant 2: a deferred light volume builds its screen UV from
+  FragCoord, which the viewport shift does not move, so it reads depth rendered half a pixel away.
+  Only logged, no behaviour change.
+
+**Review notes.** Screen-space passes (clip disabled) ignore `draw_jitter` in the viewport code, so a
+candidate with `screen-space 1` is not moved by this change. A shader that samples the scene depth
+through a colour (R32F) image registered apart from the depth image is not seen as sampling the
+scene depth. A full-screen candidate that is not a shadow pass (fog or volumetric light that tests a
+shadow map) would get the jitter too: the log names each one, bit 45 turns it off.
+
+**Tests.** No game run. `gow3_pc/build.sh` 0 (vk_rasterizer.cpp recompiled, no warning on the new
+lines); `ninja -C out/gpu flight-test camera-cut-test` 0, `flight-test.exe` 0, `camera-cut-test.exe`
+0 (regression only: no unit test covers the draw-time rule).
+
+**Not verified.** That the lamp shadow flicker stops; which shaders the candidate logs name in U1,
+U2 and U3; whether the sun pass f614041e draws at full size (the scaling only changes it if not);
+whether lamp passes are full-screen or light volumes (variant 2 is not fixed); FPS within noise.
+
 ## Sharp text above 1080p (25 Oct 2026)
 
 Request: sharp interface and subtitles at 4K. Where the UI is drawn and why it was soft:
@@ -4399,3 +4863,125 @@ Vector font atlases (same day, later; replaces the Catmull-Rom output for the th
 - Follow-up checks (same day): 1440p (U3, scale 2, cached 4x->2x): asset accepted (MAE 0.33), curves smooth against GOW3_ATLAS_ASSETS=0. Package: `tools/package_windows.sh` puts the six files under `gow3_pc\assets\ui\fonts\`; booted from the zip extracted into an empty folder, U3 accepted the asset through the relative path (no GOW3_ATLAS_ASSET_DIR). U3 cutscene subtitle ("Argh, damn it ... oww...", pub fight) drawn from the vector atlas at 4K, clean; no matching line captured without the asset (the scene did not repeat). `tools/export_github.sh` could not be run: it already fails on main (it reads `gow3_pc/.gitmodules`, now at the repo root). The other fonts (classic, Russian, CJK) were left as they are at the owner's request; their guest hashes can be computed offline (Thin1DThin-tiled TGA bytes through `xxhsum -H3` give the three known hashes): Russian U3 bd4176ef0ab3cb29, U2 b65602679d5548b6, U1 e37ff11962684e3f.
 
 Not verified: a real cutscene subtitle (the hint text, drawn by the same shader at the subtitle position, stands in); 1440p; scaled DLSS/FSR presets (code reading says the UI stays at the game's size); performance (four extra LOD queries in a shader that covers only the text; not measured); a U3 boot stall seen once (live view stopped at frame 147 during boot, with GOW3_TEXT_SHARPEN=0, so the unpatched shader path; the retry ran normally). Not changed: the button icons inside text (symbol3 atlas, ps 4ad58d25) and other HUD pictures, which are colour images, not coverage.
+
+## 22 October 2026: phase 5c, A-to-B draw pipe measurements
+
+Diagnostic only, no behaviour change. Commit 70e0627 adds `GOW3_DRAWREC_STATS=1` (off by default, independent of `GOW3_FRAME_STATS`): counters in `DrawPipe` (vk_draw_pipe.h) and `Submission` new/reuse counters (vk_draw_prep.cpp), reported as two lines (`DrawRec A:`, `DrawRec B:`) about every 5 s. Stage A counters are plain members (the GPU command thread is the only producer); stage B publishes relaxed atomics in batches; none of them takes part in the queue's control flow, the sleep protocol and every memory order are untouched. Time unit is TSC ticks (not ordered, can include preemption); percentages are of the window's elapsed ticks.
+
+Setup (22 Oct, U3 chapter 2 meat market from `C:\dev\bench\backup_ch2meat`, 1080p, DLSS model K, player's other settings, `tools/play.py measure` 10 s windows, build 70e0627 from this worktree, full `build.sh` exit 0). The default `bench.sh` save is a lighter scene capped at 120 FPS with about 435 draws a frame: six windows there were discarded.
+
+Counter coherence (ON1 19 windows, ON2 32 windows of ~5 s):
+- Exact (A-side cumulative, window deltas): byte residue 0 in every window checked (payload + header + slack + pad64 + wrap = physical advance of `head`); no non-finite values printed.
+- Sampled: depth after each Commit (mean, window max, both histograms; not the time distribution of occupancy). Max depth 0.87 MiB of 16 MiB.
+- Approximate: pending packets (A's count minus B's batched count): median about 2, mean 79 (spikes to 745).
+- Unavailable: B's percentage per window (printed `unavailable`, not zero) and B's maxima per window (printed as since start).
+
+Measured, ON1 (19 windows, about 93 FPS, p50 10.6 ms, p99 13.1 ms):
+- 4,560 packets a frame (about 425,000/s): about 700 draw, 2,006 task, 1,854 dispatch, 5 special, 8 indirect. Payload per packet: draw 1.7 KiB, dispatch 0.9 KiB, task 48 B.
+- 281 MB/s physical, about 3 MB a frame: 96.5% payload, 1.2% header, 1.8% pad64, about 0 wrap, 0 slack.
+- Depth after Commit: mean 89 KB, 100% of commits in (0, 25%] of capacity; fine histogram 42% <= 4 KiB, 26% <= 64 KiB, 32% <= 1 MiB, 0% above. Space waits: 0.
+- Stage A write path (Begin to Commit minus WaitForSpace): about 307 ticks a packet, 3.7% of the window. It excludes the preparation before Begin (CollectRingBindings and others) and includes preemption.
+- Drains: about 4,027/s (about 43 a frame), 3,460/s waited (86%), 567/s found the pipe empty. Post-drain-to-commit gap: about 3,460 observations/s, mean 22 us (overlapping intervals after consecutive drains, not exclusive time, not "A idle"); typical window max 1-2 ms, two windows 20-22 ms.
+- Stage B completed intervals: idle spin about 149 ms/s (14.9%), wake.wait about 37 ms/s (3.7%), so about 18.6% of the time idle; this agrees with "stage B busy 81.4%" of the earlier trace. About 115 sleeps/s, 115 wake returns/s (no skipped waits), 446 notify calls/s.
+- Submission: about 2,570 built/s, all new allocations, 0 pool reuses (`GOW3_PREP_POOL` was off).
+
+Overhead of the diagnostic (stats ON vs OFF; the gate is read once at start, so each state is a separate session; order ON1, OFF1, ON2, OFF2; 6 windows of 10 s each; port FPS):
+- Session means: ON1 92.80, OFF1 89.93, ON2 95.05, OFF2 95.62 FPS (within-session SD 0.3-0.8).
+- Pooled ON 93.92, OFF 92.77 (+1.15). Pair differences ON - OFF: +2.87 and -0.57. p50 10.52 vs 10.61 ms; p99 12.96 vs 13.65 ms.
+- No slowdown is visible, but the design cannot prove an overhead under 1 FPS: the two OFF sessions differ by 5.7 FPS, more than any effect seen. More alternating sessions would be needed for a bound.
+
+Reading (hypotheses, not measured as causes):
+- The queue is never full and stage B keeps up (pending about 2, B idle about 18.6%): the ring capacity is not the limit, and packet size is not either (write path 3.7% of A, under the 5% line that would justify compacting records).
+- Stage A is interrupted often: about 37 drains a frame wait for stage B to run dry. This matches the 22 Oct wait trace (about 3,400 slow-path fence drains/s, about 190 fault-flush commands/s). The drains-to-empty cost stage A about 18.5% of its time in that trace.
+- The `Submission` pool was not exercised; its effect is unknown.
+
+Not verified: other scenes and chapters, U1 and U2, 4K, a long soak; the diagnostic's overhead below 1 FPS; B's per-window percentage. Four sessions, one machine (Ryzen 5 5600), logs kept outside the repository in `C:\dev\uncharted\analysis\d5c_logs`.
+
+Next step (proposed, not started): cut the waits of stage A on the pipe, starting with the deferred-fence drains.
+1. Land the fence tick as an in-order pipe task (`RunInOrder`) so stage A waits for that task, not for the whole queue (`LandDeferredFenceFor`, about 9.4% of A in the 22 Oct trace; upper bound if both drain waits vanished: A 21.8% shorter, real gain smaller).
+2. Behind a new `Disabled2` bit (read live, bit set = old behaviour) so it can be A/B'd in one session with `ab2.sh` at 1080p and 4K, DLAA K, meat market, at least 6 + 6 windows.
+3. Risk to test first: stage B owns the readbacks while it runs (the 18 Oct race, `GOW3_READBACK_RACE`), so stage A must not land ticks beside it. Test with the readback race check, `GOW3_STAGEA_VERIFY`-style equivalence counters, and the floating-NPC / U2 cases from 16 Oct before any claim.
+4. Re-run `GOW3_DRAWREC_STATS=1` afterwards: waited drains a frame, post-drain-to-commit and B idle should move; FPS gain must beat the run-to-run noise measured above.
+5. Smaller, independent: try `GOW3_PREP_POOL=1` once with the same A/B (about 2,570 allocations/s today).
+
+## 24 October 2026 (night): U1 treasure models, synchronous shaders again
+
+- Symptom (user report): since 0.3.0 (U1 back to async shader compilation) the treasure models (Treasures screen, pickup) do not appear.
+- Static trace: the viewer scene update (0x2061e8) and render (0x206b58) run every frame, so only a compile that never completes or fails can hide the model.
+- In 0.3.0, PublishGraphics leaves a failed async pipeline in pending_graphics forever. On main, failed pipelines/shaders go to failed_graphics / compilation_failed / failed_permutations and the async branch never queues them again (vk_pipeline_cache.cpp GetGraphicsPipeline, GetProgram). Compute is never compiled async (compile_async excludes Compute). Either way the draw is skipped for good.
+- None of the 86 U1 logs has a "compilation failed" / "capture failed" line, but none ever opened a non-default treasure, so this is not ruled out.
+- Fix: U1 compiles synchronously by default (0.2.3 behaviour). Cost: the 1-2.4 s new-area stalls on laptops (18 Oct). UNCHARTED_U1_SYNC_SHADERS=0 restores async_shaders.
+- If a log shows "compilation failed" lines, the root fix is: a failed async graphics pipeline / program falls back to a synchronous compile.
+- Other candidates left (not tested): GOW3_COMPUTE_PRECOMPILE=0, GOW3_READBACK_GUARD=0.
+- Not tested: no in-game run (user asked for none).
+
+## Launcher redesign and 4K-sharp drawing (25 Oct 2026)
+
+Player-facing wording: CHANGELOG, Unreleased, 25 Oct 2026. Two mockups were drawn in VectorCraft
+(A "expedition journal", B "cinematic"); the user picked B.
+
+What changed:
+
+- Layout (uncharted_launcher.pyw build_stage / layout / render_stage): one canvas (the stage) fills
+  the window. Its backdrop is a Pillow image redrawn on resize (60 ms debounce) and on a game
+  switch: pic1.png (or pic0.png) of the player's game, blurred at quarter size, 98% dark on the
+  left to 57% on the right, the selected game's colour as a radial glow, and a film grain
+  (launcher/assets/grain.png, a 512 px tile made in PhotoCraft: add noise 18, gaussian,
+  monochromatic, blur 0.4). The tab bar, GitHub, the section panel, the PLAY panel and a halo
+  round the selected game card are drawn into it. Tabs, cards, PLAY, UPDATE and GitHub are small
+  canvases placed on the stage; each shows its crop of the backdrop (backdrop()), so the glass
+  reads as see-through. The section panel is a Frame inset by the corner radius, so the backdrop's
+  rounded corners show. The banner and the sidebar are gone; the game's name moved under the
+  section title (section_sub). Status and substatus sit under PLAY and wrap.
+- Sizes: default 1280x780, minimum width = margins + 264 px column + 880 px body (fit_to_screen).
+  The Controls grid's controller column went from 14 to 8 characters (an icon) and the action
+  names from 17 to 15, so both columns fit 880 px.
+- Per-game accent (GAMES "accent": #e6b44c, #e5553f, #f08c2a): widgets.set_accent swaps every Tk
+  option holding the old accent (bg, fg, highlight, active, select) and the module ACCENT globals;
+  widgets read ACCENT when they draw; select_game calls apply_accent before refresh_controls.
+- 4K-sharp drawing (launcher/art.py): rounded rectangles drawn 4x and reduced with LANCZOS
+  (rounded_image, lru_cache of 96: the stage's big panels come back on each game switch), icons
+  from 192 px white masters tinted and reduced (icon). Tk's smoothed polygons (round_rect) are no
+  longer used. Toggle, Chip, Segmented (now a canvas tray with one Label per option, its pill as
+  the Label's image), Dropdown, ScrollBar, Badge, InfoTip, DialogButton, Dialog icons, Toast and the
+  preset cards use them. Toggle, Chip, Segmented and Dropdown draw their focus ring as a rounded
+  outline. Fonts are vector, so text was already sharp.
+- Icon set: 18 icons on a 24 pt grid, 1.8 pt round strokes, drawn in VectorCraft;
+  sources launcher/assets/icons/src/*.svg, masters launcher/assets/icons/*.png (192 px = 8x).
+  App icon redrawn in VectorCraft (assets/app-icon.svg, 1024 px app-icon.png);
+  tools/make_launcher_icon.py now reduces that master to uncharted.ico (16-256) and icon.png (512).
+- Game art: art.trophy_file reads sce_sys/trophy/trophy0N.trp of the player's game (header 0x60
+  bytes, count at 0x10, entry size at 0x14, entries name[32] + offset/size u64 BE; the PNGs are
+  not encrypted). GR001.PNG (320x176, the game's coin) is cropped to its alpha and enlarged with
+  LANCZOS plus an unsharp mask when the factor is over 1.2. Nothing of the game is packaged;
+  without a game folder the card shows a drawn medallion with the game's number.
+- Dialog.show returns at once if the dialog was answered during its first update() (the UI test's
+  100 ms timer could fire there once building the dialog got slower).
+- PhotoCraft had no file access in this session (read and write authority absent), so only the
+  grain tile came from it (through its preview); the game-art upscale is done in Pillow at run time.
+
+Measured (1x, this PC): backdrop 58 ms at 1280x780, 183 ms at 2560x1560; a game switch 140-210 ms
+(was ~420 ms before caching the panels).
+
+Tested: gow3_pc/tests test_uncharted_launcher_ui, 40 tests (3 new: trophy pack reader with a
+synthetic pack, icon tint and size, set_accent). Screenshots of every section for U1/U2/U3 at
+100% and of Home at 200% (tk scaling 2; window capped by the 2560x1440 screen), and without a
+game folder. Tab order: games, tabs, panel, PLAY, GitHub.
+
+Not verified: a real 3840x2160 monitor at 150%/200% Windows scaling (only Tk scaling here); a
+controller driving the new layout; the UPDATE pill with a real release; the packaged zip;
+Wine/Proton (Bahnschrift missing falls back to Segoe UI).
+
+## 25 October 2026: launcher lettering from the games' files
+
+The first hand-drawn wordmark (commit ceb5e16) did not look like the games; the user asked for their real lettering. Both pieces now come from the game files, built by `tools/build_ui_art.py` into `gow3_pc/assets/ui/` (the owner's UI-art exception).
+
+- Font. The three games' `data.psarc` hold BMFont atlases (data/fonts/ps4; U1 art/general/textures/font/ps4). The menu and subtitle face is "Adelon-Serial DB" at 42 px (`main.fnt`, `game3.fnt`, `classic.fnt`); `symbol3` is "Albertus Medium" (button glyphs), the CJK and Russian sets are other faces. U3's `main_00.tga` packs 188 glyphs in the blue and green channels (`chnl` 1/2). Each glyph was scaled 6x (bicubic, 2 px blur), traced in VectorCraft (Image Trace, black and white, 261 paths) and assembled with fontTools into `fonts/drake-serial.ttf` (family "Drake Serial", em = 42 px, 815 kerning pairs in a `kern` table). Contour direction is set from nesting (outer clockwise). GDI's AddFontResourceEx refused the first build (returned 0) until the name table had full, unique and PostScript names. The launcher loads it with FR_PRIVATE before Tk starts (`art.load_game_font`); all launcher fonts and the dialogs/toasts use it, else the old Segoe/Bahnschrift set.
+- Logo. U1's `pak19/ps4/menu.pak` (Bluepoint pak: header dword 8 is the VRAM blob size, the blob ends the file, at 0xbec10 here) holds `art/general/menu/bootloader/ucclogo-<lang>.tga` + `-alpha.tga`, the Collection's logo. Their descriptor sits 0x38 bytes before the `d:/dev/...` cook path: blob offset +0 (0x5003800 colour, 0x502f000 alpha), byte size +8 (0x2b800, three mips), width +0x20 (1024), height +0x24 (256). Top mip decoded as BC1 / BC4 with 1D-thin tiling (8x8 blocks per tile, Morton inside) and flipped vertically. `wordmark.png` is the alpha's UNCHARTED (904x116 crop) over parchment white, shown 28 px tall at 1x. U2's menu.pak has `logo2-*.tga` (not used).
+
+Second pass, same day (user: vectorize both and keep them sharp at other resolutions, no plain bilinear filter):
+- The logo is no longer a bitmap shown scaled. `wordmark.svg` is a VectorCraft Image Trace of the logo's alpha (4x LANCZOS, 1.2 px blur, steep curve; 15 paths, 3639 anchors; the scratches stay as holes). `art.svg_mask` rasterises the contours at exactly the height each screen scale needs: 8x supersampled, even-odd by XOR per contour, then `reduce(8)` (an exact box average of coverage, not interpolation between pixels). 0.07 to 0.14 s for 28 to 224 px; cached per size by `art.photo`.
+- The font was retraced smoother (sheet 7x, blur 0.3 px, steep curve; paths 45, corners 55, noise 10: 8870 anchors, was 15584) and each contour is resampled every 8 sheet px, smoothed between corners (turning angle over 50 degrees stays exactly where the trace put it) and refitted as Catmull-Rom cubics (`smooth` in the build script). Blur 0.55 was tried first and bloated the stems. The 42 px source still sets the letter shapes; only the wobble along stems went. A `gasp` table (0x0A: grayscale, symmetric smoothing, no grid-fitting) asks the rasterizer for antialiasing without hinting.
+- Checked: the launcher built at scale 1.0, 1.5 and 2.0 (fake Tk scaling, PrintWindow capture): logo and text sharp at 2x; 40 launcher UI tests OK. Not checked: real 4K display, ClearType on.
+
+Checked (first pass): the launcher from source at 1x (window capture): logo and font everywhere, Display layout as before (f_small at 11 pt wrapped the resolution choices, so it stays 10); `test_uncharted_launcher_ui` 40 tests OK. Not checked: 150% scale, the packaged zip, Wine/Proton (no gdi32 private fonts there: falls back), the Europe CUSA02344 pak offsets (the build script finds the texture by name, so it should work).

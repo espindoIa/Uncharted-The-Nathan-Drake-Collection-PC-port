@@ -1239,6 +1239,10 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
             # depth natively in every draw, and resolving its proxy each time cost more than it saved.
             env.setdefault("GOW3_SCENE_HALF_RES", "0")
         env.setdefault("GOW3_UPSCALE_BEFORE_CS", "aec539f0")
+        # 24 Oct 2026: the game's FXAA 3.11 (ps 749bbec9, last draw into the display buffer, same
+        # hash in U1/U2/U3) is skipped under a temporal AA: it softened the already anti-aliased
+        # image and the HUD. Toggle bit GameFxaa (second number) brings it back live.
+        env.setdefault("GOW3_GAME_AA_PS", "749bbec9")
         # Full-screen passes that rebuild positions from the jittered scene depth get the jitter
         # too: the sun shadow pass, shared by the three games (its shadows flickered under TAA,
         # FSR and DLAA; Supermedo/uncharted_pc #261).
@@ -1372,8 +1376,11 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     # so U1 compiled everything synchronously. Since 15 Oct the pipeline cache compiles draws to
     # small targets (<= 256x256, SmallTargetDraw) synchronously in every game, which covers it;
     # synchronous U1 froze for 1-2.4 s per new area on a Ryzen laptop (18 Oct). Back to the
-    # async_shaders setting; UNCHARTED_U1_SYNC_SHADERS=1 restores synchronous compilation.
-    if executable == "eboot.bin" and os.environ.get("UNCHARTED_U1_SYNC_SHADERS") == "1":
+    # async_shaders setting in 0.3.0; synchronous again by default on 24 Oct 2026 because the U1
+    # treasure models (Treasures screen, pickup) have not appeared since 0.3.0 and a draw whose
+    # async compile fails or stays pending is skipped for good. UNCHARTED_U1_SYNC_SHADERS=0 uses
+    # the async_shaders setting again.
+    if executable == "eboot.bin" and os.environ.get("UNCHARTED_U1_SYNC_SHADERS", "1") != "0":
         env.setdefault("GOW3_ASYNC_SHADERS", "0")
     # Frame drops in the temple (45-57 FPS): GPU thread waits in DownloadMemory for CPU read faults
     # on GPU-modified pages. Every 5 s: fault counts/time, hottest guest instructions and windows.
@@ -1445,6 +1452,12 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
             dumps.mkdir(parents=True, exist_ok=True)
             env.setdefault("GOW3_FRAME_DUMP_TRIGGER", str(dumps / "trigger"))
             env.setdefault("GOW3_DUMP_DIR", str(dumps))
+            # 25 Oct flight recorder: numeric per-flip dumps (CSV) the session recorder asks for on a
+            # hotkey mark by creating the trigger file; the dir existing is how it knows this build has it.
+            flight = out / "flight"
+            flight.mkdir(parents=True, exist_ok=True)
+            env.setdefault("GOW3_FLIGHT_DIR", str(flight))
+            env.setdefault("GOW3_FLIGHT_TRIGGER", str(out / "flight.trigger"))
     window_icon = game_window_icon(game)
     if window_icon:
         env.setdefault("GOW3_WINDOW_ICON", str(window_icon))

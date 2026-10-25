@@ -36,7 +36,7 @@ Three places tell the story, each for its own reader:
 | `launcher` | The launcher's look and options, the updater |
 | `package` | `tools/package_windows.sh`, the zip, the starter, CI |
 | `tools` | Scripts in `tools/` (probe, play, benchmarks) |
-| `docs` | README, CHANGELOG, STATUS, CLAUDE.md, this file |
+| `docs` | README, CHANGELOG, ROADMAP, STATUS, AGENTS.md, CLAUDE.md, this file |
 | `merge` | Bringing in upstream (BilalReloaded) work |
 | `release` | Version number, release notes, tag |
 
@@ -98,9 +98,9 @@ Co-Authored-By: ...
 - Never commit game files (executables, ELF/eboot images, PKGs, whole pak/psarc archives), dumps, saves, logs,
   shader caches, `nvngx_dlss.dll`,
   `gow3_pc/stat-multipliers-test.ini` or the `gow3_pc/gpu/third_party/fsr-vulkan` submodule state.
-  One exception: the games' UI art (font glyph outlines, button icons, HUD shapes as SVG, and the source
-  textures, atlases, TGA/PNG extracts and files taken out of pak/psarc archives they come from) may be
-  committed, only under `gow3_pc/assets/ui/`.
+  One exception (the owner, 25 Oct 2026): the games' UI art (font glyphs, button icons, HUD shapes and
+  the textures or archive extracts they come from) may go in `gow3_pc/assets/ui/` only. Executables,
+  PKGs, whole pak/psarc archives, saves, dumps, logs and shader caches stay out everywhere.
   Stage files by name (`git add <file>`), not `git add -A`.
 
 `.gitmessage` holds the body layout. To have Git open it for every commit:
