@@ -11,9 +11,11 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   (about 7-15 seconds) of its internal numbers: frame times, upscaler resets, the camera, draws
   skipped while a shader compiled, textures evicted, and more. They are written to a small file
   when you press the session recorder's F7-F10 keys, or on their own when the engine sees a stall,
-  an upscaler reset, a skipped draw or a camera cut the upscaler did not notice. The files go to
-  `analysis\<game>\flight\` and the session recorder collects them with your marks. Nothing changes
-  on screen. Not tested in game yet.
+  an upscaler reset, a skipped draw or a camera cut the upscaler did not notice. Loading screens,
+  menus and movies do not set them off, and skipped draws (common while shaders compile in the
+  first minutes) write at most one file a minute. The files go to `analysis\<game>\flight\` and the
+  session recorder collects them with your marks. Nothing changes on screen; the recording costs
+  well under a microsecond per frame. Not tested in game yet.
 - **New: a session recorder that writes down a play session so a problem can be reported with
   evidence.** Start `Record-Session.cmd` (in the package folder) before or after the game and play
   as usual; it records every game run until you close its window. When something looks wrong, press

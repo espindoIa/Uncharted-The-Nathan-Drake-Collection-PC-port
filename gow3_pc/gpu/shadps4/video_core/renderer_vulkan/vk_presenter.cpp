@@ -13,6 +13,7 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
+#include "gow3_flight.h"
 #include "gow3_overlay.h"
 #include "gow3_reflex.h"
 #include "gow3_settings.h"
@@ -1196,6 +1197,9 @@ void Presenter::PresentLoadingFrame() {
     if (!swapchain.AcquireNextImage()) {
         return;
     }
+    // gow3 25 Oct 2026: not a flip, so the flight recorder would see the load as one long
+    // interval (an auto-stall dump); the event tells it a loading frame was shown.
+    Gow3Flight::Event(Gow3Flight::LoadingFrame);
     const vk::Image image = swapchain.Image();
     const vk::Extent2D extent = swapchain.GetExtent();
     const auto cmdbuf = present_scheduler.CommandBuffer();
@@ -1280,9 +1284,15 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         UpdateStreamlineFrameGenLoad();
         frame_gen_active.store(
             StreamlineFrameGen(frame, is_game_frame && !is_reusing_frame), std::memory_order_relaxed);
-    } else if (!is_game_frame || is_reusing_frame || !PresentGenerated(frame)) {
-        frame_gen_reset = true;
-        frame_gen_active.store(false, std::memory_order_relaxed);
+    } else {
+        if (!is_game_frame || is_reusing_frame || !PresentGenerated(frame)) {
+            frame_gen_reset = true;
+            frame_gen_active.store(false, std::memory_order_relaxed);
+        }
+        // gow3 25 Oct 2026: flight recorder `presents` (PresentGenerated shows one generated
+        // frame before the real one).
+        Gow3Flight::Gauge(Gow3Flight::Presents,
+                          frame_gen_active.load(std::memory_order_relaxed) ? 2.0f : 1.0f);
     }
 
     const bool acquired = swapchain.AcquireNextImage();
@@ -1806,6 +1816,7 @@ bool Presenter::StreamlineFrameGen(Frame* frame, bool game_frame) {
     static u32 real = 0, generated = 0, doubled = 0;
     if (!Dlss::FrameGenWanted() || !Gow3Streamline::FrameGenLoaded()) {
         frame_gen_reset = true;
+        Gow3Flight::Gauge(Gow3Flight::Presents, 1.0f);
         return false; // unloaded (UpdateStreamlineFrameGenLoad): nothing to hand over
     }
     // 23 Oct 2026: Streamline decides per present whether it really interpolates. Its log says
@@ -1815,6 +1826,8 @@ bool Presenter::StreamlineFrameGen(Frame* frame, bool game_frame) {
     // the limiter counts shown frames (Presenter::FrameGenActive), one frame late.
     const auto fg_state = Gow3Streamline::FrameGenGetState();
     const bool last_doubled = fg_state.presented >= 2;
+    // gow3 25 Oct 2026: flight recorder `presents` (0 when Streamline gave no state).
+    Gow3Flight::Gauge(Gow3Flight::Presents, float(fg_state.presented));
     const auto off = [&] {
         frame_gen_reset = true;
         if (game_frame && frame->serial != 0) {

@@ -3,7 +3,9 @@
 // median, the reset quiet time, skipped draws, camera cuts, cooldown and the cap), label
 // sanitising and the .tmp-then-rename write.
 #include <cassert>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -106,7 +108,8 @@ void TestCsv() {
     assert(lines[0] == "# flight v1 unix_ms=1700000000123 reason=test frames=10 ring=128 build=probe.exe/1");
     const auto header = Split(lines[1], ',');
     assert(int(header.size()) == CsvColumns());
-    assert(CsvColumns() == 46);
+    assert(CsvColumns() == 47);
+    assert(header.back() == "presents");
     const auto column = [&](const char* name) {
         for (std::size_t i = 0; i < header.size(); ++i) {
             if (header[i] == name) {
@@ -237,13 +240,18 @@ void TestSkippedAndCap() {
     recorder.Record(MakeRow(t += 16'600, DrawSkippedPendingCompile));
     assert(Ready(recorder, AutoSkipped) == 1);
     assert(Find(recorder, AutoSkipped)->marker_seq == recorder.LastSeq());
-    // Cooldown, then the cap of 30 automatic dumps (steady flips between: no stall dumps).
+    // Its own 60 s cooldown (not 15 s), then the cap of 30 automatic dumps (steady flips
+    // between: no stall dumps).
     recorder.Record(MakeRow(t += 16'600, DrawSkippedPendingCompile));
     assert(Ready(recorder, AutoSkipped) == 1);
+    FreeAll(recorder);
+    t = Steady(recorder, t + 16'600, 1200); // 20 s
+    recorder.Record(MakeRow(t += 16'600, DrawSkippedPendingCompile));
+    assert(Ready(recorder, AutoSkipped) == 0);
     int posted = 1;
     for (int i = 0; i < 40; ++i) {
         FreeAll(recorder);
-        t = Steady(recorder, t + 16'600, 910); // 15.1 s
+        t = Steady(recorder, t + 16'600, 3620); // 60.1 s
         recorder.Record(MakeRow(t += 16'600, DrawSkippedPendingCompile));
         posted += Ready(recorder, AutoSkipped);
     }
@@ -299,6 +307,166 @@ void TestCamjump() {
     assert(!CameraChange(Row{}, MakeRow(0), deg, move));
 }
 
+void SetEnv(const char* name, const char* value) {
+#ifdef _WIN32
+    _putenv_s(name, value); // "" removes it
+#else
+    if (value[0]) {
+        setenv(name, value, 1);
+    } else {
+        unsetenv(name);
+    }
+#endif
+}
+
+// Loading frames, movies and UI-only frames silence stall, reset and skipped for 2 s.
+void TestQuietFrames() {
+    // A level load: 3 s with loading frames and no flip, then flips again. No stall, nor for a
+    // hitch 1 s later; one 2.5 s later is a stall.
+    Recorder load(1024, true);
+    std::int64_t t = Steady(load, 6'000 * kMs, 40);
+    load.Record(MakeRow(t += 3'000 * kMs, LoadingFrame));
+    assert(Ready(load, AutoStall) == 0);
+    t = Steady(load, t + 16'600, 60);
+    load.Record(MakeRow(t += 200 * kMs));
+    assert(Ready(load, AutoStall) == 0);
+    t = Steady(load, t + 16'600, 150);
+    load.Record(MakeRow(t += 200 * kMs));
+    assert(Ready(load, AutoStall) == 1);
+
+    // Right after a movie ends (its last MovieFrame row 1 s before the interval): no stall.
+    Recorder movie(1024, true);
+    t = 6'000 * kMs;
+    for (int i = 0; i < 40; ++i) {
+        movie.Record(MakeRow(t += 16'600, MovieFrame));
+    }
+    t = Steady(movie, t + 16'600, 60);
+    movie.Record(MakeRow(t += 500 * kMs));
+    assert(Ready(movie, AutoStall) == 0);
+
+    // A reset with a loading frame 1 s before: no dump.
+    Recorder reset(1024, true);
+    t = Steady(reset, 6'000 * kMs, 30);
+    reset.Record(MakeRow(t += 16'600, LoadingFrame));
+    t = Steady(reset, t + 16'600, 60);
+    reset.Record(MakeRow(t += 16'600, UpscalerReset));
+    Steady(reset, t + 16'600, 300);
+    assert(Ready(reset, AutoReset) == 0);
+
+    // Skipped draws during a movie, or 1 s after a UI-only frame: no dump; 3 s after: dumped.
+    Recorder skipped(1024, true);
+    t = Steady(skipped, 6'000 * kMs, 40);
+    skipped.Record(MakeRow(t += 16'600, MovieFrame | DrawSkippedPendingCompile));
+    t = Steady(skipped, t + 16'600, 30);
+    skipped.Record(MakeRow(t += 16'600, StretchedOrUiFrame));
+    t = Steady(skipped, t + 16'600, 60);
+    skipped.Record(MakeRow(t += 16'600, DrawSkippedPendingCompile));
+    assert(Ready(skipped, AutoSkipped) == 0);
+    t = Steady(skipped, t + 16'600, 120);
+    skipped.Record(MakeRow(t += 16'600, DrawSkippedPendingCompile));
+    assert(Ready(skipped, AutoSkipped) == 1);
+}
+
+// `n` flips with the camera moving `step` units along x per flip from `x`; returns the time.
+std::int64_t Walk(Recorder& recorder, std::int64_t t, int n, float& x, float step) {
+    for (int i = 0; i < n; ++i) {
+        Row row = MakeRow(t += 16'600);
+        row.gauges[CamX] = x += step;
+        recorder.Record(row);
+    }
+    return t;
+}
+
+// The relative move rule with small world units: at 0.01 per flip, 0.2 is under the 0.25
+// floor (no cut) and 0.5 is a cut (the old 2-unit floor missed it).
+void TestCutSmallUnits() {
+    Recorder recorder(1024, true);
+    float x = 0.0f;
+    std::int64_t t = Walk(recorder, 6'000 * kMs, 40, x, 0.01f);
+    t = Walk(recorder, t, 1, x, 0.2f);
+    t = Walk(recorder, t, 5, x, 0.01f);
+    assert(Ready(recorder, AutoCamjump) == 0);
+    t = Walk(recorder, t, 1, x, 0.5f);
+    const std::uint64_t cut = recorder.LastSeq();
+    Walk(recorder, t, 3, x, 0.01f);
+    auto* request = Find(recorder, AutoCamjump);
+    assert(request && request->marker_seq == cut);
+
+    // At 0.5 per flip (a fast camera), 0.5 is no cut.
+    Recorder fast(1024, true);
+    x = 0.0f;
+    t = Walk(fast, 6'000 * kMs, 40, x, 0.5f);
+    Walk(fast, t, 3, x, 0.5f);
+    assert(Ready(fast, AutoCamjump) == 0);
+
+    // The environment overrides; garbage or non-positive values keep the defaults.
+    assert(recorder.CutMove() == Recorder::kCutMove && recorder.CutDeg() == Recorder::kCutDeg);
+    SetEnv("GOW3_FLIGHT_CUT_MOVE", "0.05");
+    SetEnv("GOW3_FLIGHT_CUT_DEG", "12.5");
+    {
+        Recorder tuned(64, true);
+        assert(tuned.CutMove() == 0.05f && tuned.CutDeg() == 12.5f);
+    }
+    SetEnv("GOW3_FLIGHT_CUT_MOVE", "abc");
+    SetEnv("GOW3_FLIGHT_CUT_DEG", "-3");
+    {
+        Recorder bad(64, true);
+        assert(bad.CutMove() == Recorder::kCutMove && bad.CutDeg() == Recorder::kCutDeg);
+    }
+    SetEnv("GOW3_FLIGHT_CUT_MOVE", "");
+    SetEnv("GOW3_FLIGHT_CUT_DEG", "");
+}
+
+// Overhead: Recorder::Record with gameplay rows (camera moving and turning, every counter
+// moving, no anomaly), and the whole OnFlip (no Vulkan needed: it reads atomics and
+// Gow3Settings). `step` 0.05 stays under the cut floor; 0.3 runs the 32-value median every flip.
+double BenchRecord(float step) {
+    constexpr int kN = 200'000;
+    Recorder recorder(1024, true);
+    Row rows[2] = {MakeRow(0, 0, std::sin(0.0f), std::cos(0.0f)),
+                   MakeRow(0, 0, std::sin(0.0035f), std::cos(0.0035f))}; // 0.2 degree turns
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < kN; ++i) {
+        Row row = rows[i & 1];
+        row.t_us = 6'000 * kMs + std::int64_t(i) * 16'600;
+        row.gauges[CamX] = step * float(i);
+        row.cum[CDraws] = 3000ull * std::uint64_t(i);
+        row.cum[CImageUploadBytes] = 100'000ull * std::uint64_t(i);
+        recorder.Record(row);
+    }
+    const double ns =
+        std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - start).count() / kN;
+    assert(recorder.LastSeq() == kN && recorder.AutoDumps() == 0);
+    return ns;
+}
+
+void TestOverhead() {
+    const double walk = BenchRecord(0.05f);
+    const double median = BenchRecord(0.3f);
+    std::printf("flight-test: Record %.1f ns/call (walking), %.1f ns/call (median every flip)\n",
+                walk, median);
+    assert(walk < 2000.0 && median < 2000.0);
+
+    // OnFlip: the first call allocates the ring and starts the dump thread (no trigger file, no
+    // automatic dumps here, output into a temporary folder that stays empty).
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "gow3-flight-bench";
+    SetEnv("GOW3_FLIGHT_DIR", dir.string().c_str());
+    SetEnv("GOW3_FLIGHT_AUTO", "0");
+    OnFlip(false, false);
+    constexpr int kN = 200'000;
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < kN; ++i) {
+        Count(SkippedDraws);
+        Gauge(CamX, float(i));
+        OnFlip(false, false);
+    }
+    const double ns =
+        std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - start).count() / kN;
+    std::printf("flight-test: OnFlip %.1f ns/call (with one Count and one Gauge)\n", ns);
+    assert(ns < 2000.0);
+}
+
 void TestLabelsAndFiles() {
     // Same as tools/session_recorder.py flight_label(): other characters dropped.
     assert(SanitizeLabel("F7 Flash!!\n") == "f7flash");
@@ -345,7 +513,10 @@ int main() {
     TestReset();
     TestSkippedAndCap();
     TestCamjump();
+    TestQuietFrames();
+    TestCutSmallUnits();
     TestLabelsAndFiles();
+    TestOverhead();
     std::printf("flight-test: all passed\n");
     return 0;
 }

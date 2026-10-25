@@ -14,6 +14,9 @@
 //                          most 24, default "manual"; tools/session_recorder.py flight_label()).
 //   GOW3_FLIGHT_AUTO=0     no automatic (anomaly) dumps.
 //   GOW3_FLIGHT_FRAMES=<n> ring size (default 1024, 64..8192).
+//   GOW3_FLIGHT_CUT_MOVE=<units>  camera cut rule: the smallest move per flip that can count as
+//                          a cut (default 0.25; the rule itself is relative, 8x the median move).
+//   GOW3_FLIGHT_CUT_DEG=<deg>     camera cut rule: a turn per flip over this is a cut (default 30).
 //
 // Output: <dir>/flight_<YYYYmmdd-HHMMSS>-<mmm>_<reason>.csv (local time), written as <name>.tmp
 // and renamed. Automatic dumps are named auto-<kind> (stall, reset, skipped, camjump). Line 1:
@@ -42,8 +45,11 @@
 //   lod_bias           scene texture LOD bias; fg_on 1 while DLSS frame generation presents
 //   cam_jump_deg cam_move  turn of the forward axis (degrees) and camera distance moved since
 //                  the previous row (0 when either row has no camera)
+//   presents       frames shown for the last present before this flip (1, 2 with frame
+//                  generation 2x; Streamline: its own count, one more frame late; 0 unknown)
 // The gauges are the latest values when the flip is recorded: the GPU thread may already be in
-// the next frame. Frames made by DLSS frame generation are not flips and are not recorded.
+// the next frame. Frames made by DLSS frame generation are not flips and are not recorded
+// (`presents` counts them).
 #pragma once
 
 #include <atomic>
@@ -73,8 +79,9 @@ enum EventBit : std::uint32_t {
     FrameGenOnOff = 1u << 7,             ///< fg_on changed
     TextureGcEvict = 1u << 8,            ///< the texture cache freed an image (memory pressure)
     MovieFrame = 1u << 9,                ///< a prerecorded movie is playing
+    LoadingFrame = 1u << 10,             ///< the presenter drew its own loading frame (not a flip)
 };
-inline constexpr int kEventCount = 10;
+inline constexpr int kEventCount = 11;
 
 /// event_detail of UpscalerReset: which site in vk_temporal_upscaler.cpp dropped the history.
 enum ResetReason : int {
@@ -94,7 +101,7 @@ enum CounterId : int { Compiles, SkippedDraws, GcEvictions, kCounterCount };
 
 /// Latest values (stored as float bits).
 enum GaugeId : int {
-    CamX, CamY, CamZ, FwdX, FwdY, FwdZ, ProjX, ProjY, JitX, JitY, OutW, OutH, LodBias,
+    CamX, CamY, CamZ, FwdX, FwdY, FwdZ, ProjX, ProjY, JitX, JitY, OutW, OutH, LodBias, Presents,
     kHookGaugeCount, // the rest are filled by OnFlip itself
     SceneW = kHookGaugeCount, SceneH, UpscalerMode, PresetId, DlssModel, FgOn, kGaugeCount
 };
@@ -156,9 +163,14 @@ public:
     static constexpr int kMaxRequests = 4;
     static constexpr std::uint32_t kFramesAfter = 60;
     static constexpr std::int64_t kGraceUs = 5'000'000;    ///< no auto dumps in the first 5 s
-    static constexpr std::int64_t kCooldownUs = 15'000'000; ///< per kind
+    static constexpr std::int64_t kCooldownUs = 15'000'000; ///< per kind (but skipped)
+    /// skipped: draws skip while pipelines compile, often in the first minutes with a cold cache.
+    static constexpr std::int64_t kSkippedCooldownUs = 60'000'000;
     static constexpr int kMaxAutoDumps = 30;
-    static constexpr std::int64_t kResetQuietUs = 2'000'000; ///< no movie/UI frame within 2 s
+    /// No stall, reset or skipped dump within 2 s of a movie, UI-only or loading frame.
+    static constexpr std::int64_t kQuietUs = 2'000'000;
+    static constexpr float kCutMove = 0.25f; ///< GOW3_FLIGHT_CUT_MOVE default
+    static constexpr float kCutDeg = 30.0f;  ///< GOW3_FLIGHT_CUT_DEG default
 
     struct Request {
         std::atomic<int> state{0}; ///< 0 free, 1 claimed, 2 ready for the dump thread
@@ -185,6 +197,8 @@ public:
     std::vector<Row> Collect(std::uint64_t from, std::uint64_t to) const;
 
     int AutoDumps() const { return auto_dumps_done; }
+    float CutMove() const { return cut_move; }
+    float CutDeg() const { return cut_deg; }
 
 private:
     struct Slot {
@@ -196,6 +210,7 @@ private:
 
     std::uint32_t size;
     bool auto_on;
+    float cut_move, cut_deg; ///< GOW3_FLIGHT_CUT_MOVE / GOW3_FLIGHT_CUT_DEG
     std::vector<Slot> ring;
     std::atomic<std::uint64_t> last_seq{0};
     Request requests[kMaxRequests];
@@ -206,7 +221,7 @@ private:
     std::uint32_t dt_n = 0, move_n = 0;
     std::int64_t last_auto_us[kAutoKindCount];
     int auto_dumps_done = 0;
-    std::int64_t last_ui_movie_us = -kResetQuietUs;
+    std::int64_t last_quiet_us = -kQuietUs; ///< last row with a movie, UI-only or loading frame
     bool reset_pending = false;
     std::uint64_t reset_seq = 0;
     std::int64_t reset_us = 0;

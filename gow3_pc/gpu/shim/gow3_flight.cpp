@@ -40,7 +40,7 @@ namespace {
 constexpr const char* kEventNames[kEventCount] = {
     "UpscalerReset", "HistoryInvalidated", "NoCamera", "DrawSkippedPendingCompile",
     "PipelineCompiled", "UpscalerFeatureCreated", "StretchedOrUiFrame", "FrameGenOnOff",
-    "TextureGcEvict", "MovieFrame"};
+    "TextureGcEvict", "MovieFrame", "LoadingFrame"};
 constexpr const char* kAutoNames[kAutoKindCount] = {"stall", "reset", "skipped", "camjump"};
 constexpr const char* kColumns[] = {
     "seq", "unix_ms", "t_ms", "dt_ms", "marker", "events", "event_names", "event_detail",
@@ -50,11 +50,18 @@ constexpr const char* kColumns[] = {
     "arena_mb", "image_mb", "images_live",
     "cam_x", "cam_y", "cam_z", "fwd_x", "fwd_y", "fwd_z", "proj_x", "proj_y", "jit_x", "jit_y",
     "out_w", "out_h", "lod_bias", "scene_w", "scene_h", "upscaler", "preset", "dlss_model",
-    "fg_on", "cam_jump_deg", "cam_move"};
-// Distance a camera must move in one flip to count as a cut (with 8x the median of the last 32
-// flips). shortcut: the games' world units are not known (frame_gen_camera.h); 2 is a guess, to be
-// tuned from the first dumps of real cuts.
-constexpr float kMinCutMove = 2.0f;
+    "fg_on", "cam_jump_deg", "cam_move", "presents"};
+
+// A positive number from the environment, else `fallback`.
+float EnvFloat(const char* name, float fallback) {
+    const char* text = std::getenv(name);
+    if (!text || !text[0]) {
+        return fallback;
+    }
+    char* end = nullptr;
+    const float value = std::strtof(text, &end);
+    return end != text && std::isfinite(value) && value > 0.0f ? value : fallback;
+}
 
 float Median(const float* values, std::uint32_t count) {
     float tmp[32];
@@ -70,8 +77,10 @@ const char* AutoKindName(int kind) {
 }
 
 Recorder::Recorder(std::uint32_t ring_size, bool auto_dumps)
-    : size{ring_size}, auto_on{auto_dumps}, ring(ring_size) {
-    std::fill(std::begin(last_auto_us), std::end(last_auto_us), -kCooldownUs);
+    : size{ring_size}, auto_on{auto_dumps},
+      cut_move{EnvFloat("GOW3_FLIGHT_CUT_MOVE", kCutMove)},
+      cut_deg{EnvFloat("GOW3_FLIGHT_CUT_DEG", kCutDeg)}, ring(ring_size) {
+    std::fill(std::begin(last_auto_us), std::end(last_auto_us), -kSkippedCooldownUs);
 }
 
 void Recorder::Record(Row row) {
@@ -94,30 +103,37 @@ void Recorder::Record(Row row) {
 
     const std::int64_t t = row.t_us;
     const bool grace = t < kGraceUs;
-    if (row.events & (StretchedOrUiFrame | MovieFrame)) {
-        last_ui_movie_us = t;
-        reset_pending = false; // a reset next to a menu, loading screen or movie is expected
+    // A movie, a UI-only frame (menu, loading screen) or the presenter's own loading frame: a
+    // reset, a long interval or a skipped draw next to one is expected, not a glitch. The row's
+    // events are those since the previous flip, so they cover the interval before it too.
+    const bool quiet_frame = row.events & (StretchedOrUiFrame | MovieFrame | LoadingFrame);
+    if (quiet_frame) {
+        reset_pending = false;
     }
     if (auto_on && have_prev) {
-        // stall: an interval over max(60 ms, 4x the median of the last 32).
+        // stall: an interval over max(60 ms, 4x the median of the last 32), not across or within
+        // 2 s after a quiet frame (a level load is one long interval between flips).
         const float dt = float(t - prev.t_us) / 1000.0f;
-        if (dt > 60.0f && !grace && dt_n >= 8 && dt > std::max(60.0f, 4.0f * Median(dts, dt_n))) {
+        if (dt > 60.0f && !grace && !quiet_frame && prev.t_us - last_quiet_us >= kQuietUs &&
+            dt_n >= 8 && dt > std::max(60.0f, 4.0f * Median(dts, dt_n))) {
             PostAuto(AutoStall, row.seq, row.seq + kFramesAfter, t);
         }
         dts[dt_n++ % 32] = dt;
-        // reset: posted 2 s later if no movie/UI frame came meanwhile (or 2 s before).
-        if (reset_pending && t - reset_us >= kResetQuietUs) {
+        // reset: posted 2 s later if no quiet frame came meanwhile (or 2 s before).
+        if (reset_pending && t - reset_us >= kQuietUs) {
             reset_pending = false;
             PostAuto(AutoReset, reset_seq, row.seq + kFramesAfter, t);
         }
-        if ((row.events & UpscalerReset) && !reset_pending && !grace &&
-            t - last_ui_movie_us >= kResetQuietUs && AutoAllowed(AutoReset, t)) {
+        if ((row.events & UpscalerReset) && !reset_pending && !grace && !quiet_frame &&
+            t - last_quiet_us >= kQuietUs && AutoAllowed(AutoReset, t)) {
             reset_pending = true;
             reset_seq = row.seq;
             reset_us = t;
         }
-        // skipped: a draw dropped while its pipeline compiled.
-        if ((row.events & DrawSkippedPendingCompile) && !grace) {
+        // skipped: a draw dropped while its pipeline compiled, in a gameplay frame (no quiet
+        // frame in the last 2 s); counted in every row, dumped at most once a minute.
+        if ((row.events & DrawSkippedPendingCompile) && !grace && !quiet_frame &&
+            t - last_quiet_us >= kQuietUs) {
             PostAuto(AutoSkipped, row.seq, row.seq + kFramesAfter, t);
         }
         // camjump: a cut that no reset or history invalidation in the flip before, the flip
@@ -132,9 +148,12 @@ void Recorder::Record(Row row) {
         }
         float deg, move;
         if (CameraChange(prev, row, deg, move)) {
-            bool jump = deg > 30.0f;
-            if (!jump && move > kMinCutMove && move_n >= 8) {
-                jump = move > std::max(kMinCutMove, 8.0f * Median(moves, move_n));
+            // The move rule is relative (8x the median of the last 32 flips): the games' world
+            // units are not known (frame_gen_camera.h). The floor only keeps a still camera's
+            // jitter-sized moves out.
+            bool jump = deg > cut_deg;
+            if (!jump && move > cut_move && move_n >= 8) {
+                jump = move > 8.0f * Median(moves, move_n);
             }
             moves[move_n++ % 32] = move;
             if (jump && camjump_left == 0 && !grace && !((row.events | prev.events) & noticed) &&
@@ -144,12 +163,16 @@ void Recorder::Record(Row row) {
             }
         }
     }
+    if (quiet_frame) {
+        last_quiet_us = t;
+    }
     prev = row;
     have_prev = true;
 }
 
 bool Recorder::AutoAllowed(int kind, std::int64_t t_us) const {
-    return auto_on && auto_dumps_done < kMaxAutoDumps && t_us - last_auto_us[kind] >= kCooldownUs;
+    const std::int64_t cooldown = kind == AutoSkipped ? kSkippedCooldownUs : kCooldownUs;
+    return auto_on && auto_dumps_done < kMaxAutoDumps && t_us - last_auto_us[kind] >= cooldown;
 }
 
 void Recorder::PostAuto(int kind, std::uint64_t marker_seq, std::uint64_t fire_seq,
@@ -277,7 +300,7 @@ std::string Csv(const std::vector<Row>& rows, std::uint64_t marker_seq, const st
             "%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%.3f,%.3f,%.0f,%.3f,%.3f,%.3f,"
             "%.1f,%.1f,%llu,"
             "%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,"
-            "%.0f,%.0f,%.4g,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%.6g\n",
+            "%.0f,%.0f,%.4g,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%.6g,%.0f\n",
             static_cast<unsigned long long>(row.seq),
             static_cast<long long>(start_unix_ms + row.t_us / 1000), t_ms,
             prev ? double(row.t_us - prev->t_us) / 1000.0 : 0.0, row.seq == marked ? 1 : 0,
@@ -291,7 +314,7 @@ std::string Csv(const std::vector<Row>& rows, std::uint64_t marker_seq, const st
             static_cast<unsigned long long>(row.cum[CImagesLive]),
             g[CamX], g[CamY], g[CamZ], g[FwdX], g[FwdY], g[FwdZ], g[ProjX], g[ProjY], g[JitX], g[JitY],
             g[OutW], g[OutH], g[LodBias], g[SceneW], g[SceneH], g[UpscalerMode], g[PresetId],
-            g[DlssModel], g[FgOn], deg, move);
+            g[DlssModel], g[FgOn], deg, move, g[Presents]);
         if (n > 0) {
             out.append(line, std::min<std::size_t>(std::size_t(n), sizeof(line) - 1));
         }
