@@ -82,42 +82,61 @@ def icon(widget, name, size, color):
 
 def wordmark(widget, height):
     """The Collection logo's UNCHARTED (tools/build_ui_art.py) as a photo `height` px tall, or None
-    when the file is missing (the launcher then draws text). 25 Oct 2026: it is vector art
-    (wordmark.svg) drawn at exactly the size asked, for any screen scale: no bitmap is stretched or
-    filtered to fit (see svg_mask)."""
+    when the file is missing, unreadable or draws nothing (the launcher then draws text). 25 Oct 2026:
+    it is vector art (wordmark.svg) drawn at exactly the size asked, for any screen scale: no bitmap
+    is stretched or filtered to fit (see svg_mask)."""
     path = GAME_UI / "wordmark.svg"
     if not path.exists():
         return None
     def make():
         mask = svg_mask(path, height)
+        if not mask.getbbox():
+            raise ValueError("wordmark.svg has no contours")
         image = Image.new("RGBA", mask.size, rgb("#f0e9da") + (0,))
         image.putalpha(mask)
         return image
-    return photo(widget, ("wordmark", int(height)), make)
+    try:  # photo() caches only what make() returned, so a failure is retried (and fails) each time
+        return photo(widget, ("wordmark", int(height)), make)
+    except (ValueError, KeyError, AttributeError, OSError):
+        return None
 
 
-_SVG_TOKENS = re.compile(r"[MLCZmlcz]|-?\d*\.?\d+(?:[eE][-+]?\d+)?")
+_SVG_TOKENS = re.compile(r"[A-Za-z]|-?\d*\.?\d+(?:[eE][-+]?\d+)?")  # every letter, so an unsupported one is seen
 
 
 def svg_contours(path):
     """The closed contours (lists of points, in the SVG's own units) of every <path> in a
-    VectorCraft SVG: M L C Z, absolute and relative; curves flattened finely (16 steps)."""
+    VectorCraft SVG: M L C Z, absolute and relative; curves flattened finely (16 steps). Anything
+    else (H V S Q T A, a number before a command, a missing viewBox) raises ValueError: 25 Oct 2026
+    review, those were read as the previous command's numbers or crashed with KeyError/AttributeError."""
     text = Path(path).read_text(encoding="utf-8")
-    view = [float(v) for v in re.search(r'viewBox="([^"]+)"', text).group(1).split()]
+    found = re.search(r'viewBox="([^"]+)"', text)
+    if not found:
+        raise ValueError("SVG without a viewBox")
+    view = [float(v) for v in found.group(1).split()]
     contours = []
-    for d in re.findall(r'<path d="([^"]+)"', text):
-        tokens, i, command, here, start, points = _SVG_TOKENS.findall(d), 0, "", (0.0, 0.0), (0.0, 0.0), []
+    for tag in re.findall(r"<path\b[^>]*>", text):  # `d` need not be the first attribute (not `id=`)
+        d = re.search(r'\sd="([^"]*)"', tag)
+        if not d:
+            continue
+        tokens, i, command, here, start, points = _SVG_TOKENS.findall(d.group(1)), 0, "", (0.0, 0.0), (0.0, 0.0), []
         while i < len(tokens):
             if tokens[i].isalpha():
                 command = tokens[i]
+                if command not in "MLCZmlcz":
+                    raise ValueError(f"unsupported SVG path command {command!r}")
                 i += 1
                 if command in "Zz":
                     if len(points) > 2:
                         contours.append(points)
                     points, here = [], start
                 continue
+            if command in ("", "Z", "z"):
+                raise ValueError("SVG path number without a drawing command")
             n = {"M": 2, "m": 2, "L": 2, "l": 2, "C": 6, "c": 6}[command]
             v = [float(t) for t in tokens[i:i + n]]
+            if len(v) < n:
+                raise ValueError("SVG path ends inside a command")
             i += n
             if command.islower():
                 v = [v[k] + here[k % 2] for k in range(n)]
@@ -136,6 +155,8 @@ def svg_contours(path):
                     points.append((u**3 * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t**3 * x3,
                                    u**3 * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t**3 * y3))
                 here = (x3, y3)
+        if len(points) > 2:  # SVG fills an open subpath as if closed
+            contours.append(points)
     return view, contours
 
 
