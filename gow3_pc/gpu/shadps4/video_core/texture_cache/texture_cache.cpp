@@ -22,6 +22,7 @@
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "gow3_prompts.h"
+#include "gow3_atlas.h"
 #include "video_core/texture_cache/tile_manager.h"
 
 // src/runtime_videodec.c: the last decoded video frame buffer (diagnostics).
@@ -1519,6 +1520,28 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     scheduler.EndRendering();
+
+    // gow3 25 Oct 2026: a font atlas whose host image is larger than the guest's (gow3_atlas.cpp)
+    // uploads its reconstruction, linear, at the host size.
+    if (image.info.host_scale > 1) {
+        if (const auto texels = Gow3Atlas::Upscale(image.info.guest_address, image.info.size.width,
+                                                   image.info.size.height, image.info.pitch,
+                                                   static_cast<u32>(image.info.tile_mode),
+                                                   image.info.host_scale)) {
+            const auto staging =
+                runtime.GetStagingPool().Request(texels->data.size(), MemoryType::HostUncached, 16);
+            std::memcpy(staging.mapped, texels->data.data(), texels->data.size());
+            staging.Flush();
+            for (auto& copy : image_copies) {
+                copy.bufferOffset = staging.offset;
+                copy.bufferRowLength = texels->width;
+                copy.bufferImageHeight = texels->height;
+                copy.imageExtent = vk::Extent3D{texels->width, texels->height, 1};
+            }
+            runtime.UploadImage(&image, staging.buffer, image_copies);
+            return;
+        }
+    }
 
     // gow3: keyboard, mouse and controller button prompts (gow3_prompts.cpp): the games' button
     // icon atlas and button pictures upload redrawn (linear texels) while their icons show.

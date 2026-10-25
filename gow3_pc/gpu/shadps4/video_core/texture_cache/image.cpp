@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "gow3_toggles.h"
+#include "gow3_atlas.h"
 #include <ranges>
 #include "common/assert.h"
 #include "common/thread.h"
@@ -493,6 +494,12 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
 
     image_uid = global_image_uid.Next();
     mip_hashes.resize(info.resources.levels);
+    // gow3 25 Oct 2026: known font atlases get a larger host image (gow3_atlas.cpp).
+    info.host_scale = Gow3Atlas::HostScale(
+        info.guest_address, info.size.width, info.size.height, info.pitch, info.num_bits,
+        info.resources.levels, info.resources.layers, static_cast<u32>(info.tile_mode), info.guest_size,
+        info.type == AmdGpu::ImageType::Color2D && !info.props.is_depth && !info.props.is_block &&
+            info.pixel_format == vk::Format::eR8G8B8A8Unorm && info.num_samples == 1);
     vk::ImageCreateFlags flags{vk::ImageCreateFlagBits::eMutableFormat |
                                vk::ImageCreateFlagBits::eExtendedUsage};
     if (info.props.is_volume) {
@@ -553,8 +560,8 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
         .imageType = ConvertImageType(info.type),
         .format = supported_format,
         .extent{
-            .width = info.size.width,
-            .height = info.size.height,
+            .width = info.size.width * info.host_scale,
+            .height = info.size.height * info.host_scale,
             .depth = info.size.depth,
         },
         .mipLevels = static_cast<u32>(info.resources.levels),

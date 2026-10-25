@@ -90,6 +90,9 @@ struct ImageInfo {
     std::array<MipInfo, 16> mips_layout;
     VAddr guest_address{};
     u32 guest_size{};
+    /// gow3 25 Oct 2026: the host image has this many times the guest's width and height (font
+    /// atlases, gow3_atlas.cpp). `size`, `pitch` and `guest_size` stay the game's; Image::Image sets it.
+    u32 host_scale{1};
     u8 bank_swizzle{};
     bool alt_tile{};
 
