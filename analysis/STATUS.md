@@ -4570,8 +4570,9 @@ the scene-constant camera of U1, the flat camera of U2), compared with the previ
   not cuts; a cut's own move is kept out of the median.
 - Conservative on purpose: mouse flicks reach ~30 degrees per frame at 60 FPS; walking at 0.05
   units a frame gives the 1.0 floor (16x would be 0.8), a vehicle at 0.5 a frame an 8-unit limit.
-- The 45 degrees and 16x are stricter than the flight recorder's camjump report (30 degrees, 8x
-  over 0.25 units), so a reported camjump may be a fast turn the reset rightly ignores.
+- The flight recorder's camjump rule uses the same defaults (45 degrees, 16x over a 1.0 floor;
+  `GOW3_FLIGHT_CUT_DEG` / `GOW3_FLIGHT_CUT_MOVE` override) since 25 Oct, so a camjump dump means a
+  cut the upscaler did not reset for. Its first thresholds (30 degrees, 8x, 0.25) were stricter.
 
 **What a cut does** (`CameraMotion::CheckCut`, vk_camera_motion.cpp; `TemporalUpscaler::NoteCameraCut`,
 vk_temporal_upscaler.cpp).
@@ -4613,7 +4614,17 @@ frame: limit 8, 0.9 no cut, 9 cut; `GOW3_CUT_MOVE` 4 / -3 / abc and a 4-unit flo
 `ninja -C out/gpu camera-cut-test flight-test` 0, `camera-cut-test.exe` 0, `flight-test.exe` 0
 (all passed), `gow3_pc/build.sh` 0.
 
-**Not verified.** No game run: that the cut fires at U3's Continue frame (and with which rule:
+**Game check, 25 Oct 2026 10:36-10:40** (U3, walking with the left stick). Both Continue cuts
+(168.2 degrees / 102.3 units at seq 188; 161.5 degrees / 106.5 units at the scene's first frame)
+now carry UpscalerReset reason 10 + HistoryInvalidated. `d_compiles` now counts (87 and 149 in the
+first two dumps). Walking and fast stick turns (up to 22.7 degrees and 1.72 units per flip) caused
+no reset. One more reset came from the 0.5 s stale rule after an 812 ms hitch (turn 6.9 degrees,
+move 0.43), which is intended (history older than 0.5 s). Auto-camjump fired once on walking (11
+degrees, 0.73 units) with the old flight thresholds (30 degrees, 8x, 0.25 floor), while the
+detector correctly did not; hence the flight defaults now match the detector (45 degrees, 16x,
+1.0 floor). `flight-test` updated: small-unit worlds are tested with `GOW3_FLIGHT_CUT_MOVE=0.25`.
+
+**Not verified (before that game check).** No game run: that the cut fires at U3's Continue frame (and with which rule:
 stale, turn or move), that the ghost of the menu image is gone, how many cuts a normal session
 shows (cutscene shot changes should count; a fast vehicle or a respawn might too), and that no
 reset fires during ordinary play. U1's scene-constant and U2's flat cameras are not tested in a

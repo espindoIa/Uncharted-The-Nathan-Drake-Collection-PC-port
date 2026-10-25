@@ -148,12 +148,14 @@ void Recorder::Record(Row row) {
         }
         float deg, move;
         if (CameraChange(prev, row, deg, move)) {
-            // The move rule is relative (8x the median of the last 32 flips): the games' world
+            // The move rule is relative (16x the median of the last 32 flips): the games' world
             // units are not known (frame_gen_camera.h). The floor only keeps a still camera's
-            // jitter-sized moves out.
+            // jitter-sized moves out. Same thresholds as the upscaler's detector
+            // (gow3_camera_cut.h): 25 Oct 10:39 U3 walking, the old 30 deg / 8x / 0.25 flagged an
+            // 11 deg, 0.73 unit frame the detector rightly ignored.
             bool jump = deg > cut_deg;
             if (!jump && move > cut_move && move_n >= 8) {
-                jump = move > 8.0f * Median(moves, move_n);
+                jump = move > 16.0f * Median(moves, move_n);
             }
             moves[move_n++ % 32] = move;
             if (jump && camjump_left == 0 && !grace && !((row.events | prev.events) & noticed) &&

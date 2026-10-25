@@ -15,8 +15,10 @@
 //   GOW3_FLIGHT_AUTO=0     no automatic (anomaly) dumps.
 //   GOW3_FLIGHT_FRAMES=<n> ring size (default 1024, 64..8192).
 //   GOW3_FLIGHT_CUT_MOVE=<units>  camera cut rule: the smallest move per flip that can count as
-//                          a cut (default 0.25; the rule itself is relative, 8x the median move).
-//   GOW3_FLIGHT_CUT_DEG=<deg>     camera cut rule: a turn per flip over this is a cut (default 30).
+//                          a cut (default 1.0; the rule itself is relative, 16x the median move).
+//   GOW3_FLIGHT_CUT_DEG=<deg>     camera cut rule: a turn per flip over this is a cut (default 45).
+//                          The defaults match the upscaler's detector (gow3_camera_cut.h), so a
+//                          camjump dump means a cut the upscaler did not reset for.
 //
 // Output: <dir>/flight_<YYYYmmdd-HHMMSS>-<mmm>_<reason>.csv (local time), written as <name>.tmp
 // and renamed. Automatic dumps are named auto-<kind> (stall, reset, skipped, camjump). Line 1:
@@ -170,8 +172,8 @@ public:
     static constexpr int kMaxAutoDumps = 30;
     /// No stall, reset or skipped dump within 2 s of a movie, UI-only or loading frame.
     static constexpr std::int64_t kQuietUs = 2'000'000;
-    static constexpr float kCutMove = 0.25f; ///< GOW3_FLIGHT_CUT_MOVE default
-    static constexpr float kCutDeg = 30.0f;  ///< GOW3_FLIGHT_CUT_DEG default
+    static constexpr float kCutMove = 1.0f; ///< GOW3_FLIGHT_CUT_MOVE default
+    static constexpr float kCutDeg = 45.0f; ///< GOW3_FLIGHT_CUT_DEG default
 
     struct Request {
         std::atomic<int> state{0}; ///< 0 free, 1 claimed, 2 ready for the dump thread

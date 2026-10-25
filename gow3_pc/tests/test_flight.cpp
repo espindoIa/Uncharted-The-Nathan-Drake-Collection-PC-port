@@ -377,9 +377,11 @@ std::int64_t Walk(Recorder& recorder, std::int64_t t, int n, float& x, float ste
     return t;
 }
 
-// The relative move rule with small world units: at 0.01 per flip, 0.2 is under the 0.25
-// floor (no cut) and 0.5 is a cut (the old 2-unit floor missed it).
+// The relative move rule with small world units, via the env override GOW3_FLIGHT_CUT_MOVE=0.25
+// (the default floor is 1.0, like the upscaler's detector): at 0.01 per flip, 0.2 is under the
+// 0.25 floor (no cut) and 0.5 is a cut.
 void TestCutSmallUnits() {
+    SetEnv("GOW3_FLIGHT_CUT_MOVE", "0.25");
     Recorder recorder(1024, true);
     float x = 0.0f;
     std::int64_t t = Walk(recorder, 6'000 * kMs, 40, x, 0.01f);
@@ -398,9 +400,23 @@ void TestCutSmallUnits() {
     t = Walk(fast, 6'000 * kMs, 40, x, 0.5f);
     Walk(fast, t, 3, x, 0.5f);
     assert(Ready(fast, AutoCamjump) == 0);
+    SetEnv("GOW3_FLIGHT_CUT_MOVE", "");
+
+    // Defaults match the upscaler's detector (45 degrees, 1.0 floor, 16x): the 25 Oct walking
+    // frame (0.73 units after ~0.05 steps) is no cut, 5 units is.
+    assert(Recorder::kCutMove == 1.0f && Recorder::kCutDeg == 45.0f);
+    Recorder walking(1024, true);
+    x = 0.0f;
+    t = Walk(walking, 6'000 * kMs, 40, x, 0.05f);
+    t = Walk(walking, t, 1, x, 0.73f);
+    t = Walk(walking, t, 5, x, 0.05f);
+    assert(Ready(walking, AutoCamjump) == 0);
+    t = Walk(walking, t, 1, x, 5.0f);
+    Walk(walking, t, 3, x, 0.05f);
+    assert(Find(walking, AutoCamjump));
 
     // The environment overrides; garbage or non-positive values keep the defaults.
-    assert(recorder.CutMove() == Recorder::kCutMove && recorder.CutDeg() == Recorder::kCutDeg);
+    assert(recorder.CutDeg() == Recorder::kCutDeg);
     SetEnv("GOW3_FLIGHT_CUT_MOVE", "0.05");
     SetEnv("GOW3_FLIGHT_CUT_DEG", "12.5");
     {
