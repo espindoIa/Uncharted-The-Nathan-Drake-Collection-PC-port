@@ -4,7 +4,9 @@ Run: py -m unittest test_uncharted_launcher_ui  (from gow3_pc/tests; needs Tk an
 """
 import importlib.machinery
 import importlib.util
+import io
 import os
+import struct
 import sys
 import tempfile
 import time
@@ -483,6 +485,69 @@ class LauncherUiTest(unittest.TestCase):
     def test_launcher_uses_no_native_message_box(self):
         text = (LAUNCHER / "uncharted_launcher.pyw").read_text(encoding="utf-8")
         self.assertNotIn("messagebox.", text.split('if __name__ == "__main__"')[0])
+
+
+@unittest.skipIf(uncharted_launcher is None, f"launcher needs tkinter and Pillow: {IMPORT_ERROR}")
+class ArtTest(unittest.TestCase):
+    """launcher/art.py (25 Oct 2026 redesign): the trophy pack reader, the icons and the accent."""
+
+    def setUp(self):
+        self.art = sys.modules["art"]
+
+    def trp(self, files):
+        """A PS4 trophy pack: a 0x60 byte header, 0x40 byte entries (name[32], offset, size), the data."""
+        header = bytearray(0x60)
+        header[:4] = b"\xdc\xa2\x4d\x00"
+        header[0x10:0x18] = struct.pack(">II", len(files), 0x40)
+        entries, data, offset = b"", b"", 0x60 + 0x40 * len(files)
+        for name, payload in files:
+            entries += name.encode().ljust(32, b"\0") + struct.pack(">QQ", offset + len(data), len(payload)) + bytes(16)
+            data += payload
+        return bytes(header) + entries + data
+
+    def test_trophy_pack_gives_the_coin(self):
+        from PIL import Image
+        coin = Image.new("RGBA", (40, 30), (0, 0, 0, 0))
+        coin.paste((200, 160, 60, 255), (10, 5, 30, 25))  # the coin, in a transparent frame
+        png = io.BytesIO()
+        coin.save(png, "PNG")
+        game = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(game, ignore_errors=True))
+        (game / "sce_sys" / "trophy").mkdir(parents=True)
+        (game / "sce_sys" / "trophy" / "trophy02.trp").write_bytes(
+            self.trp([("TROP.ESFM", b"x" * 7), ("GR001.PNG", png.getvalue())]))
+        self.assertEqual(self.art.trophy_file(game / "sce_sys" / "trophy" / "trophy02.trp", "TROP.ESFM"), b"x" * 7)
+        self.assertEqual(self.art.game_coin(game, "2").size, (20, 20))  # cropped to the coin
+        self.assertEqual(self.art.coin_image(game, "2", 64, "#e5553f").size, (64, 64))  # enlarged
+        self.assertIsNone(self.art.game_coin(game, "1"))  # no pack: a drawn medallion instead
+        self.assertEqual(self.art.coin_image(game, "1", 64, "#e5553f").size, (64, 64))
+        (game / "bad.trp").write_bytes(b"not a trophy pack")
+        self.assertIsNone(self.art.trophy_file(game / "bad.trp", "GR001.PNG"))
+
+    def test_icons_are_tinted_masters_at_any_size(self):
+        names = {p.stem for p in (LAUNCHER / "assets" / "icons").glob("*.png")}
+        self.assertTrue({"home", "display", "performance", "controls", "gameplay", "system", "play", "stop",
+                         "update", "code", "info", "warning", "error", "help", "check"} <= names)
+        for size in (16, 48):
+            image = self.art.icon_image("home", size, "#e5553f")
+            self.assertEqual(image.size, (size, size))
+            self.assertEqual(image.getpixel((size // 2, size // 2))[:3], (0xe5, 0x55, 0x3f))
+        self.assertEqual(self.art.mix("#000000", "#ffffff", 0.5), "#808080")
+
+    def test_selecting_a_game_turns_the_accent_to_its_colour(self):
+        mod, widgets = uncharted_launcher, sys.modules["widgets"]
+        try:
+            root = tk.Tk()
+        except tk.TclError as error:
+            self.skipTest(f"no Tk display: {error}")
+        self.addCleanup(root.destroy)
+        root.withdraw()
+        label = tk.Label(root, bg=widgets.ACCENT)
+        widgets.set_accent(root, "#123456")
+        self.assertEqual((widgets.ACCENT, label.cget("bg")), ("#123456", "#123456"))
+        widgets.set_accent(root, "#e6b44c")
+        self.assertEqual(label.cget("bg"), "#e6b44c")
+        self.assertEqual(len({g["accent"] for g in mod.GAMES}), 3)
 
 
 @unittest.skipIf(uncharted_launcher is None, f"launcher needs tkinter and Pillow: {IMPORT_ERROR}")

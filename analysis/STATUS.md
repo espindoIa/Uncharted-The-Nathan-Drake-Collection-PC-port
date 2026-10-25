@@ -30,6 +30,7 @@ New entries go at the end, dated, measured numbers only.
 - Market frame rate = Reflex sleep, pacer replaces it: `Reflex pacer: market frame rate (24 Oct 2026)`
 - Upstream merges: `21 October 2026 (night): upstream 0.5.0 merged`, `Upstream 0.6.0 merged (24 Oct 2026)`
 - Launcher overhaul (sidebar, Home checklist, keyboard/controller, dialogs): `24 October 2026: launcher overhaul`
+- Launcher redesign (stage, per-game colour, 4K icons, trophy coins): `Launcher redesign and 4K-sharp drawing (25 Oct 2026)`
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
@@ -4364,3 +4365,60 @@ Merge of upstream v0.6.0 (7b04bac) into claude/merge-upstream-0.6.0 (base a77e0c
 Toggle bits: upstream 0.6.0 adds none (no Disabled/Disabled2 use in its diff); the fork's Disabled2 bits up to 1ull<<41 are unchanged. Fork pieces checked present after the merge: DispatchRun* / StageDispatchRun (vk_rasterizer.cpp), liverpool.cpp cut hooks and RunComputeReleaseMem (liverpool.cpp not touched by upstream), static mesh snapshots, gow3_reflex.cpp, Streamline backend, LDS bounds pass (none touched by upstream), launcher Reflex / FG / Streamline options.
 
 Not verified: any game run (boots are the user's); the save profile, vibration and overlay rows in the launcher GUI; direct mouse aim with the fork's aim patches; GOW3_MIP_TARGETS with the fork's scene-resolution and upscaler paths in U3; dispatch-run counts with upstream's null-V# rule; carry_over on a real update.
+
+## Launcher redesign and 4K-sharp drawing (25 Oct 2026)
+
+Player-facing wording: CHANGELOG, Unreleased, 25 Oct 2026. Two mockups were drawn in VectorCraft
+(A "expedition journal", B "cinematic"); the user picked B.
+
+What changed:
+
+- Layout (uncharted_launcher.pyw build_stage / layout / render_stage): one canvas (the stage) fills
+  the window. Its backdrop is a Pillow image redrawn on resize (60 ms debounce) and on a game
+  switch: pic1.png (or pic0.png) of the player's game, blurred at quarter size, 98% dark on the
+  left to 57% on the right, the selected game's colour as a radial glow, and a film grain
+  (launcher/assets/grain.png, a 512 px tile made in PhotoCraft: add noise 18, gaussian,
+  monochromatic, blur 0.4). The tab bar, GitHub, the section panel, the PLAY panel and a halo
+  round the selected game card are drawn into it. Tabs, cards, PLAY, UPDATE and GitHub are small
+  canvases placed on the stage; each shows its crop of the backdrop (backdrop()), so the glass
+  reads as see-through. The section panel is a Frame inset by the corner radius, so the backdrop's
+  rounded corners show. The banner and the sidebar are gone; the game's name moved under the
+  section title (section_sub). Status and substatus sit under PLAY and wrap.
+- Sizes: default 1280x780, minimum width = margins + 264 px column + 880 px body (fit_to_screen).
+  The Controls grid's controller column went from 14 to 8 characters (an icon) and the action
+  names from 17 to 15, so both columns fit 880 px.
+- Per-game accent (GAMES "accent": #e6b44c, #e5553f, #f08c2a): widgets.set_accent swaps every Tk
+  option holding the old accent (bg, fg, highlight, active, select) and the module ACCENT globals;
+  widgets read ACCENT when they draw; select_game calls apply_accent before refresh_controls.
+- 4K-sharp drawing (launcher/art.py): rounded rectangles drawn 4x and reduced with LANCZOS
+  (rounded_image, lru_cache of 96: the stage's big panels come back on each game switch), icons
+  from 192 px white masters tinted and reduced (icon). Tk's smoothed polygons (round_rect) are no
+  longer used. Toggle, Chip, Segmented (now a canvas tray with one Label per option, its pill as
+  the Label's image), Dropdown, ScrollBar, Badge, InfoTip, DialogButton, Dialog icons, Toast and the
+  preset cards use them. Toggle, Chip, Segmented and Dropdown draw their focus ring as a rounded
+  outline. Fonts are vector, so text was already sharp.
+- Icon set: 18 icons on a 24 pt grid, 1.8 pt round strokes, drawn in VectorCraft;
+  sources launcher/assets/icons/src/*.svg, masters launcher/assets/icons/*.png (192 px = 8x).
+  App icon redrawn in VectorCraft (assets/app-icon.svg, 1024 px app-icon.png);
+  tools/make_launcher_icon.py now reduces that master to uncharted.ico (16-256) and icon.png (512).
+- Game art: art.trophy_file reads sce_sys/trophy/trophy0N.trp of the player's game (header 0x60
+  bytes, count at 0x10, entry size at 0x14, entries name[32] + offset/size u64 BE; the PNGs are
+  not encrypted). GR001.PNG (320x176, the game's coin) is cropped to its alpha and enlarged with
+  LANCZOS plus an unsharp mask when the factor is over 1.2. Nothing of the game is packaged;
+  without a game folder the card shows a drawn medallion with the game's number.
+- Dialog.show returns at once if the dialog was answered during its first update() (the UI test's
+  100 ms timer could fire there once building the dialog got slower).
+- PhotoCraft had no file access in this session (read and write authority absent), so only the
+  grain tile came from it (through its preview); the game-art upscale is done in Pillow at run time.
+
+Measured (1x, this PC): backdrop 58 ms at 1280x780, 183 ms at 2560x1560; a game switch 140-210 ms
+(was ~420 ms before caching the panels).
+
+Tested: gow3_pc/tests test_uncharted_launcher_ui, 40 tests (3 new: trophy pack reader with a
+synthetic pack, icon tint and size, set_accent). Screenshots of every section for U1/U2/U3 at
+100% and of Home at 200% (tk scaling 2; window capped by the 2560x1440 screen), and without a
+game folder. Tab order: games, tabs, panel, PLAY, GitHub.
+
+Not verified: a real 3840x2160 monitor at 150%/200% Windows scaling (only Tk scaling here); a
+controller driving the new layout; the UPDATE pill with a real release; the packaged zip;
+Wine/Proton (Bahnschrift missing falls back to Segoe UI).

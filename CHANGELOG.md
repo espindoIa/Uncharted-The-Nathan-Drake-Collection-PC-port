@@ -6,6 +6,16 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Changed (25 Oct 2026): a new look for the launcher, sharp on 4K screens.** The window now shows
+  the Collection's art, blurred behind dark glass. The three games are cards on the left, each
+  with its own coin taken from your game's files, and PLAY sits under them with the status.
+  The sections are tabs at the top, each with an icon. Every icon, button, switch and
+  card edge is drawn smoothly at the screen's scaling, so nothing is jagged or blurry at 150% or
+  200% (4K). Each game has its own colour (gold for Drake's Fortune, red for Among Thieves,
+  orange for Drake's Deception), and the buttons, choices and PLAY take that colour when you pick
+  the game. The launcher also has a new icon. The settings, shortcuts, keyboard and controller
+  work as before.
+
 - **Added (24 Oct 2026): the launcher can be used with a controller.** The D-pad or the left stick
   move through the games, the sections, the settings and the buttons; A presses a button, flips a
   switch or opens a list, left and right change a choice, B goes back to the section list (and
