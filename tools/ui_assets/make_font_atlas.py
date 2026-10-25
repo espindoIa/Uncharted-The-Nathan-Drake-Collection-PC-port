@@ -49,6 +49,7 @@ def bicubic_contrast(plane, contrast=2.0):
 
 
 def main():
+    sys.stdout.reconfigure(errors='backslashreplace')  # Cyrillic/CJK glyph names on a cp1252 console
     src, fnt, out = sys.argv[1:4]
     img = load(src)
     H, W = img.shape[:2]
