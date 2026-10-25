@@ -688,6 +688,24 @@ void VideoOutDriver::Flip(const Request& req) {
                 std::printf("Camera cuts: %llu (upscaler history reset)\n",
                             static_cast<unsigned long long>(cuts));
             }
+            // gow3 25 Oct 2026: scene sampler binds of the window (BiasExplicitLod, AnisoUnmipped).
+            {
+                using ull = unsigned long long;
+                const ull biased = Gow3Stats::samplers_biased.exchange(0);
+                const ull bias_skipped = Gow3Stats::bias_skipped_explicit.exchange(0);
+                const ull bias_mixed = Gow3Stats::bias_skipped_mixed.exchange(0);
+                const ull raised = Gow3Stats::aniso_raised.exchange(0);
+                const ull unmipped = Gow3Stats::aniso_skipped_unmipped.exchange(0);
+                const ull maxlod0 = Gow3Stats::aniso_skipped_maxlod0.exchange(0);
+                const ull explicit_lod = Gow3Stats::aniso_skipped_explicit.exchange(0);
+                if (biased + bias_skipped + raised + unmipped + maxlod0 + explicit_lod) {
+                    std::printf("Samplers (5 s): %llu scene-biased, %llu bias skipped (explicit "
+                                "LOD, of which %llu mixed); %llu aniso raised, %llu aniso "
+                                "skipped (unmipped %llu, maxlod0 %llu, explicit %llu)\n",
+                                biased, bias_skipped, bias_mixed, raised, unmipped + maxlod0 + explicit_lod,
+                                unmipped, maxlod0, explicit_lod);
+                }
+            }
             // gow3 20 Oct 2026 (GitHub #95: memory rising over a long session): what holds memory,
             // every 5 s, so a long run shows which part grows.
             {

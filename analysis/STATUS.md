@@ -32,6 +32,7 @@ New entries go at the end, dated, measured numbers only.
 - Launcher overhaul (sidebar, Home checklist, keyboard/controller, dialogs): `24 October 2026: launcher overhaul`
 - Session recorder and engine flight recorder (retroactive per-flip CSV for one-frame flashes): `25 October 2026: session recorder`, `25 October 2026: engine flight recorder`
 - Upscaler history reset on camera cuts, flight `d_compiles` fix: `25 October 2026: history reset on camera cuts`
+- Scene LOD bias skips explicit-LOD samplers, forced anisotropy skips unmipped ones: `25 October 2026: scene LOD bias and anisotropy follow the shader's sampling`
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
@@ -4632,3 +4633,59 @@ game either; their `previous = current` path is code reading only. The world uni
 1.0 floor) are not known per game. With `RunScaled` called twice in a frame the cut would be
 counted twice in `Camera cuts` (the reset itself is idempotent). `d_compiles` after the fix was
 not seen in a CSV.
+
+## 25 October 2026: scene LOD bias and anisotropy follow the shader's sampling
+
+Why: the player reported lines/bleeding at texture edges and textures that look blurred or wrong.
+Two port features change every scene sampler and had never been checked per texture:
+- Forced anisotropy (`Rasterizer::ForceAnisotropy`, ca54d74, default 16x) raised every graphics
+  sampler with a mip filter, without looking at the image. One-level textures (atlases, LUTs,
+  decals, data textures) and samplers clamped to MaxLod 0 got 16x too; anisotropy at level 0 widens
+  the footprint along one axis and reads across atlas cells / LUT rows. Its own comment said
+  unmipped samplers keep the game's setup; the code did not.
+- The scene LOD bias (`TemporalUpscaler::SceneMipBias`, -1 at DLAA since 8fe10a4, log2(r/o)-1 for
+  DLSS) is the sampler's `mipLodBias`. Vulkan adds `mipLodBias` to explicit-LOD samples as well
+  (`image_sample_l`, `_lz`), so a shader that picks its mip on purpose (blur chains, detail blends,
+  lookups) read another level. Decision with the user: keep -1 at DLAA, stop applying it there.
+
+**What the recompiler records** (`Shader::SamplerResource`, shader_recompiler/resource.h; set in
+`PatchImageSharp`, resource_patching_pass.cpp, where `ImageSampleRaw` gets
+`image_binding | sampler_binding << 16`, so both bindings and the instruction flags are known):
+- `explicit_lod`: some sample uses `has_lod || force_level0` without gather or derivatives (the
+  same precedence as `PatchImageSampleArgs`); `implicit_lod`: some sample does not.
+- `image_mask`: bit per paired image binding; `~0u` (unknown) when a binding is >= 32.
+- Merged with OR in `Descriptors::Add`, not part of its dedupe key.
+- Info is serialized as raw bytes (`InfoPersistent`), so `ShaderMetaVersion` 13 -> 14 and
+  `PipelineKeyVersion` stays 5 (review: keys contain no Info). The legacy meta version (12, no
+  binary hash) is no longer accepted: no older meta has this layout. One-time shader cache rebuild
+  for players.
+
+**What the renderer does** (vk_rasterizer.cpp `BindSamplers`, `ForceAnisotropy`):
+- Bias: a non-depth sampler with `explicit_lod` gets no scene bias (one used both ways neither: the
+  safe side). Toggle Disabled2 bit 43 `BiasExplicitLod` (8796093022208), bit set = old behaviour.
+- Anisotropy, after the existing checks: skipped when the sampler is used only with an explicit
+  LOD, when the S#'s MaxLod is 0, or when every paired image's T# (prepared `image_sharps`, else
+  `ImageResource::GetSharp`) has `last_level == base_level`. An unknown mask keeps the old
+  behaviour. Toggle Disabled2 bit 44 `AnisoUnmipped` (17592186044416), bit set = old behaviour.
+- Both toggles are read live per bind.
+- With `GOW3_FRAME_STATS=1` the 5 s printer adds `Samplers (5 s): N scene-biased, M bias skipped
+  (explicit LOD, of which X mixed); K aniso raised, J aniso skipped (unmipped U, maxlod0 Z, explicit E)` (counts per
+  sampler bind, `Gow3Stats`). The flight recorder is unchanged.
+
+**Review.** Mixed samplers (both `explicit_lod` and `implicit_lod`) lose the bias for their
+implicit samples too: the safe side, counted as "of which X mixed" in the Samplers line. The first
+start after updating has a cold shader cache (metas 14 only), so it recompiles and stutters like a
+new install. `PipelineKeyVersion` stays 5: pipeline keys contain no Info. The sampler counters only
+count with frame stats on (`Gow3Stats::enabled`), so players without diagnostics pay no atomics.
+
+**Tests.** No game run. `gow3_pc/build.sh` 0; `ninja -C out/gpu flight-test camera-cut-test` 0,
+`flight-test.exe` 0, `camera-cut-test.exe` 0 (unchanged code, regression only). No unit test of the
+new fields: Info is written with one raw byte copy, so they round-trip with the struct; checked by
+reading `Info::Serialize` / `Deserialize`.
+
+**Not verified.** That the counters show nonzero "bias skipped" and "aniso skipped (unmipped)" in
+U3 (chapter 2 market, the player's flash marks of session 20261025-091021); that the edge lines
+and the blur are gone (A/B with bits 43/44 and `GOW3_FRAME_DUMP_TRIGGER` dumps at one spot); that
+DLAA wall sharpness is kept (Laplacian metric as on 21 Oct); FPS within noise; that the cache
+rebuild completes. U1 and U2 not checked. A sampler that pairs with a mipmapped image in one draw
+and a one-level image in another is decided per draw from the bound T#s.

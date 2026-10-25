@@ -8422,9 +8422,26 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
         const auto& sampler = stage.samplers[sampler_index];
         auto ssharp =
             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
-        ForceAnisotropy(ssharp, sampler.is_depth);
-        const auto vk_sampler = texture_cache.GetSampler(
-            ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias);
+        ForceAnisotropy(ssharp, sampler, stage, prepared);
+        // gow3 25 Oct 2026 (player: blurred or wrong materials): Vulkan adds mipLodBias to
+        // explicit-LOD samples too, so a sampler the shader uses with a chosen mip gets no
+        // scene bias (one used both ways neither: the safe side). BiasExplicitLod: old way.
+        float lod_bias = sampler.is_depth ? 0.0f : sampler_lod_bias;
+        if (lod_bias != 0.0f) {
+            if (sampler.explicit_lod && !Gow3Toggle::Disabled2(Gow3Toggle::BiasExplicitLod)) {
+                lod_bias = 0.0f;
+                if (Gow3Stats::enabled) {
+                    Gow3Stats::bias_skipped_explicit.fetch_add(1, std::memory_order_relaxed);
+                    if (sampler.implicit_lod) {
+                        Gow3Stats::bias_skipped_mixed.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+            } else if (Gow3Stats::enabled) {
+                Gow3Stats::samplers_biased.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        const auto vk_sampler =
+            texture_cache.GetSampler(ssharp, Regs().ta_bc_base, sampler.is_depth, lod_bias);
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
         auto& set_write = set_writes[write_index++];
         set_write.dstSet = VK_NULL_HANDLE;
@@ -8441,7 +8458,9 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
 // the detail of the output's mip level, and surfaces seen at a grazing angle (floors, walls along
 // the view) stay blurred. Only mipmapped linear samplers of graphics draws are raised; depth
 // compares, point filters and unmipped samplers (UI, post-processing) keep the game's setup.
-void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
+void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, const Shader::SamplerResource& sampler,
+                                 const Shader::Info& stage, const PreparedStage* prepared) const {
+    const bool is_depth = sampler.is_depth;
     if (sampler_graphics && !is_depth) {
         // The game's filters, once per kind: min filter, mip filter, ratio (evidence of what the
         // games ask for, logged whether or not the setting raises them).
@@ -8461,6 +8480,47 @@ void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
     }
     if (AmdGpu::IsAnisoFilter(sharp.xy_min_filter) && sharp.MaxAniso() >= static_cast<float>(forced)) {
         return;
+    }
+    // gow3 25 Oct 2026 (player: lines at texture edges): the comment above promised unmipped
+    // samplers keep the game's setup, but only the mip filter was checked. Anisotropy at level 0
+    // widens the footprint along one axis and reads across atlas cells and LUT rows. Skipped:
+    // samplers used only with an explicit LOD (no derivatives to widen), clamped to MaxLod 0, or
+    // paired only with one-level images. An unknown pairing (binding >= 32) is raised as before.
+    if (!Gow3Toggle::Disabled2(Gow3Toggle::AnisoUnmipped)) {
+        if (sampler.explicit_lod && !sampler.implicit_lod) {
+            if (Gow3Stats::enabled) {
+                Gow3Stats::aniso_skipped_explicit.fetch_add(1, std::memory_order_relaxed);
+            }
+            return;
+        }
+        if (sharp.max_lod.Value() == 0) {
+            if (Gow3Stats::enabled) {
+                Gow3Stats::aniso_skipped_maxlod0.fetch_add(1, std::memory_order_relaxed);
+            }
+            return;
+        }
+        if (sampler.image_mask != 0 && sampler.image_mask != ~0u) {
+            bool mipmapped = false;
+            for (u32 mask = sampler.image_mask; mask != 0 && !mipmapped; mask &= mask - 1) {
+                const u32 index = static_cast<u32>(std::countr_zero(mask));
+                if (index >= stage.images.size()) {
+                    mipmapped = true; // not expected; keep the old behaviour
+                    break;
+                }
+                const auto tsharp =
+                    prepared ? prepared->image_sharps[index] : stage.images[index].GetSharp(stage);
+                mipmapped = tsharp.last_level != tsharp.base_level;
+            }
+            if (!mipmapped) {
+                if (Gow3Stats::enabled) {
+                    Gow3Stats::aniso_skipped_unmipped.fetch_add(1, std::memory_order_relaxed);
+                }
+                return;
+            }
+        }
+    }
+    if (Gow3Stats::enabled) {
+        Gow3Stats::aniso_raised.fetch_add(1, std::memory_order_relaxed);
     }
     const auto ratio = forced >= 16  ? AmdGpu::AnisoRatio::Sixteen
                        : forced >= 8 ? AmdGpu::AnisoRatio::Eight

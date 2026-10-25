@@ -36,11 +36,15 @@
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 11u; // MUBUF ADDR64 loads (gow3)
-static constexpr u32 ShaderMetaVersion = 13u; // gow3: the hash of the binary it was written with
-/// gow3 21 Oct 2026: metas of earlier builds (no binary hash) still load when their binary was
-/// written together with them (DataBase::WrittenTogether).
-static constexpr u32 LegacyShaderMetaVersion = 12u; // BufferResource::access_extent
-static constexpr u32 PipelineKeyVersion = 5u; // gow3: Info layout (ImageResource::needs_native)
+/// gow3 25 Oct 2026: 14, the meta holds Info and its layout changed (SamplerResource explicit_lod,
+/// implicit_lod, image_mask; Info is written as raw bytes). Older metas are rebuilt once.
+static constexpr u32 ShaderMetaVersion = 14u;
+/// gow3 21 Oct 2026: metas of earlier builds (no binary hash) still loaded when their binary was
+/// written together with them (DataBase::WrittenTogether). 25 Oct: no older meta has the current
+/// Info layout, so none is accepted; the constant equals the current version.
+static constexpr u32 LegacyShaderMetaVersion = ShaderMetaVersion;
+/// Pipeline keys contain no Info, so the Info layout change above does not touch them.
+static constexpr u32 PipelineKeyVersion = 5u;
 
 /// gow3: the cache name of a shader's SPIR-V. Shaders that gained multi-wave LDS barriers get a
 /// new name, so binaries cached before the fix are not found and only those shaders recompile.

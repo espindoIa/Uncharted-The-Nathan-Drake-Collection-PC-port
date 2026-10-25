@@ -6,6 +6,16 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Fix: lines at texture edges and some blurred or wrong-looking textures.** The forced
+  anisotropic filtering (Anisotropy in the menu) no longer applies to textures that have only one
+  detail level (texture atlases, decals, lookup tables), to samplers the game limits to the top
+  level, or to textures the game reads at a level it picks itself; these could show lines or
+  bleeding at their edges. The sharper texture detail behind the upscaler (DLAA/DLSS/FSR) no longer
+  shifts textures the game reads at a level it picks itself, which could look blurred or wrong;
+  ordinary surfaces stay as sharp as before. The first start after updating recompiles the shaders,
+  so the game stutters for a while, as with a new install. To compare with the old behaviour, set bit
+  43 (8796093022208, texture detail) or bit 44 (17592186044416, anisotropy) in the second number of
+  `disabled-optimizations.txt`. Not tested in the game yet.
 - **Fix: no ghost of the previous image after a camera cut.** When the camera jumps, for example
   when you leave the menu into the game or a cutscene switches shots, the anti-aliasing / upscaler
   (DLSS, FSR, TAA) no longer blends in the image from before the cut. A cut is a turn of more than
