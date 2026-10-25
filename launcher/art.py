@@ -20,6 +20,20 @@ from pathlib import Path
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 
 ASSETS = Path(__file__).resolve().parent / "assets"
+# The games' own lettering (tools/build_ui_art.py, 25 Oct 2026): their text font as a TrueType file
+# and the Collection logo's UNCHARTED, under the repository's one folder for the games' UI art.
+GAME_UI = Path(__file__).resolve().parent.parent / "gow3_pc" / "assets" / "ui"
+GAME_FONT = "Drake Serial"
+
+
+def load_game_font():
+    """Makes the games' font (GAME_FONT) usable by this process only, before Tk lists the families.
+    False when it can't (file missing, not Windows): the launcher keeps the system fonts."""
+    try:
+        import ctypes
+        return ctypes.windll.gdi32.AddFontResourceExW(str(GAME_UI / "fonts" / "drake-serial.ttf"), 0x10, 0) > 0
+    except (AttributeError, OSError):  # FR_PRIVATE (0x10) above: nothing is installed system-wide
+        return False
 SUPERSAMPLE = 4  # rounded shapes are drawn this much larger, then reduced
 
 
@@ -66,9 +80,9 @@ def icon(widget, name, size, color):
 
 
 def wordmark(widget, height):
-    """The UNCHARTED lettering (VectorCraft outlines + PhotoCraft finish, 25 Oct 2026) as a photo
-    `height` px tall, or None when the file is missing (the launcher then draws text)."""
-    path = ASSETS / "wordmark.png"
+    """The Collection logo's UNCHARTED (tools/build_ui_art.py) as a photo `height` px tall, or None
+    when the file is missing (the launcher then draws text)."""
+    path = GAME_UI / "wordmark.png"
     if not path.exists():
         return None
     def make():

@@ -97,6 +97,9 @@ Co-Authored-By: ...
 - Every commit builds. Run the checks (below) before committing.
 - Never commit game files, dumps, saves, logs, `nvngx_dlss.dll`,
   `gow3_pc/stat-multipliers-test.ini` or the `gow3_pc/gpu/third_party/fsr-vulkan` submodule state.
+  One exception (the owner, 25 Oct 2026): the games' UI art (font glyphs, button icons, HUD shapes and
+  the textures or archive extracts they come from) may go in `gow3_pc/assets/ui/` only. Executables,
+  PKGs, whole pak/psarc archives, saves, dumps, logs and shader caches stay out everywhere.
   Stage files by name (`git add <file>`), not `git add -A`.
 
 `.gitmessage` holds the body layout. To have Git open it for every commit:

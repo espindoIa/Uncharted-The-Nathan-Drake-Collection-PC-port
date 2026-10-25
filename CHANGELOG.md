@@ -6,9 +6,10 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
-- **Launcher: the UNCHARTED title now has its own lettering** (wide, heavy capitals with cut
-  corners, a sandstone finish) in place of the system font. Redrawn by hand, not copied from the
-  games. If `launcher/assets/wordmark.png` is missing the launcher draws plain text as before.
+- **Launcher: the games' own lettering.** The title is the UNCHARTED of the Collection's logo, worn
+  as on the games' title screens, and every text uses the font of the games' menus and subtitles.
+  Both come from the games' files (the logo from Uncharted 1's menu, the font redrawn from its
+  in-game bitmap). Without them the launcher keeps its old fonts.
 
 - **Fix: shadows cast by lamps no longer flicker on and off with DLSS, TAA or FSR.** With the
   anti-aliasing / upscaler on, the passes that draw lamp shadows now follow the same sub-pixel

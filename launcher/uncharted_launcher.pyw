@@ -1575,6 +1575,25 @@ class Launcher:
         # Headings in Bahnschrift (Windows 10 and later: the condensed lettering of maps and road
         # signs); Segoe UI where it is missing (Wine/Proton without it).
         families = set(tkfont.families(self.root))
+        if art.GAME_FONT in families:
+            # 25 Oct 2026: the games' own text font (art.load_game_font) for every text, as in their
+            # menus. It is one demibold weight; "bold" only where Segoe UI used Semibold for body
+            # text. Its lower x-height reads small: body sizes one point up.
+            game = art.GAME_FONT
+            self.f_wordmark = (game, 22)
+            self.f_subtitle = (game, 8)
+            self.f_kicker = (game, 8, "bold")
+            self.f_caption = (game, 9)
+            self.f_heading = (game, 19)
+            self.f_card_title = (game, 15)
+            self.f_entry_title = (game, 12)
+            self.f_body = (game, 11)
+            self.f_body_bold = (game, 11, "bold")
+            self.f_small = (game, 10)  # 11 pushes Display's choices under their descriptions
+            self.f_tab = (game, 11)
+            self.f_play = (game, 20)
+            widgets.BODY_FONT, widgets.BOLD_FONT = (game, 11), (game, 12, "bold")
+            return
         head = "Bahnschrift SemiBold" if "Bahnschrift SemiBold" in families else "Segoe UI Semibold"
         bold = "Bahnschrift" if "Bahnschrift" in families else "Segoe UI"
         self.f_wordmark = (bold, 22, "bold")
@@ -1700,9 +1719,10 @@ class Launcher:
         stage = self.stage = tk.Canvas(self.root, bg=STAGE, highlightthickness=0, bd=0)
         stage.pack(fill="both", expand=True)
         stage.create_image(0, 0, anchor="nw", tags="bg")
-        # 25 Oct 2026: the lettering is drawn art (assets/wordmark.png, source in wordmark/src); the
-        # system font only stands in when the file is missing. 1x height 32 px: cap height ~23 px.
-        mark = art.wordmark(stage, self.px(32))
+        # 25 Oct 2026: the Collection logo's own UNCHARTED (gow3_pc/assets/ui/wordmark.png, from
+        # Uncharted 1's menu.pak by tools/build_ui_art.py): 28 px tall, 218 wide at 1x. The text
+        # below only stands in when the file is missing.
+        mark = art.wordmark(stage, self.px(28))
         if mark is not None:
             stage.create_image(0, 0, image=mark, anchor="w", tags="wordmark")
         else:
@@ -1773,7 +1793,7 @@ class Launcher:
         panel_x = m + col + px(self.GAP)
         boxes = {}
         # Top bar: the wordmark, the section tabs over the panel, GitHub (and UPDATE) on the right.
-        stage.coords("wordmark", m - (px(4) if stage.type("wordmark") == "image" else 0), px(31))
+        stage.coords("wordmark", m, px(31))
         stage.coords("subtitle", m + px(1), px(51))
         x = panel_x + px(4)
         for name, (canvas, label) in self.tab_buttons.items():
@@ -4008,6 +4028,7 @@ def main():
         at = sys.argv.index("--play")
         value = sys.argv[at + 1].lower() if at + 1 < len(sys.argv) else ""
         direct = value if value in GAME_KEYS else f"u{value}" if f"u{value}" in GAME_KEYS else None
+    art.load_game_font()
     root = tk.Tk()
     if direct:
         root.withdraw()

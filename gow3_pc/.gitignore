@@ -23,3 +23,6 @@ perf.data
 mods.json
 patches.json
 !launcher/gow3.png
+# The games' UI art for the launcher (tools/build_ui_art.py); the trace sheet is rebuilt by it.
+!assets/ui/**/*.png
+assets/ui/fonts/src/sheet.*

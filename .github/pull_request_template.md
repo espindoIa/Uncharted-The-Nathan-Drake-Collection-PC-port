@@ -30,5 +30,5 @@
 - [ ] Launcher syntax check passes (if the launcher changed)
 - [ ] `CHANGELOG.md` updated in player words (if behaviour changed)
 - [ ] `analysis/STATUS.md` has the technical detail (if behaviour changed)
-- [ ] No game files, saves, logs or `nvngx_dlss.dll` in the diff
+- [ ] No game files, saves, logs or `nvngx_dlss.dll` in the diff (the games' UI art only under `gow3_pc/assets/ui/`)
 - [ ] Commit messages follow CONTRIBUTING.md

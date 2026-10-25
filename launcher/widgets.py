@@ -23,6 +23,8 @@ INK = "#160b04"
 STOP_RED = "#d9534f"
 GOOD = "#6fcf97"  # a check that passed (Home's Ready to play list)
 INFO = "#7fb6d9"
+# Dialog and toast text; the launcher swaps in the games' font when it loads (fonts()).
+BODY_FONT, BOLD_FONT = ("Segoe UI", 10), ("Segoe UI Semibold", 11)
 
 
 def set_accent(root, color):
@@ -616,7 +618,7 @@ class Dialog(tk.Toplevel):
         width, pad = px(self.WIDTH), px(20)
         self.title(title)
         self.resizable(False, False)
-        body_font, bold_font = ("Segoe UI", 10), ("Segoe UI Semibold", 11)
+        body_font, bold_font = BODY_FONT, BOLD_FONT
         tk.Frame(self, width=width, height=0, bg=PANEL).pack()  # the dialog's width
         header = tk.Frame(self, bg=PANEL_HI)
         header.pack(fill="x")
@@ -773,7 +775,7 @@ class Toast(tk.Frame):
         name, color = self.KINDS.get(kind, self.KINDS["info"])
         tk.Label(self, image=art.icon(self, name, int(20 * scale), color or ACCENT), bg=PANEL_HI, bd=0).pack(
             side="left", padx=(int(12 * scale), 0))
-        tk.Label(self, text=text, font=("Segoe UI", 10), bg=PANEL_HI, fg=TEXT, justify="left", anchor="w",
+        tk.Label(self, text=text, font=BODY_FONT, bg=PANEL_HI, fg=TEXT, justify="left", anchor="w",
                  wraplength=int(340 * scale), padx=int(12 * scale), pady=int(10 * scale)).pack(side="left")
         for widget in (self, *self.winfo_children()):
             widget.bind("<Button-1>", lambda e: self.hide())

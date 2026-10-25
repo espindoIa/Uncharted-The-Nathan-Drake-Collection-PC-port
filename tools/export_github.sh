@@ -5,7 +5,8 @@
 #              submodules are pinned as gitlinks at the commits checked out here
 #   tools/ launcher/ Start-Uncharted.cmd analysis/STATUS.md
 # Nothing from the game or a player is copied: no game/, *.pkg, analysis/ binaries, dumps, saves,
-# logs or shader caches; a final check refuses the commit if such a file slipped in.
+# logs or shader caches; a final check refuses the commit if such a file slipped in. The one
+# exception is the games' UI art in gow3_pc/assets/ui/ (font, textures; the owner, 25 Oct 2026).
 # usage: tools/export_github.sh [destination] [commit message]
 set -euo pipefail
 cd -- "$(dirname -- "$0")/.."
