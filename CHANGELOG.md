@@ -6,6 +6,10 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Changed (25 Oct 2026): a new launcher icon.** The compass now has a finer dial, a map-contour
+  background and shaded needles, drawn as vector art in VectorCraft (source: `launcher/assets/src/icon.svg`).
+  The shortcut, the taskbar and the window show the new `uncharted.ico` and `icon.png`.
+
 - **Added (24 Oct 2026): the launcher can be used with a controller.** The D-pad or the left stick
   move through the games, the sections, the settings and the buttons; A presses a button, flips a
   switch or opens a list, left and right change a choice, B goes back to the section list (and
