@@ -36,7 +36,7 @@ Three places tell the story, each for its own reader:
 | `launcher` | The launcher's look and options, the updater |
 | `package` | `tools/package_windows.sh`, the zip, the starter, CI |
 | `tools` | Scripts in `tools/` (probe, play, benchmarks) |
-| `docs` | README, CHANGELOG, STATUS, CLAUDE.md, this file |
+| `docs` | README, CHANGELOG, ROADMAP, STATUS, AGENTS.md, CLAUDE.md, this file |
 | `merge` | Bringing in upstream (BilalReloaded) work |
 | `release` | Version number, release notes, tag |
 

@@ -209,7 +209,23 @@ tag `v0.1.1`; GitHub Actions then builds the package and publishes the release w
 | `tools/play.py` | Scripted play for tests and agents: start a game, hold buttons and sticks for a time, get the current screen as a PNG after each step (taken inside the port), record and replay routes, compare shots, measure frame times. `python tools/play.py --help`. |
 | `tools/release.sh`, `tools/release-notes/` | Publishes a release (see above). |
 | `gow3_pc/` | The runtime: C runtime (`src/`), GPU library (`gpu/`: shadPS4 video core and shims), preparation scripts (`scripts/`). |
-| `analysis/` | Compatibility notes (`STATUS.md`) and the plan (`PLAN.md`). |
+| `gow3_pc/assets/ui/` | The games' UI art the launcher uses (their font, the Collection logo), built by `tools/build_ui_art.py`. |
+| `analysis/` | The engineering log (`STATUS.md`, index at the top) and the old 15 Oct plan (`PLAN.md`, history). |
+
+### Documentation
+
+| File | For | What it holds |
+|---|---|---|
+| `README.md` | Everyone | This page: status, features, playing, building. |
+| `CHANGELOG.md` | Players | What changed, newest first; the top section is unreleased. |
+| `ROADMAP.md` | Everyone | The road to 1.0: one theme and a "done when" per version. |
+| `CONTRIBUTING.md` | Contributors | Commit, branch and pull request rules. |
+| `AGENTS.md`, `CLAUDE.md`, `.claude/ship.md` | Coding agents | Commands, architecture, repository rules and upkeep. |
+| `analysis/STATUS.md` | Developers | Measurements, causes ruled out, open issues. |
+| `tools/README-Windows.txt` | Players | The README inside the package. |
+| `tools/github/` | Public repo | The README and CHANGELOG that `tools/export_github.sh` publishes (the package ships that CHANGELOG). |
+| `tools/release-notes/` | Players | One file per release, used by `tools/release.sh`. |
+| `gow3_pc/README.md`, `gow3_pc/packaging/windows/README.md` | Developers | The runtime's layout and diagnostic settings; the MSYS2 build packages. |
 
 ## Credits and license
 

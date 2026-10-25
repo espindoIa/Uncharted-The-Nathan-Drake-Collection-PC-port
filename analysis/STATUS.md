@@ -34,10 +34,20 @@ New entries go at the end, dated, measured numbers only.
 - Upscaler history reset on camera cuts, flight `d_compiles` fix: `25 October 2026: history reset on camera cuts`
 - Scene LOD bias skips explicit-LOD samplers, forced anisotropy skips unmipped ones: `25 October 2026: scene LOD bias and anisotropy follow the shader's sampling`
 - Lamp shadow passes found by what they sample and jittered: `25 October 2026: lamp shadow passes get the scene jitter`
-
 - Game FXAA skipped under temporal AA: `Game FXAA skipped under temporal AA (24 Oct 2026)`
-
 - Text and subtitles at 4K (font atlases, text shader sharpening): `Sharp text above 1080p (25 Oct 2026)`
+- Freezes and crashes (20-21 Oct): `20 October 2026: freezes before cutscenes and with multithreading (U3), upstream's fixes`, `21 October 2026: freezes after cutscenes = garbage V#s specialized compute shaders`, `20 October 2026: U1 0x64011f crash (red zone) and the nested-task leak`, `20 October 2026 (afternoon): 10 player crash logs (downloaded with the user's OK)`, `Evidence (player's install logs, 20-21 Oct)`
+- Write faults and load stalls (21 Oct): `21 October 2026: chapter-load write faults from file reads`, `21 October 2026: write faults in gameplay: prewait for GPU-written pages`, `21 October 2026: first-gameplay-frame DLSS stall; slow-submit detail`, `21 October 2026 (afternoon): post-movie stall, alley-load stalls, chapter 2 FPS`, `21 October 2026 (evening): chapter 2 CPU limit, SRT pipe drains`
+- Laptops and memory (20 Oct): `20 October 2026 (evening): hybrid-laptop freezes = present under the submit lock (fix built)`, `20 October 2026 (night): laptop freezes = port on a USB exFAT drive`, `20 October 2026 (night): GitHub #95 memory, proper fix (built, laptop test pending)`, `20 October 2026 (night): CPU savings confirmed on the NVIDIA GPU; 780M memory placement`
+- Shader caches: `20 October 2026: pipeline cache carried over; U3 chapter 2 frame rate`, `21 October 2026 (night): U3 museum red floor = damaged shader cache pair (FIXED, verified)`, `21 October 2026: compile-storm leftovers in old shader caches (#92, #95)`
+- Upstream ports and PRs: `21 October 2026 (evening): upstream fixes ported (batch 1)`, `Upstream (BilalReloaded) 0.4.1 / 0.5.0 notes, merged 21 Oct`, `20 October 2026 (afternoon): PR #87 merged (job sleep on game version 1.00)`
+- US copy: `20 October 2026 (evening): US copy (CUSA02320) tested, E:\uncharted usa`
+- Multi-core phases 5b-6 (22 Oct): `21 October 2026 (late night): which compute shaders fill the pipe`, `22 October 2026: stage A per-dispatch memos (roadmap phase 5b)`, `22 October 2026: phase 5c, A-to-B draw pipe measurements`, `22 October 2026: what keeps stage A and B waiting for each other (roadmap phase 6 prep)`, `22 October 2026: page tick write-back cache (roadmap phase 6a, stage B)`, `22 October 2026: fence wait for its packet's position instead of a full drain (tried, not kept)`
+- GPU memory coherence fixes (24 Oct): `24 October 2026: CpuCleanToken re-checks the change counter`, `24 October 2026: DiscardCpuWritePage clears gpu_add_cache`, `24 October 2026: DMA_DATA skip only for address destinations`, `24 October 2026: compute DMA_DATA waits for host copies`
+- U3 visual and frame-rate reports (24 Oct): `Market hitches: diagnostics, not reproduced (24 Oct 2026)`, `U3 Sully shirt stretched: LDS out of bounds (24 Oct 2026)`, `U3 chapter 2 frame drop: player capture, stage B limit, two opt-ins re-measured (24 Oct 2026)`, `Crowd skinning dispatch runs (24 Oct 2026, opt-in)`, `U3 blur suspects: jitter and DOF diagnostics (24 Oct 2026)`
+- DLAA LOD bias: `21 October 2026 (night): DLAA texture LOD bias -1 (toggle bit 4096)`
+- U1 treasure models: `24 October 2026 (night): U1 treasure models, synchronous shaders again`
+- Launcher lettering (the games' font and logo, vector, `tools/build_ui_art.py`): `25 October 2026: launcher lettering from the games' files`
 
 - Launcher redesign (stage, per-game colour, 4K icons, trophy coins): `Launcher redesign and 4K-sharp drawing (25 Oct 2026)`
 

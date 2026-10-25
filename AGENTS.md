@@ -103,3 +103,23 @@ The toolchain is MSYS2 CLANG64. From Git Bash, wrap commands like this:
 - Code comments explain the why with dated evidence (e.g. "17 Oct profile: …"); match that density and style.
 - `.claude/ship.md` has the ship rules: the commit rules above, plus the build and test commands.
 - Game test runs: short by default (tens of seconds); long runs only for stability soaks or bug hunting. Performance claims need an A/B at the player's settings (4K, 120 FPS cap, DLAA, multithreading on) that beats run-to-run noise.
+
+## Repository upkeep
+
+Keep the documentation true and the tree clean as part of every task, in the same commit as the change that makes it necessary. The map of which document holds what is in README.md "Documentation".
+
+**Update rules (do them without being asked).**
+- A behaviour change: `CHANGELOG.md` (player wording, unreleased section) and an `analysis/STATUS.md` section with its line in the STATUS index. A STATUS section with no index line is unfinished.
+- A new or changed command, setting, `GOW3_*` variable, toggle bit, path or tool: the matching place in this file ("Commands", "Architecture", "Runtime toggles", "Measuring") and in `.claude/ship.md` when it is a build or test command. A new setting also reaches the launcher and `probe_uncharted.py` (the four places above).
+- A change players see in the package: `tools/README-Windows.txt` if it changes how they install or play, and `tools/github/README.md` / `tools/github/CHANGELOG.md` at release time (the public copies).
+- A new top-level folder, document or asset folder: README.md "Repository layout" / "Documentation".
+- A fact that changed on this PC (installed tools, paths, Python versions, SDK locations): fix every line that states the old one; grep for it.
+- Dated facts stay dated ("since 19 Oct"). When one stops being true, change the line instead of adding a contradicting one; history belongs in STATUS and the CHANGELOG, not in the guides.
+
+**Cleanup rules.**
+- Scratch work (probes, logs, one-off scripts, captures, extracted game files) goes in the session's scratchpad or `analysis/` (ignored), never in the tracked tree. Before committing, `git status --short` must show only the task's files.
+- A file, asset or setting that a change makes unused is deleted in the same commit, with every reference (grep the name: code, package script, docs, `.gitignore`). Superseded plans are marked as history at the top (as `analysis/PLAN.md`) rather than deleted when STATUS or the CHANGELOG link to them.
+- Opt-in experiments (toggle bits, `GOW3_*` opt-ins) that a measurement rejected are removed with their code once STATUS records the result; keep only those still under test, listed in this file.
+- Generated files are rebuilt, not committed, unless the build needs a manual step (e.g. the VectorCraft traces in `gow3_pc/assets/ui/`); `.gitignore` covers the rest.
+- Merged `claude/*` branches and their worktrees are removed after the merge; never delete an unmerged branch, a Codex branch or anything outside this repository without asking.
+- Before deleting anything, look at it: report files you did not create instead of removing them.
