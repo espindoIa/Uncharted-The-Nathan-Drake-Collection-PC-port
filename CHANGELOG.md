@@ -6,6 +6,12 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Changed (25 Oct 2026): the launcher uses the lettering of the game logos.** The UNCHARTED
+  wordmark, the section titles and the game numbers use a heavy, weathered lettering like the
+  logos'; each game's name is written like its logo's subtitle: hand-lettered for Drake's Fortune,
+  Roman small capitals for Among Thieves and Drake's Deception. The fonts are the port's own,
+  drawn for it; where they cannot load, the launcher keeps its old lettering.
+
 - **Added (24 Oct 2026): the launcher can be used with a controller.** The D-pad or the left stick
   move through the games, the sections, the settings and the buttons; A presses a button, flips a
   switch or opens a list, left and right change a choice, B goes back to the section list (and

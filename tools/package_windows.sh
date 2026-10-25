@@ -81,6 +81,9 @@ cp launcher/uncharted_launcher.pyw launcher/updater.py launcher/widgets.py "$sta
 # The package's version (tools/VERSION; the launcher's updates compare it with the releases).
 cp tools/VERSION "$stage/VERSION"
 cp launcher/assets/uncharted.ico launcher/assets/icon.png "$stage/launcher/assets/"
+# The logo fonts (tools/make_logo_fonts.py); the launcher loads them for its own process.
+mkdir -p "$stage/launcher/assets/fonts"
+cp launcher/assets/fonts/*.ttf "$stage/launcher/assets/fonts/"
 # The runtime's optimizations known to break Uncharted (GOW3_TOGGLE_FILE).
 cp tools/defaults/disabled-optimizations.txt "$stage/analysis/uncharted-user/"
 cp tools/README-Windows.txt "$stage/README.txt"

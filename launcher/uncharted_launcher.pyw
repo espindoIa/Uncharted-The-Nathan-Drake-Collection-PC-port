@@ -31,6 +31,9 @@ from widgets import (ACCENT, ACCENT_HI, BG, DIM, GOOD, HERO_DARK, HERO_GRID, HER
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "launcher" / "assets"
+# assets/fonts/<key>.ttf and its family: the logo's heavy lettering, then each game's subtitle lettering.
+LOGO_FONTS = {"logo": "Uncharted Logo", "u1": "Uncharted Fortune", "u2": "Uncharted Thieves",
+              "u3": "Uncharted Deception"}
 # The Collection's regions the port is tested with: US (CUSA02320, the fork's own copy, with update
 # 1.02) and Europe (CUSA02344). Their 1.02 executables are the same; every patch finds its bytes in both.
 GAME_IDS = ("CUSA02320", "CUSA02344")
@@ -1561,16 +1564,27 @@ class Launcher:
     def fonts(self):
         # Headings in Bahnschrift (Windows 10 and later: the condensed lettering of maps and road
         # signs); Segoe UI where it is missing (Wine/Proton without it).
+        # 25 Oct 2026: the wordmark and headings in the logo's heavy lettering and each game's name
+        # in its logo's subtitle lettering (assets/fonts, tools/make_logo_fonts.py), loaded for
+        # this process only; Bahnschrift stays where a font did not load.
+        for key in LOGO_FONTS:
+            try:
+                ctypes.windll.gdi32.AddFontResourceExW(str(ASSETS / "fonts" / f"{key}.ttf"), 0x10, 0)  # FR_PRIVATE
+            except (AttributeError, OSError):
+                pass
         families = set(tkfont.families(self.root))
         head = "Bahnschrift SemiBold" if "Bahnschrift SemiBold" in families else "Segoe UI Semibold"
-        self.f_wordmark = (head, 22)
+        logo = LOGO_FONTS["logo"] if LOGO_FONTS["logo"] in families else head
+        self.game_font = {key: (LOGO_FONTS[key] if LOGO_FONTS[key] in families else head)
+                          for key in ("u1", "u2", "u3")}
+        self.f_wordmark = (logo, 22)
         self.f_subtitle = ("Segoe UI Semibold", 7)
         self.f_edition = (head, 8)
         self.f_caption = ("Segoe UI Semibold", 8)
         self.f_banner = (head, 20)
-        self.f_heading = (head, 15)
-        self.f_card_number = (head, 20)
-        self.f_card_title = (head, 14)
+        self.f_heading = (logo, 15)
+        self.f_card_number = (logo, 20)
+        self.f_card_title = (logo, 14)
         self.f_entry_title = (head, 11)
         self.f_body = ("Segoe UI", 10)
         self.f_body_bold = ("Segoe UI Semibold", 10)
@@ -1824,7 +1838,8 @@ class Launcher:
             canvas.create_rectangle(0, 0, self.px(4), h, fill=ACCENT, outline="")
         canvas.create_text(self.px(22), h // 2, text=game["number"], font=self.f_card_number,
                            fill=ACCENT if selected else DIM, anchor="w")
-        canvas.create_text(self.px(50), h // 2 - self.px(8), text=game["title"], font=self.f_entry_title,
+        canvas.create_text(self.px(50), h // 2 - self.px(8), text=game["title"],
+                           font=(self.game_font[key], self.f_entry_title[1]),
                            fill=TEXT if selected or hover else MUTED, anchor="w")
         canvas.create_text(self.px(51), h // 2 + self.px(10), text=game["subtitle"], font=self.f_small,
                            fill=MUTED if selected else DIM, anchor="w")
@@ -1840,7 +1855,8 @@ class Launcher:
         self.config["game"] = key
         for k in self.cards:
             self.draw_card(k)
-        self.banner.itemconfig("game", text=self.current_game()["name"])
+        self.banner.itemconfig("game", text=self.current_game()["name"],
+                               font=(self.game_font[key], self.f_banner[1]))
         if save:
             write_config(self.config)
         if changed:
