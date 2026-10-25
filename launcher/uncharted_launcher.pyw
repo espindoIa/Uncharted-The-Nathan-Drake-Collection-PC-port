@@ -1719,7 +1719,7 @@ class Launcher:
         stage = self.stage = tk.Canvas(self.root, bg=STAGE, highlightthickness=0, bd=0)
         stage.pack(fill="both", expand=True)
         stage.create_image(0, 0, anchor="nw", tags="bg")
-        # 25 Oct 2026: the Collection logo's own UNCHARTED (gow3_pc/assets/ui/wordmark.png, from
+        # 25 Oct 2026: the Collection logo's own UNCHARTED (vector art, gow3_pc/assets/ui/wordmark.svg, from
         # Uncharted 1's menu.pak by tools/build_ui_art.py): 28 px tall, 218 wide at 1x. The text
         # below only stands in when the file is missing.
         mark = art.wordmark(stage, self.px(28))

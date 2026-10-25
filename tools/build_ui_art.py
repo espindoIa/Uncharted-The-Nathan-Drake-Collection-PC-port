@@ -13,7 +13,10 @@ The font. The three games draw their text with one bitmap font, "Adelon-Serial D
 The logo. The Collection's own logo, from Uncharted 1's menu.pak (art/general/menu/bootloader/
 ucclogo-eng.tga and its -alpha twin, 1024x256 BC1 / BC4, PS4 1D-thin tiled and stored upside down):
 
-    python tools/build_ui_art.py logo <game folder>   # -> logo/src/*.png, wordmark.png
+    python tools/build_ui_art.py logo <game folder>   # -> logo/src/*.png (the textures, the trace source)
+    # VectorCraft: open logo/src/wordmark-trace.png, Image Trace (black and white, threshold 128,
+    # paths 60, corners 60, noise 3, ignore white), export wordmark.svg. The launcher draws that
+    # SVG at the exact size each screen scale needs (launcher/art.py svg_mask): no bitmap resize.
 
 Needs Pillow; fontTools for `font` (build time only: the launcher only loads the results).
 """
@@ -31,7 +34,8 @@ UI = ROOT / "gow3_pc" / "assets" / "ui"
 SRC = UI / "fonts" / "src"
 TTF = UI / "fonts" / "drake-serial.ttf"
 FAMILY = "Drake Serial"
-UP, CELL, COLS = 6, 300, 14  # the trace sheet: glyphs 6x up, one 300 px cell each
+UP, CELL, COLS = 7, 380, 14  # the trace sheet: glyphs 7x up, one 380 px cell each
+SMOOTH = 0.3  # blur radius before the trace, in source pixels (0.55 bloated the stems and rounded the serifs)
 SIZE = 42  # the atlas font's em in px; the TrueType em is 1000 units
 
 
@@ -47,7 +51,11 @@ def sheet():
     for i, c in enumerate(chars):
         glyph = atlas.getchannel(channel[c["chnl"]]).crop((c["x"], c["y"], c["x"] + c["width"], c["y"] + c["height"]))
         # Bicubic plus a slight blur: the trace then follows the antialiased edge, not the pixel steps.
-        glyph = glyph.resize((c["width"] * UP, c["height"] * UP), Image.BICUBIC).filter(ImageFilter.GaussianBlur(UP * 0.35))
+        # 25 Oct 2026 (second pass): the 42 px antialiasing left bumps along the stems that showed as
+        # wobble at large sizes. A wide blur evens them out, then a steep curve brings the edge back
+        # to a crisp transition so the trace follows a smooth contour.
+        glyph = glyph.resize((c["width"] * UP, c["height"] * UP), Image.LANCZOS).filter(ImageFilter.GaussianBlur(UP * SMOOTH))
+        glyph = glyph.point(lambda v: max(0, min(255, (v - 128) * 4 + 128)))
         cx, cy = (i % COLS) * CELL + 20, (i // COLS) * CELL + 20
         image.paste(Image.eval(glyph, lambda v: 255 - v), (cx, cy))
         cells[c["id"]] = {**c, "cx": cx, "cy": cy, "col": i % COLS, "row": i // COLS}
@@ -70,6 +78,82 @@ def inside(point, polygon):
     return hit
 
 
+STEP, CORNER = 8.0, 50  # contour smoothing: resample step in sheet px; turning angle that is a corner
+
+
+def flatten(ops):
+    """A traced contour as a closed polyline (sheet px)."""
+    points, last = [], None
+    for op, args in ops:
+        if op == "moveTo":
+            last = args[0]
+            points.append(last)
+        elif op == "lineTo":
+            last = args[0]
+            points.append(last)
+        elif op == "curveTo":
+            (x0, y0), (x1, y1), (x2, y2), (x3, y3) = last, *args
+            for i in range(1, 13):
+                t, u = i / 12, 1 - i / 12
+                points.append((u**3 * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t**3 * x3,
+                               u**3 * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t**3 * y3))
+            last = args[-1]
+    if len(points) > 1 and points[0] == points[-1]:
+        points.pop()
+    return points
+
+
+def smooth(points):
+    """Evens the wobble the 42 px source left along the contours: resample evenly, smooth between
+    corners (sharp turns stay exactly where the trace put them), refit as Catmull-Rom cubics.
+    Returns RecordingPen ops."""
+    import math
+    n0 = len(points)
+    seg = [math.dist(points[i], points[(i + 1) % n0]) for i in range(n0)]
+    total = sum(seg)
+    count = max(8, round(total / STEP))
+    step, out, i, run = total / count, [], 0, 0.0
+    for s in range(count):
+        want = s * step
+        while run + seg[i] < want and i < n0 - 1:
+            run += seg[i]
+            i += 1
+        f = (want - run) / seg[i] if seg[i] else 0
+        a, b = points[i], points[(i + 1) % n0]
+        out.append((a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f))
+    n = len(out)
+    reach = max(2, round(24 / step))  # corners are judged over ~24 px each side
+    turn = []
+    for s in range(n):
+        p, a, b = out[s], out[s - reach], out[(s + reach) % n]
+        v1, v2 = (p[0] - a[0], p[1] - a[1]), (b[0] - p[0], b[1] - p[1])
+        turn.append(abs(math.degrees(math.atan2(v1[0] * v2[1] - v1[1] * v2[0], v1[0] * v2[0] + v1[1] * v2[1]))))
+    corners = [s for s in range(n) if turn[s] > CORNER and turn[s] >= max(turn[(s + d) % n] for d in range(-reach, reach + 1))]
+    if not corners:
+        corners = [0]  # a closed smooth contour: still split once so every run has two ends
+    runs = []
+    for c, nxt in zip(corners, corners[1:] + [corners[0] + n]):
+        runs.append([out[t % n] for t in range(c, nxt + 1)])
+    ops = []
+    for run in runs:
+        m, half = len(run), 3
+        kept = [run[0]]
+        for t in range(1, m - 1):
+            w = min(half, t, m - 1 - t)
+            kept.append((sum(run[t + d][0] for d in range(-w, w + 1)) / (2 * w + 1),
+                         sum(run[t + d][1] for d in range(-w, w + 1)) / (2 * w + 1)))
+        kept.append(run[-1])
+        if not ops:
+            ops.append(("moveTo", (kept[0],)))
+        for t in range(len(kept) - 1):
+            p0, p1, p2 = kept[max(t - 1, 0)], kept[t], kept[t + 1]
+            p3 = kept[min(t + 2, len(kept) - 1)]
+            ops.append(("curveTo", ((p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6),
+                                    (p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6), p2)))
+    ops.append(("closePath", ()))
+    return ops
+
+
 def font():
     from fontTools.fontBuilder import FontBuilder
     from fontTools.pens.cu2quPen import Cu2QuPen
@@ -78,6 +162,7 @@ def font():
     from fontTools.pens.transformPen import TransformPen
     from fontTools.pens.ttGlyphPen import TTGlyphPen
     from fontTools.svgLib.path import parse_path
+    from fontTools.ttLib import newTable
     from fontTools.ttLib.tables._k_e_r_n import KernTable_format_0, table__k_e_r_n
 
     meta = json.loads((SRC / "sheet.json").read_text())
@@ -92,11 +177,11 @@ def font():
         for op, args in pen.value:
             ops.append((op, args))
             if op in ("closePath", "endPath"):
-                points = [p for _, a in ops for p in a]
+                points = flatten(ops)
                 xs, ys = [p[0] for p in points], [p[1] for p in points]
                 cell = (int((min(xs) + max(xs)) / 2 // CELL), int((min(ys) + max(ys)) / 2 // CELL))
-                if cell in by_cell:
-                    by_cell[cell].append((ops, points))
+                if cell in by_cell and len(points) > 2:
+                    by_cell[cell].append((smooth(points), points))
                 ops = []
     glyphs, advances, cmap, names = {".notdef": TTGlyphPen(None).glyph()}, {".notdef": 500}, {}, {}
     for cid, c in sorted(chars.items()):
@@ -133,6 +218,11 @@ def font():
     builder.setupOS2(sTypoAscender=ascent, sTypoDescender=descent, sTypoLineGap=0, usWinAscent=ascent,
                      usWinDescent=-descent, achVendID="NONE")
     builder.setupPost()
+    # No hinting: ask the rasterizer for antialiasing without grid-fitting at every size, so the
+    # shapes keep their proportions at 1x, 1.5x, 2x and 4K scales (0x0A: grayscale + symmetric smoothing).
+    gasp = newTable("gasp")
+    gasp.version, gasp.gaspRange = 1, {0xFFFF: 0x000A}
+    builder.font["gasp"] = gasp
     kern = table__k_e_r_n()
     kern.version, pairs = 0, KernTable_format_0()
     pairs.version, pairs.coverage, pairs.format = 0, 1, 0
@@ -183,10 +273,14 @@ def logo(game):
     alpha.save(out / "ucclogo-eng-alpha.png")
     # The launcher's title: the logo's UNCHARTED (with its TM), white and worn as on the games'
     # title screens: the alpha's scratches over a parchment white, cropped to the word.
-    mark = Image.new("RGBA", alpha.size, (240, 233, 218, 0))
-    mark.putalpha(alpha)
-    mark.crop((66, 42, 970, 158)).save(UI / "wordmark.png")
-    print(f"-> {out}, {UI / 'wordmark.png'}")
+    box = (66, 42, 970, 158)
+    # The texture is only 904x116 for the word, which went soft on 4K screens, so the launcher
+    # uses a vector trace of it. Source for the trace: scaled 4x with a light blur and a steep curve
+    # (smooth edges), black on white; the scratches of the logo survive as holes in the letters.
+    ink = alpha.crop(box).resize((alpha.crop(box).width * 4, alpha.crop(box).height * 4), Image.LANCZOS)
+    ink = ink.filter(ImageFilter.GaussianBlur(1.2)).point(lambda v: 255 - max(0, min(255, (v - 128) * 4 + 128)))
+    ink.save(out / "wordmark-trace.png")
+    print(f"-> {out}")
 
 
 if __name__ == "__main__":

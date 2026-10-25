@@ -86,7 +86,7 @@ cp tools/VERSION "$stage/VERSION"
 cp launcher/assets/uncharted.ico launcher/assets/icon.png launcher/assets/grain.png "$stage/launcher/assets/"
 # The games' lettering for the launcher (tools/build_ui_art.py): the font and the wordmark only.
 mkdir -p "$stage/gow3_pc/assets/ui/fonts"
-cp gow3_pc/assets/ui/wordmark.png "$stage/gow3_pc/assets/ui/"
+cp gow3_pc/assets/ui/wordmark.svg "$stage/gow3_pc/assets/ui/"
 cp gow3_pc/assets/ui/fonts/drake-serial.ttf "$stage/gow3_pc/assets/ui/fonts/"
 # The launcher's icons: the 192 px masters only (their VectorCraft sources in icons/src stay in the repo).
 mkdir -p "$stage/launcher/assets/icons"

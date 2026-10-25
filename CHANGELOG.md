@@ -9,7 +9,9 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 - **Launcher: the games' own lettering.** The title is the UNCHARTED of the Collection's logo, worn
   as on the games' title screens, and every text uses the font of the games' menus and subtitles.
   Both come from the games' files (the logo from Uncharted 1's menu, the font redrawn from its
-  in-game bitmap). Without them the launcher keeps its old fonts.
+  in-game bitmap). Without them the launcher keeps its old fonts. Both are vector: the title is
+  drawn at the exact size your screen scale needs (no stretched picture), and the font has smoother
+  outlines, so they stay sharp at 100%, 150%, 200% and on 4K.
 
 - **Fix: shadows cast by lamps no longer flicker on and off with DLSS, TAA or FSR.** With the
   anti-aliasing / upscaler on, the passes that draw lamp shadows now follow the same sub-pixel

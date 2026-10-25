@@ -13,6 +13,7 @@ Tk images belong to one Tk interpreter, so the caches hang on the root window (t
 destroy several roots in one process).
 """
 import io
+import re
 import struct
 from functools import lru_cache
 from pathlib import Path
@@ -81,14 +82,86 @@ def icon(widget, name, size, color):
 
 def wordmark(widget, height):
     """The Collection logo's UNCHARTED (tools/build_ui_art.py) as a photo `height` px tall, or None
-    when the file is missing (the launcher then draws text)."""
-    path = GAME_UI / "wordmark.png"
+    when the file is missing (the launcher then draws text). 25 Oct 2026: it is vector art
+    (wordmark.svg) drawn at exactly the size asked, for any screen scale: no bitmap is stretched or
+    filtered to fit (see svg_mask)."""
+    path = GAME_UI / "wordmark.svg"
     if not path.exists():
         return None
     def make():
-        image = Image.open(path)
-        return image.resize((round(image.width * height / image.height), height), Image.LANCZOS)
+        mask = svg_mask(path, height)
+        image = Image.new("RGBA", mask.size, rgb("#f0e9da") + (0,))
+        image.putalpha(mask)
+        return image
     return photo(widget, ("wordmark", int(height)), make)
+
+
+_SVG_TOKENS = re.compile(r"[MLCZmlcz]|-?\d*\.?\d+(?:[eE][-+]?\d+)?")
+
+
+def svg_contours(path):
+    """The closed contours (lists of points, in the SVG's own units) of every <path> in a
+    VectorCraft SVG: M L C Z, absolute and relative; curves flattened finely (16 steps)."""
+    text = Path(path).read_text(encoding="utf-8")
+    view = [float(v) for v in re.search(r'viewBox="([^"]+)"', text).group(1).split()]
+    contours = []
+    for d in re.findall(r'<path d="([^"]+)"', text):
+        tokens, i, command, here, start, points = _SVG_TOKENS.findall(d), 0, "", (0.0, 0.0), (0.0, 0.0), []
+        while i < len(tokens):
+            if tokens[i].isalpha():
+                command = tokens[i]
+                i += 1
+                if command in "Zz":
+                    if len(points) > 2:
+                        contours.append(points)
+                    points, here = [], start
+                continue
+            n = {"M": 2, "m": 2, "L": 2, "l": 2, "C": 6, "c": 6}[command]
+            v = [float(t) for t in tokens[i:i + n]]
+            i += n
+            if command.islower():
+                v = [v[k] + here[k % 2] for k in range(n)]
+            if command in "Mm":
+                if len(points) > 2:
+                    contours.append(points)
+                here = start = (v[0], v[1])
+                points, command = [here], "L" if command == "M" else "l"  # extra pairs are lines
+            elif command in "Ll":
+                here = (v[0], v[1])
+                points.append(here)
+            else:
+                (x0, y0), (x1, y1), (x2, y2), (x3, y3) = here, (v[0], v[1]), (v[2], v[3]), (v[4], v[5])
+                for s in range(1, 17):
+                    t, u = s / 16, 1 - s / 16
+                    points.append((u**3 * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t**3 * x3,
+                                   u**3 * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t**3 * y3))
+                here = (x3, y3)
+    return view, contours
+
+
+def svg_mask(path, height, supersample=8):
+    """Coverage mask of a VectorCraft SVG (even-odd over its contours, which the trace never
+    overlaps) at exactly `height` px tall, anything but a bitmap resize: every contour is
+    rasterised at `supersample` times the size, and each output pixel takes the exact fraction of its
+    area covered (a box average of that coverage, not an interpolation between pixels)."""
+    (x0, y0, w, h), contours = svg_contours(path)
+    scale = height / h
+    big = scale * supersample
+    size = (round(w * scale), height)
+    big_size = (size[0] * supersample, size[1] * supersample)
+    mask = Image.new("1", big_size, 0)
+    for points in contours:
+        pts = [((x - x0) * big, (y - y0) * big) for x, y in points]
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        left, top = max(0, int(min(xs))), max(0, int(min(ys)))
+        right, bottom = min(big_size[0], int(max(xs)) + 2), min(big_size[1], int(max(ys)) + 2)
+        if right <= left or bottom <= top:
+            continue
+        part = Image.new("1", (right - left, bottom - top), 0)
+        ImageDraw.Draw(part).polygon([(x - left, y - top) for x, y in pts], fill=1)
+        box = (left, top, right, bottom)
+        mask.paste(ImageChops.logical_xor(mask.crop(box), part), box)  # even-odd: a hole cancels its parent
+    return mask.convert("L").reduce(supersample)  # reduce() is the exact box average
 
 
 @lru_cache(maxsize=96)  # the stage's panels come back on every game switch; callers never change the image
