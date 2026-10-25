@@ -255,6 +255,27 @@ enum : std::uint64_t {
     /// the scene depth but have at most 6 indices and one instance (decals, quads; the default
     /// leaves them unjittered). A full-screen quad with the scene depth may leave an edge column.
     JitterSmallDraws = 1ull << 47,
+
+    /// Bit set: old behaviour (read live). Clear, a camera cut (forward axis turned over 45
+    /// degrees, a move over max(GOW3_CUT_MOVE 1.0, 16x the median move), or a previous camera
+    /// older than 0.5 s) resets the upscaler history and zeroes that frame's camera motion
+    /// (gow3_camera_cut.h). 25 Oct 2026 flight recorder, U3 chapter 2 Continue: the first scene
+    /// frame turned 161 degrees and moved 106 units with no reset.
+    CameraCutReset = 1ull << 42,
+    /// Bit set: old behaviour (read live). Clear, the scene LOD bias skips samplers the shader
+    /// uses with an explicit LOD (Shader::SamplerResource::explicit_lod): Vulkan adds mipLodBias
+    /// to those samples too, so a mip picked on purpose read the wrong level (25 Oct 2026, the
+    /// player saw blurred or wrong materials).
+    BiasExplicitLod = 1ull << 43,
+    /// Bit set: old behaviour (read live). Clear, forced anisotropy skips samplers used only with
+    /// an explicit LOD, clamped to MaxLod 0, or paired only with one-level images (atlases, LUTs,
+    /// decals): anisotropy at level 0 reads across cell edges (25 Oct 2026, lines at edges).
+    AnisoUnmipped = 1ull << 44,
+    /// Bit set: old behaviour (read live). Clear, a full-screen pass that samples the jittered
+    /// scene depth and a shadow map (a depth-compare sampler or another depth-format image) gets
+    /// the scene jitter like the GOW3_JITTER_PS passes, and full-screen jitter is scaled to the
+    /// pass's own size (25 Oct 2026, player: lamp shadows flicker on and off under DLSS/TAA/FSR).
+    ShadowPassJitter = 1ull << 45,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;
@@ -286,6 +307,12 @@ inline std::atomic<unsigned long> gpu_thread_id{0}; ///< Windows thread id of th
 inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0};
 /// Frames the GPU command thread has started (display pass), for per-frame diagnostics.
 inline std::atomic<std::uint64_t> gpu_frames{0};
+/// Upscaler history resets for camera cuts (CameraCutReset), printed and zeroed by Frame stats.
+inline std::atomic<std::uint64_t> camera_cuts{0};
+/// Scene sampler binds (BiasExplicitLod, AnisoUnmipped), printed and zeroed by Frame stats.
+inline std::atomic<std::uint64_t> samplers_biased{0}, bias_skipped_explicit{0}, aniso_raised{0},
+    aniso_skipped_unmipped{0}, aniso_skipped_maxlod0{0}, aniso_skipped_explicit{0},
+    bias_skipped_mixed{0}; // bias_skipped_explicit of which: the sampler also has implicit samples
 /// Wall time spent in operations suspected of stalls (ns, all threads).
 inline std::atomic<std::uint64_t> t_resident{0}, t_protect{0}, t_image_create{0}, t_refresh{0},
     t_copy{0}, copy_bytes{0}, t_read_faults{0}, read_faults{0},

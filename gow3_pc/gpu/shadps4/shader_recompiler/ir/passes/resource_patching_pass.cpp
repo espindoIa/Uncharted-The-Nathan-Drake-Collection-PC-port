@@ -134,6 +134,10 @@ public:
                    desc.post_op_tsharp_dw3_off == existing.post_op_tsharp_dw3_off &&
                    desc.is_depth == existing.is_depth;
         })};
+        auto& sampler = sampler_resources[index];
+        sampler.explicit_lod |= desc.explicit_lod;
+        sampler.implicit_lod |= desc.implicit_lod;
+        sampler.image_mask |= desc.image_mask;
         return index;
     }
 
@@ -344,12 +348,19 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
 
     if (inst.GetOpcode() == IR::Opcode::ImageSampleRaw) {
         auto& lod_prod = resource.sharps[1].post_op_data.lod_prod;
+        // gow3 25 Oct 2026: the same choice PatchImageSampleArgs makes (gather and derivatives
+        // win over an explicit LOD), recorded here where the image and sampler are both known.
+        const bool explicit_lod = !inst_info.is_gather && !inst_info.has_derivatives &&
+                                  (inst_info.has_lod || inst_info.force_level0);
         const u32 sampler_binding = descriptors.Add(SamplerResource{
             .sharp_fetch = ConstructSharpFetch<AmdGpu::Sampler>(resource.sharps[1]),
             .post_op = resource.sharps[1].post_op,
             .post_op_tsharp_dw3_off =
                 lod_prod.IsEmpty() ? UNKNOWN_LOCATION : SharpLocationFromSource(lod_prod.Inst()),
             .is_depth = bool(inst_info.is_depth), // true for the _C (compare) opcodes
+            .explicit_lod = explicit_lod,
+            .implicit_lod = !explicit_lod,
+            .image_mask = image_binding < 32 ? 1u << image_binding : ~0u,
         });
         inst.SetArg(0, ir.Imm32(image_binding | sampler_binding << 16));
     } else {

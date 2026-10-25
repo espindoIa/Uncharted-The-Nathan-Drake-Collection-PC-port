@@ -1252,6 +1252,14 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
         });
 }
 
+// gow3 24 Oct 2026: das (destination address space: memory or register) only applies when the
+// destination is an address (dst_sel Memory/MemoryUsingL2); with dst_sel Gds it has no meaning
+// and the packet must still run. The 21 Oct skip dropped every das != 0 packet.
+static bool DmaDstIsRegister(const PM4DmaData* d) {
+    return d->command.das != 0 &&
+           (d->dst_sel == DmaDataDst::Memory || d->dst_sel == DmaDataDst::MemoryUsingL2);
+}
+
 // gow3 24 Oct 2026: the dispatch runs' batched release signals (Rasterizer::DispatchRunRecord).
 [[maybe_unused]] const bool g_release_batch_hooks = [] {
     Vulkan::Rasterizer::release_hooks = {&RunComputeReleaseMem, &StageComputeRelease,
@@ -1265,11 +1273,11 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     // gow3 21 Oct 2026: upstream shadPS4 dropped the das == 0 assert, which stopped the port with
     // exit code 23. With das set the destination is a register offset, not guest memory: writing
     // it as an address would hit a bogus low address, so the packet is skipped.
-    if (dma_data->command.das != 0) {
+    if (DmaDstIsRegister(dma_data)) {
         static bool logged = false;
         if (!std::exchange(logged, true)) {
-            std::printf("gow3: DMA_DATA to a register address space skipped (das=%u)\n",
-                        u32(dma_data->command.das));
+            std::printf("gow3: DMA_DATA to a register address space skipped (das=%u dst_sel=%u)\n",
+                        u32(dma_data->command.das), u32(dma_data->dst_sel));
         }
         return;
     }
@@ -2418,7 +2426,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 // written to note.
                 if (rasterizer->RunInOrder(&RunDmaData, dma_data, sizeof(PM4DmaData),
                                            Gow3Toggle::PipelinedMemoryWrites, true) &&
-                    dma_data->command.das == 0 &&
+                    !DmaDstIsRegister(dma_data) &&
                     (dma_data->dst_sel == DmaDataDst::Memory ||
                      dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
                     rasterizer->NotePendingGpuWrite(dma_data->DstAddress<VAddr>(),
@@ -2899,11 +2907,11 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 break;
             }
             // gow3 21 Oct 2026: as in RunDmaData, a register destination is skipped, not asserted.
-            if (dma_data->command.das != 0) {
+            if (DmaDstIsRegister(dma_data)) {
                 static bool logged = false;
                 if (!std::exchange(logged, true)) {
-                    std::printf("gow3: DMA_DATA to a register address space skipped (das=%u)\n",
-                                u32(dma_data->command.das));
+                    std::printf("gow3: DMA_DATA to a register address space skipped (das=%u dst_sel=%u)\n",
+                                u32(dma_data->command.das), u32(dma_data->dst_sel));
                 }
                 break;
             }
@@ -2918,11 +2926,18 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             } else if (dma_data->src_sel == DmaDataSrc::Data &&
                        (dma_data->dst_sel == DmaDataDst::Memory ||
                         dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
+                // 24 Oct 2026, static review: the writes to guest memory below wait like RunDmaData
+                // and WriteData do. Else an earlier dispatch's deferred upload copy reads the bytes
+                // after this write, and a deferred RELEASE_MEM label can be overtaken by it.
+                rasterizer->WaitHostCopies();
+                rasterizer->WaitDeferredSignals();
                 rasterizer->FillBuffer(dma_data->DstAddress<VAddr>(), dma_data->NumBytes(),
                                        dma_data->data, false);
             } else if (dma_data->src_sel == DmaDataSrc::Gds &&
                        (dma_data->dst_sel == DmaDataDst::Memory ||
                         dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
+                rasterizer->WaitHostCopies();
+                rasterizer->WaitDeferredSignals();
                 rasterizer->CopyBuffer(dma_data->DstAddress<VAddr>(), dma_data->src_addr_lo,
                                        dma_data->NumBytes(), false, true);
             } else if ((dma_data->src_sel == DmaDataSrc::Memory ||
@@ -2939,6 +2954,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                     header->type == 3 && header->type3.opcode == PM4ItOpcode::DispatchDirect) {
                     indirect_patches.emplace_back(header, src_addr);
                 } else {
+                    rasterizer->WaitHostCopies();
+                    rasterizer->WaitDeferredSignals();
                     rasterizer->CopyBuffer(dst_addr, src_addr, num_bytes, false, false);
                 }
             } else {

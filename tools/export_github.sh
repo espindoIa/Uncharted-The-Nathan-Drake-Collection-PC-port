@@ -43,6 +43,7 @@ done
 find tools launcher -type f ! -path '*/__pycache__/*' ! -name 'PkgTool-*.zip' \
     ! -name '*.pyc' | while read -r path; do copy "$path"; done
 copy Start-Uncharted.cmd
+copy Record-Session.cmd
 copy analysis/STATUS.md
 copy analysis/PLAN.md
 cp -r tools/github/. "$dest/"

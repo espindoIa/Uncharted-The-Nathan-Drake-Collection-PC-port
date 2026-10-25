@@ -189,6 +189,8 @@ private:
 
     void Run();
     void RunScaled();
+    /// gow3 25 Oct 2026: a camera cut this frame (CameraMotion::CameraCut) drops the history.
+    void NoteCameraCut();
     void RunUiOnly(VideoCore::ImageId color, VideoCore::ImageId depth);
     void EnsureUiResources(u32 width, u32 height, vk::Format color, vk::Format depth);
     void PrepareUiDepth(VideoCore::ImageId depth);

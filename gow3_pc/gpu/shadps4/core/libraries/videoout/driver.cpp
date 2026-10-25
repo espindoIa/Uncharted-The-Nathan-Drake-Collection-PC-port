@@ -22,6 +22,7 @@
 #endif
 #include "common/assert.h"
 #include "gow3_toggles.h"
+#include "gow3_flight.h"
 #include "gow3_settings.h"
 #include "gow3_graphics.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
@@ -393,8 +394,15 @@ static void LogFrameEvent(char kind) {
     }
 }
 
+namespace {
+bool MovieActive(std::chrono::steady_clock::time_point now); // below, next to PresentThread
+} // namespace
+
 void VideoOutDriver::Flip(const Request& req) {
     LogFrameEvent('P');
+    // gow3 25 Oct 2026: one flight recorder row per presented flip (gow3_flight.h), on this
+    // present thread only, whatever GOW3_FRAME_STATS says: the numbers before a one-frame flash.
+    Gow3Flight::OnFlip(MovieActive(std::chrono::steady_clock::now()), presenter->FrameGenActive());
     // Update HDR status before presenting, then present the frame (gow3: on the swap thread).
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
         presenter->SetHDR(hdr);
@@ -675,6 +683,29 @@ void VideoOutDriver::Flip(const Request& req) {
                         (present_now[2] - window_present[2]) / (window * 1e7),
                         (present_now[3] - window_present[3]) / (window * 1e7));
             std::copy(std::begin(present_now), std::end(present_now), std::begin(window_present));
+            // gow3 25 Oct 2026: upscaler history resets for camera cuts (Disabled2 CameraCutReset).
+            if (const u64 cuts = Gow3Stats::camera_cuts.exchange(0)) {
+                std::printf("Camera cuts: %llu (upscaler history reset)\n",
+                            static_cast<unsigned long long>(cuts));
+            }
+            // gow3 25 Oct 2026: scene sampler binds of the window (BiasExplicitLod, AnisoUnmipped).
+            {
+                using ull = unsigned long long;
+                const ull biased = Gow3Stats::samplers_biased.exchange(0);
+                const ull bias_skipped = Gow3Stats::bias_skipped_explicit.exchange(0);
+                const ull bias_mixed = Gow3Stats::bias_skipped_mixed.exchange(0);
+                const ull raised = Gow3Stats::aniso_raised.exchange(0);
+                const ull unmipped = Gow3Stats::aniso_skipped_unmipped.exchange(0);
+                const ull maxlod0 = Gow3Stats::aniso_skipped_maxlod0.exchange(0);
+                const ull explicit_lod = Gow3Stats::aniso_skipped_explicit.exchange(0);
+                if (biased + bias_skipped + raised + unmipped + maxlod0 + explicit_lod) {
+                    std::printf("Samplers (5 s): %llu scene-biased, %llu bias skipped (explicit "
+                                "LOD, of which %llu mixed); %llu aniso raised, %llu aniso "
+                                "skipped (unmipped %llu, maxlod0 %llu, explicit %llu)\n",
+                                biased, bias_skipped, bias_mixed, raised, unmipped + maxlod0 + explicit_lod,
+                                unmipped, maxlod0, explicit_lod);
+                }
+            }
             // gow3 20 Oct 2026 (GitHub #95: memory rising over a long session): what holds memory,
             // every 5 s, so a long run shows which part grows.
             {

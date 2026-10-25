@@ -672,6 +672,10 @@ private:
     void GpuRangesSubtract(VAddr address, u64 size) {
         std::unique_lock lock{gpu_ranges_mutex};
         gpu_modified_ranges.Subtract(address, size);
+        GpuAddCacheDrop(address, size);
+    }
+    /// Caller must hold gpu_ranges_mutex exclusively.
+    void GpuAddCacheDrop(VAddr address, u64 size) {
         // gow3 20 Oct 2026: cached adds overlapping the range are no longer whole in the set.
         const VAddr end = address + size;
         for (auto& entry : gpu_add_cache) {

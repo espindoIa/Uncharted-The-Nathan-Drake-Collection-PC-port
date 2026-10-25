@@ -16,6 +16,7 @@
 
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
+#include "gow3_flight.h"
 #include "gow3_settings.h"
 #include "gow3_toggles.h"
 #include "gow3_trigger_files.h"
@@ -3658,8 +3659,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         if (upscaler->OnFrameStart()) {
             object_motion->InvalidateHistory();
             camera_motion->InvalidateHistory();
+            Gow3Flight::Event(Gow3Flight::HistoryInvalidated); // 25 Oct 2026: flight recorder
         }
         camera_motion->SetJitter(upscaler->Jitter());
+        // gow3 25 Oct 2026: this frame's jitter and texture LOD bias for the flight recorder.
+        Gow3Flight::Gauge(Gow3Flight::JitX, upscaler->Jitter()[0]), Gow3Flight::Gauge(Gow3Flight::JitY, upscaler->Jitter()[1]),
+            Gow3Flight::Gauge(Gow3Flight::LodBias, upscaler->SceneMipBias());
         object_motion->OnFrameStart();
         NoteFrameStart();
         static const char* scene_debug = std::getenv("GOW3_SCENE_DEBUG");
@@ -3906,18 +3911,60 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // gow3: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
     draw_jitter = {};
+    const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    const bool full_screen = regs.num_indices <= 6 && regs.num_instances.NumInstances() <= 1;
+    // For the jitter stats (blurry-textures branch): which kind of jitter this draw got.
     bool scene_jittered = false, pass_jittered = false;
+    // gow3 25 Oct 2026 (player: whole lamp shadows flicker on and off with DLSS, TAA or FSR,
+    // never without an upscaler): what this draw samples. bound_images holds its targets too;
+    // binding.is_bound marks the images BindTextures sampled (reset by ResetBindings). A pass
+    // that samples the jittered scene depth and tests against a shadow map (a compare sampler,
+    // or another depth-format image) rebuilds positions from depth rendered up to half a pixel
+    // away: where that exceeds the shadow bias, the whole shadow test flips every jitter step.
+    bool samples_scene_depth = false, samples_other_depth = false;
+    u32 compare_samplers = 0;
+    if (upscaler->Enabled() && ps && camera_motion->Depth()) {
+        for (const VideoCore::ImageId id : bound_images) {
+            const auto& image = texture_cache.GetImage(id);
+            if (!image.binding.is_bound || !image.info.props.is_depth) {
+                continue;
+            }
+            (JitteredDepth(id) ? samples_scene_depth : samples_other_depth) = true;
+        }
+        if (samples_scene_depth) {
+            for (const auto& sampler : ps->samplers) {
+                compare_samplers += sampler.is_depth ? 1u : 0u;
+            }
+        }
+    }
+    const bool shadow_candidate =
+        samples_scene_depth && (compare_samplers > 0 || samples_other_depth);
+    const bool shadow_jitter = !Gow3Toggle::Disabled2(Gow3Toggle::ShadowPassJitter);
+    // Full-screen passes: the jitter is in scene pixels. A pass drawn at another size (a
+    // half-resolution shadow mask) moves by the same fraction of the screen, not the same number
+    // of its own pixels (its viewport covers the screen the scene depth covers). ShadowPassJitter
+    // set: the old unscaled shift.
+    const auto full_screen_jitter = [&] {
+        auto jitter = upscaler->Jitter();
+        const auto& vp_ctl = regs.viewport_control;
+        const auto& vp = regs.viewports[0];
+        if (const auto depth = camera_motion->Depth(); shadow_jitter && depth &&
+            vp_ctl.xscale_enable && vp_ctl.yscale_enable && vp.xscale > 0.0f && vp.yscale != 0.0f) {
+            const auto& size = texture_cache.GetImage(depth).info.size;
+            jitter[0] *= 2.0f * vp.xscale / float(size.width);
+            jitter[1] *= 2.0f * std::abs(vp.yscale) / float(size.height);
+        }
+        return jitter;
+    };
     // 24 Oct 2026 (JitterSmallDraws, opt-in): small non-instanced draws with the scene depth are
     // jittered too; a full-screen quad with the scene depth may then leave an edge column.
     if (upscaler->Enabled() && JitteredDepth(db_desc.first) &&
-        (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1 ||
-         Gow3Toggle::Disabled2(Gow3Toggle::JitterSmallDraws))) {
+        (!full_screen || Gow3Toggle::Disabled2(Gow3Toggle::JitterSmallDraws))) {
         draw_jitter = upscaler->Jitter();
         scene_jittered = true;
-    } else if (const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-               ps && upscaler->Enabled() && JitterFullScreenPass(ps->pgm_hash) &&
+    } else if (ps && upscaler->Enabled() && JitterFullScreenPass(ps->pgm_hash) &&
                !Gow3Toggle::Disabled(Gow3Toggle::FullScreenPassJitter)) {
-        draw_jitter = upscaler->Jitter();
+        draw_jitter = full_screen_jitter();
         pass_jittered = true;
         static bool noted = false;
         if (!noted) {
@@ -3925,9 +3972,56 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             std::printf("Upscaler: full-screen pass %08x gets the scene jitter\n",
                         u32(ps->pgm_hash));
         }
+    } else if (full_screen && shadow_candidate && shadow_jitter) {
+        // gow3 25 Oct 2026: the lamp (point, spot) shadow passes are other shaders than the sun's
+        // f614041e in GOW3_JITTER_PS; found by what they sample instead of by hash.
+        draw_jitter = full_screen_jitter();
+        pass_jittered = true;
+        static std::vector<u32> noted;
+        if (std::ranges::find(noted, u32(ps->pgm_hash)) == noted.end()) {
+            noted.push_back(u32(ps->pgm_hash));
+            std::printf("Upscaler: shadow pass %08x gets the scene jitter (auto)\n",
+                        u32(ps->pgm_hash));
+        }
+    }
+    // Diagnostics, once per pixel shader: shadow pass candidates, and jittered light volumes
+    // (geometry) that test shadows but may build their screen UV from FragCoord, which the
+    // viewport shift does not move (no behaviour change for those).
+    if (shadow_candidate) {
+        const bool jittered = draw_jitter[0] != 0.0f || draw_jitter[1] != 0.0f;
+        const bool light_volume = jittered && !full_screen && compare_samplers > 0;
+        static std::vector<u32> seen_shadow, seen_volume;
+        const u32 hash = u32(ps->pgm_hash);
+        const bool new_shadow = std::ranges::find(seen_shadow, hash) == seen_shadow.end();
+        const bool new_volume =
+            light_volume && std::ranges::find(seen_volume, hash) == seen_volume.end();
+        if (new_shadow || new_volume) {
+            u32 width = 0, height = 0;
+            if (cb_descs[0].first) {
+                const auto& size = texture_cache.GetImage(cb_descs[0].first).info.size;
+                width = size.width, height = size.height;
+            }
+            const u32 vs_hash = u32(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash);
+            if (new_shadow) {
+                seen_shadow.push_back(hash);
+                std::printf("Shadow pass candidate: ps %08x vs %08x indices %u instances %u "
+                            "jittered %d target %ux%u compare-samplers %u other-depth %d "
+                            "screen-space %d\n",
+                            hash, vs_hash, regs.num_indices, regs.num_instances.NumInstances(),
+                            int(jittered), width, height, compare_samplers,
+                            int(samples_other_depth), int(regs.IsClipDisabled()));
+            }
+            if (new_volume) {
+                seen_volume.push_back(hash);
+                std::printf("Light volume candidate: ps %08x vs %08x indices %u instances %u "
+                            "target %ux%u compare-samplers %u\n",
+                            hash, vs_hash, regs.num_indices, regs.num_instances.NumInstances(),
+                            width, height, compare_samplers);
+            }
+            std::fflush(stdout);
+        }
     }
     if (JitterStatsOn() && !pass_jittered && upscaler->Enabled() && JitteredDepth(db_desc.first)) {
-        const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
         NoteJitterStat(scene_jittered, ps ? ps->pgm_hash : 0, regs.num_indices,
                        regs.num_instances.NumInstances());
     }
@@ -8591,9 +8685,26 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
         const auto& sampler = stage.samplers[sampler_index];
         auto ssharp =
             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
-        ForceAnisotropy(ssharp, sampler.is_depth);
-        const auto vk_sampler = texture_cache.GetSampler(
-            ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias);
+        ForceAnisotropy(ssharp, sampler, stage, prepared);
+        // gow3 25 Oct 2026 (player: blurred or wrong materials): Vulkan adds mipLodBias to
+        // explicit-LOD samples too, so a sampler the shader uses with a chosen mip gets no
+        // scene bias (one used both ways neither: the safe side). BiasExplicitLod: old way.
+        float lod_bias = sampler.is_depth ? 0.0f : sampler_lod_bias;
+        if (lod_bias != 0.0f) {
+            if (sampler.explicit_lod && !Gow3Toggle::Disabled2(Gow3Toggle::BiasExplicitLod)) {
+                lod_bias = 0.0f;
+                if (Gow3Stats::enabled) {
+                    Gow3Stats::bias_skipped_explicit.fetch_add(1, std::memory_order_relaxed);
+                    if (sampler.implicit_lod) {
+                        Gow3Stats::bias_skipped_mixed.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+            } else if (Gow3Stats::enabled) {
+                Gow3Stats::samplers_biased.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        const auto vk_sampler =
+            texture_cache.GetSampler(ssharp, Regs().ta_bc_base, sampler.is_depth, lod_bias);
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
         auto& set_write = set_writes[write_index++];
         set_write.dstSet = VK_NULL_HANDLE;
@@ -8610,7 +8721,9 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
 // the detail of the output's mip level, and surfaces seen at a grazing angle (floors, walls along
 // the view) stay blurred. Only mipmapped linear samplers of graphics draws are raised; depth
 // compares, point filters and unmipped samplers (UI, post-processing) keep the game's setup.
-void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
+void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, const Shader::SamplerResource& sampler,
+                                 const Shader::Info& stage, const PreparedStage* prepared) const {
+    const bool is_depth = sampler.is_depth;
     if (sampler_graphics && !is_depth) {
         // The game's filters, once per kind: min filter, mip filter, ratio (evidence of what the
         // games ask for, logged whether or not the setting raises them).
@@ -8630,6 +8743,47 @@ void Rasterizer::ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const {
     }
     if (AmdGpu::IsAnisoFilter(sharp.xy_min_filter) && sharp.MaxAniso() >= static_cast<float>(forced)) {
         return;
+    }
+    // gow3 25 Oct 2026 (player: lines at texture edges): the comment above promised unmipped
+    // samplers keep the game's setup, but only the mip filter was checked. Anisotropy at level 0
+    // widens the footprint along one axis and reads across atlas cells and LUT rows. Skipped:
+    // samplers used only with an explicit LOD (no derivatives to widen), clamped to MaxLod 0, or
+    // paired only with one-level images. An unknown pairing (binding >= 32) is raised as before.
+    if (!Gow3Toggle::Disabled2(Gow3Toggle::AnisoUnmipped)) {
+        if (sampler.explicit_lod && !sampler.implicit_lod) {
+            if (Gow3Stats::enabled) {
+                Gow3Stats::aniso_skipped_explicit.fetch_add(1, std::memory_order_relaxed);
+            }
+            return;
+        }
+        if (sharp.max_lod.Value() == 0) {
+            if (Gow3Stats::enabled) {
+                Gow3Stats::aniso_skipped_maxlod0.fetch_add(1, std::memory_order_relaxed);
+            }
+            return;
+        }
+        if (sampler.image_mask != 0 && sampler.image_mask != ~0u) {
+            bool mipmapped = false;
+            for (u32 mask = sampler.image_mask; mask != 0 && !mipmapped; mask &= mask - 1) {
+                const u32 index = static_cast<u32>(std::countr_zero(mask));
+                if (index >= stage.images.size()) {
+                    mipmapped = true; // not expected; keep the old behaviour
+                    break;
+                }
+                const auto tsharp =
+                    prepared ? prepared->image_sharps[index] : stage.images[index].GetSharp(stage);
+                mipmapped = tsharp.last_level != tsharp.base_level;
+            }
+            if (!mipmapped) {
+                if (Gow3Stats::enabled) {
+                    Gow3Stats::aniso_skipped_unmipped.fetch_add(1, std::memory_order_relaxed);
+                }
+                return;
+            }
+        }
+    }
+    if (Gow3Stats::enabled) {
+        Gow3Stats::aniso_raised.fetch_add(1, std::memory_order_relaxed);
     }
     const auto ratio = forced >= 16  ? AmdGpu::AnisoRatio::Sixteen
                        : forced >= 8 ? AmdGpu::AnisoRatio::Eight

@@ -1449,6 +1449,12 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
             dumps.mkdir(parents=True, exist_ok=True)
             env.setdefault("GOW3_FRAME_DUMP_TRIGGER", str(dumps / "trigger"))
             env.setdefault("GOW3_DUMP_DIR", str(dumps))
+            # 25 Oct flight recorder: numeric per-flip dumps (CSV) the session recorder asks for on a
+            # hotkey mark by creating the trigger file; the dir existing is how it knows this build has it.
+            flight = out / "flight"
+            flight.mkdir(parents=True, exist_ok=True)
+            env.setdefault("GOW3_FLIGHT_DIR", str(flight))
+            env.setdefault("GOW3_FLIGHT_TRIGGER", str(out / "flight.trigger"))
     window_icon = game_window_icon(game)
     if window_icon:
         env.setdefault("GOW3_WINDOW_ICON", str(window_icon))

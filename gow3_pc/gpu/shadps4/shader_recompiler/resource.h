@@ -252,6 +252,13 @@ struct SamplerResource {
     SharpFetchPostOp post_op{};
     SharpLocation post_op_tsharp_dw3_off{};
     bool is_depth{};
+    /// gow3 25 Oct 2026 (player: lines at texture edges, blurred or wrong materials): how the
+    /// shader samples with this S#, OR over its sample instructions. Vulkan adds the sampler's
+    /// mipLodBias to explicit-LOD samples too, and forced anisotropy widens level-0 footprints,
+    /// so Rasterizer::BindSamplers needs both. Not part of the Descriptors::Add dedupe key.
+    bool explicit_lod{}; ///< some sample picks its mip (image_sample_l / _lz)
+    bool implicit_lod{}; ///< some sample uses derivatives (implicit LOD, gradient, gather)
+    u32 image_mask{};    ///< bit per paired image binding; ~0u when a binding is >= 32
 
     constexpr AmdGpu::Sampler GetSharp(const auto& info) const noexcept {
         AmdGpu::Sampler sampler{};

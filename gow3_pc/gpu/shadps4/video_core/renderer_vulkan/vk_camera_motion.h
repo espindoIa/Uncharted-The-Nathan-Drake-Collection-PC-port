@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "common/types.h"
+#include "gow3_camera_cut.h"
 #include "video_core/renderer_vulkan/frame_gen_camera.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -66,6 +67,12 @@ public:
     /// depth of velocity mode has it.
     [[nodiscard]] std::pair<u32, u32> SceneSize() const noexcept {
         return {scene_width, scene_height};
+    }
+    /// gow3 25 Oct 2026: this frame's camera is a cut from the previous one (gow3_camera_cut.h;
+    /// Disabled2 CameraCutReset turns it off): the upscaler drops its history, the camera motion
+    /// is zero. Cleared at the display pass.
+    [[nodiscard]] bool CameraCut() const noexcept {
+        return camera_cut;
     }
     [[nodiscard]] bool IsVelocityShader(u64 ps_hash) const noexcept;
     /// The velocity pass's constant buffer (`dwords` of it).
@@ -130,6 +137,8 @@ private:
     };
 
     void Overlay(VideoCore::ImageId frame);
+    /// Runs the cut detector on the frame's first camera (view to world rows [R | t]).
+    void CheckCut(const float* to_world);
 
     const Instance& instance;
     Scheduler& scheduler;
@@ -145,6 +154,8 @@ private:
     ObjectMotion* object_motion = nullptr;
     Camera current, previous;
     bool frame_has_camera = false;
+    Gow3CameraCut::Detector cut_detector{Gow3CameraCut::MoveFloorFromEnv()};
+    bool cut_checked = false, camera_cut = false; ///< this frame
     std::array<float, 2> jitter{}, previous_jitter{};
     std::array<u32, 2> render_size{};
     VideoCore::ImageId depth_id{};

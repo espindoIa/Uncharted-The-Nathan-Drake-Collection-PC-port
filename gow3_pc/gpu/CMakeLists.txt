@@ -433,6 +433,16 @@ target_include_directories(actor-hook-test PRIVATE shim)
 target_compile_options(actor-hook-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 add_executable(movie-hook-test EXCLUDE_FROM_ALL ../tests/test_movie_hook.cpp)
 target_compile_options(movie-hook-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+# gow3 25 Oct 2026: the engine flight recorder (shim/gow3_flight.cpp; it is in gow3gpu through
+# SHIM_SOURCES), its ring, CSV and anomaly rules without Vulkan.
+add_executable(flight-test EXCLUDE_FROM_ALL ../tests/test_flight.cpp shim/gow3_flight.cpp
+    shim/gow3_settings.cpp shim/gow3_trigger_files.cpp)
+target_include_directories(flight-test PRIVATE shim)
+target_compile_options(flight-test PRIVATE -UNDEBUG -Wall -Wextra)
+# gow3 25 Oct 2026: the upscaler's camera cut decision (shim/gow3_camera_cut.h, header-only).
+add_executable(camera-cut-test EXCLUDE_FROM_ALL ../tests/test_camera_cut.cpp)
+target_include_directories(camera-cut-test PRIVATE shim)
+target_compile_options(camera-cut-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 add_executable(readback-sources-test EXCLUDE_FROM_ALL ../tests/test_readback_sources.cpp)
 target_include_directories(readback-sources-test PRIVATE shadps4)
 target_compile_options(readback-sources-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)

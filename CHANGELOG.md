@@ -6,6 +6,63 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Fix: shadows cast by lamps no longer flicker on and off with DLSS, TAA or FSR.** With the
+  anti-aliasing / upscaler on, the passes that draw lamp shadows now follow the same sub-pixel
+  camera shift as the rest of the scene, as the sun shadows already did since 19 October. To
+  compare with the old behaviour, set bit 45 (35184372088832) in the second number of
+  `disabled-optimizations.txt`. Not tested in the game yet.
+- **Fix: lines at texture edges and some blurred or wrong-looking textures.** The forced
+  anisotropic filtering (Anisotropy in the menu) no longer applies to textures that have only one
+  detail level (texture atlases, decals, lookup tables), to samplers the game limits to the top
+  level, or to textures the game reads at a level it picks itself; these could show lines or
+  bleeding at their edges. The sharper texture detail behind the upscaler (DLAA/DLSS/FSR) no longer
+  shifts textures the game reads at a level it picks itself, which could look blurred or wrong;
+  ordinary surfaces stay as sharp as before. The first start after updating recompiles the shaders,
+  so the game stutters for a while, as with a new install. To compare with the old behaviour, set bit
+  43 (8796093022208, texture detail) or bit 44 (17592186044416, anisotropy) in the second number of
+  `disabled-optimizations.txt`. Not tested in the game yet.
+- **Fix: no ghost of the previous image after a camera cut.** When the camera jumps, for example
+  when you leave the menu into the game or a cutscene switches shots, the anti-aliasing / upscaler
+  (DLSS, FSR, TAA) no longer blends in the image from before the cut. A cut is a turn of more than
+  45 degrees or a jump far larger than the camera's usual movement in one frame, or the first frame
+  after half a second without a game camera; ordinary fast mouse turns are not cuts. To compare
+  with the old behaviour, set bit 42 (4398046511104) in the second number of
+  `disabled-optimizations.txt`. Not tested in the game yet. The flight record's compile count now
+  also counts shaders compiled in the background (it showed 0 before).
+- **New: the game keeps a flight record of its last seconds.** A one-frame flash or flicker is
+  over before anyone can press a key, so the engine now always keeps the last ~1000 frames
+  (about 7-15 seconds) of its internal numbers: frame times, upscaler resets, the camera, draws
+  skipped while a shader compiled, textures evicted, and more. They are written to a small file
+  when you press the session recorder's F7-F10 keys, or on their own when the engine sees a stall,
+  an upscaler reset, a skipped draw or a camera cut the upscaler did not notice. Loading screens,
+  menus and movies do not set them off, and skipped draws (common while shaders compile in the
+  first minutes) write at most one file a minute. The files go to `analysis\<game>\flight\` and the
+  session recorder collects them with your marks. Nothing changes on screen; the recording costs
+  well under a microsecond per frame. Not tested in game yet.
+- **New: a session recorder that writes down a play session so a problem can be reported with
+  evidence.** Start `Record-Session.cmd` (in the package folder) before or after the game and play
+  as usual; it records every game run until you close its window. When something looks wrong, press
+  **F7** (texture problem), **F8** (geometry: exploding or stretched shapes), **F9**
+  (flash, flicker, ghosting) or **F10** (anything else, a freeze or crash). One beep means the
+  moment was captured (screenshot and the last log lines); a second beep means the game's own
+  frame dump was saved too; a low long beep means it failed. Each run gets a folder in
+  `analysis\uncharted-user\sessions\` with your PC and settings, the game log with times,
+  a list of warnings and slow frames, CPU / memory / graphics card readings every 2 seconds, the
+  exit code if the game crashed, your marks, and `summary.md` to read first. Send that folder with
+  the bug report. The recorder runs as a separate program, changes nothing in the game, and the
+  hotkeys are taken from the game while it runs (they do not reach it). Not tested in game yet.
+
+- **Uncharted: GPU memory copies issued from the compute queue now wait for earlier queued uploads
+  like the graphics queue's do, so a compute dispatch cannot read data from after the copy.** Found
+  by code review, not seen in game, not tested in game.
+- **Uncharted: a GPU copy into the shader-engine scratch memory (GDS) that carried a register flag
+  is no longer dropped.** Found by code review, no known scene sends it, not tested in game.
+- **Uncharted: after a file read replaced a page that held GPU data, a later GPU write to the same
+  place could be forgotten, so the old bytes could be shown.** Found by code review, not seen in
+  game, not tested in game.
+- **Uncharted 3: a rare case where the constants or bones of a crowd could stay one frame or longer
+  out of date is closed.** It could happen after a page of memory was re-protected while the GPU
+  work was being prepared. Found by code review, not seen in game, and not tested in game.
 - **Added (24 Oct 2026): the launcher can be used with a controller.** The D-pad or the left stick
   move through the games, the sections, the settings and the buttons; A presses a button, flips a
   switch or opens a list, left and right change a choice, B goes back to the section list (and

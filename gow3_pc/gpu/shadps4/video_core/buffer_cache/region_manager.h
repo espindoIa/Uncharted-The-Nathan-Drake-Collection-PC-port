@@ -213,6 +213,14 @@ public:
             cpu.AnyInRange(start_page, end_page)) {
             return 0;
         }
+        // gow3 24 Oct 2026 (seqlock second check, narrow race found by static review): a change that
+        // started after the first read may have cleared bits P was read clean from, before its
+        // protection landed; the cpu bit reads are not loads of this member, so the fence orders
+        // them before the reload. A change that started and finished in between also differs.
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (cpu_changes_started.load(std::memory_order_acquire) != started) {
+            return 0;
+        }
         return started + 1;
     }
     /// No page of [offset, offset + size) was marked CPU-modified since CpuCleanToken gave
