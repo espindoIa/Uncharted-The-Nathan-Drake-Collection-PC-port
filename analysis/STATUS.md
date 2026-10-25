@@ -4876,3 +4876,14 @@ Next step (proposed, not started): cut the waits of stage A on the pipe, startin
 3. Risk to test first: stage B owns the readbacks while it runs (the 18 Oct race, `GOW3_READBACK_RACE`), so stage A must not land ticks beside it. Test with the readback race check, `GOW3_STAGEA_VERIFY`-style equivalence counters, and the floating-NPC / U2 cases from 16 Oct before any claim.
 4. Re-run `GOW3_DRAWREC_STATS=1` afterwards: waited drains a frame, post-drain-to-commit and B idle should move; FPS gain must beat the run-to-run noise measured above.
 5. Smaller, independent: try `GOW3_PREP_POOL=1` once with the same A/B (about 2,570 allocations/s today).
+
+## 24 October 2026 (night): U1 treasure models, synchronous shaders again
+
+- Symptom (user report): since 0.3.0 (U1 back to async shader compilation) the treasure models (Treasures screen, pickup) do not appear.
+- Static trace: the viewer scene update (0x2061e8) and render (0x206b58) run every frame, so only a compile that never completes or fails can hide the model.
+- In 0.3.0, PublishGraphics leaves a failed async pipeline in pending_graphics forever. On main, failed pipelines/shaders go to failed_graphics / compilation_failed / failed_permutations and the async branch never queues them again (vk_pipeline_cache.cpp GetGraphicsPipeline, GetProgram). Compute is never compiled async (compile_async excludes Compute). Either way the draw is skipped for good.
+- None of the 86 U1 logs has a "compilation failed" / "capture failed" line, but none ever opened a non-default treasure, so this is not ruled out.
+- Fix: U1 compiles synchronously by default (0.2.3 behaviour). Cost: the 1-2.4 s new-area stalls on laptops (18 Oct). UNCHARTED_U1_SYNC_SHADERS=0 restores async_shaders.
+- If a log shows "compilation failed" lines, the root fix is: a failed async graphics pipeline / program falls back to a synchronous compile.
+- Other candidates left (not tested): GOW3_COMPUTE_PRECOMPILE=0, GOW3_READBACK_GUARD=0.
+- Not tested: no in-game run (user asked for none).

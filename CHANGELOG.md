@@ -140,6 +140,13 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   while it checks an NVIDIA DLL you add, creates shortcuts, stops the game or looks for graphics
   cards (the Graphics card row on Display now appears a moment after the launcher opens).
 
+- **Uncharted 1: treasure models (Treasures screen and pickups) should show again (24 Oct 2026).**
+  Since 0.3.0 Drake's Fortune compiled shaders in the background; a model whose shaders were
+  skipped while compiling could stay missing. Drake's Fortune compiles synchronously again, as
+  before 0.3.0 (short stalls the first time an area loads, on slow PCs 1-2 s). Not confirmed in
+  game. Set `UNCHARTED_U1_SYNC_SHADERS=0` in `analysis/uncharted-user/test-env.txt` to go back to
+  background compilation.
+
 - **24 Oct 2026: Uncharted 3's Cartagena market street (chapter 2) runs about 10-12% faster.**
   The street's crowd made the port prepare about 1,500 tiny skinning jobs a frame one by one,
   which kept the processor, not the graphics card, as the limit. They now go to the graphics card
