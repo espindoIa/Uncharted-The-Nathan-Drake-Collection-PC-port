@@ -31,6 +31,8 @@ New entries go at the end, dated, measured numbers only.
 - Upstream merges: `21 October 2026 (night): upstream 0.5.0 merged`, `Upstream 0.6.0 merged (24 Oct 2026)`
 - Launcher overhaul (sidebar, Home checklist, keyboard/controller, dialogs): `24 October 2026: launcher overhaul`
 
+- Game FXAA skipped under temporal AA: `Game FXAA skipped under temporal AA (24 Oct 2026)`
+
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
 The game boots through the Collection menu and opening movie into gameplay.
@@ -4364,3 +4366,70 @@ Merge of upstream v0.6.0 (7b04bac) into claude/merge-upstream-0.6.0 (base a77e0c
 Toggle bits: upstream 0.6.0 adds none (no Disabled/Disabled2 use in its diff); the fork's Disabled2 bits up to 1ull<<41 are unchanged. Fork pieces checked present after the merge: DispatchRun* / StageDispatchRun (vk_rasterizer.cpp), liverpool.cpp cut hooks and RunComputeReleaseMem (liverpool.cpp not touched by upstream), static mesh snapshots, gow3_reflex.cpp, Streamline backend, LDS bounds pass (none touched by upstream), launcher Reflex / FG / Streamline options.
 
 Not verified: any game run (boots are the user's); the save profile, vibration and overlay rows in the launcher GUI; direct mouse aim with the fork's aim patches; GOW3_MIP_TARGETS with the fork's scene-resolution and upscaler paths in U3; dispatch-run counts with upstream's null-V# rule; carry_over on a real update.
+
+## Game FXAA skipped under temporal AA (24 Oct 2026)
+
+Evidence: U2 capture C:\dev\cap\frame_20261017-214933_3.txt, passes #54-#56. #54 (ps 484cdbf5 plus
+HUD draws) writes the frame into the display buffer (R8G8B8A8Srgb). #55 (ps 6bd1e015) copies it
+into a temp RGBA8Unorm with luma in alpha. #56 (ps 749bbec9) is FXAA 3.11 quality 39 (subpix
+0.75, edge thresholds 0.166/0.0833; decompiled from the shader dumps) and writes back into the
+display buffer. Same hash in the U1/U2/U3 caches. The port's upscaler runs earlier, at cs
+aec539f0 on the HDR scene, so FXAA softened an already anti-aliased image and the HUD.
+
+Design: tools/probe_uncharted.py sets GOW3_GAME_AA_PS=749bbec9 in the temporal-AA branch.
+TemporalUpscaler::SkipsGameAa(ps_hash) is true when it matches, Active(), !composite_frames and
+Disabled2(GameFxaa) is clear. The rasterizer's draw returns right after the OnComposite block when
+the draw's colour target is a display buffer and SkipsGameAa is true (bind_prepared cleared as in
+the OnComposite return); the frame-start gate is unchanged. #54's image stays in the display
+buffer; only alpha differs (0 instead of luma). The presenter ignores display alpha:
+vk_presenter.cpp:799 (view alpha swizzle eOne) and :810 (same on the upscaled path), swapchain
+composite alpha opaque (vk_swapchain.cpp:359); post_process.frag passes alpha through but sees 1.
+Toggle: Disabled2 bit GameFxaa = 1 << 46 (70368744177664; 1 << 40 and 1 << 41 are DispatchRuns and RunReleaseBatch). Bit 1 << 31 (2147483648) is already
+RingAssociative, so it could not be used. Set = the game's FXAA runs.
+
+Not verified: in-game A/B (pending), U1/U2/menu.
+
+Measured (24 Oct 2026, 14:14-14:16):
+
+- U3 bar after Continue, 2560x1440 DLAA, model K, frame dumps (GOW3_FRAME_DUMP_TRIGGER, display
+  buffer), Laplacian variance x1e4 of luma; wall crop 1100-1353 x 373-547 (the 21 Oct 4K crop
+  scaled to 1440p).
+- One valid pair (same pose): FXAA skipped wall 2.27 / frame 10.13; FXAA on wall 1.51 / frame
+  8.35 (+50% wall, +21% frame; run-to-run noise ~9% from 21 Oct).
+- Rounds 2-3 are not usable: Nate turned between dumps, then the game paused and the window was
+  closed by the player mid-run.
+- Not verified: more pairs, the player's DLSS Quality 3840x2160 setup, U1, U2, the menu, motion.
+
+## U3 blur suspects: jitter and DOF diagnostics (24 Oct 2026)
+
+Suspects: (A) scene draws left without the upscaler jitter, (B) the depth-of-field factor target.
+In DrawRecord the jitter goes to draws with the scene depth only when num_indices > 6 or more than
+one instance; smaller non-instanced draws (decals, quads) get none, so under DLSS they would sit
+about 1 px off the jittered scene. Three opt-in switches, all off by default (no behaviour change):
+
+- `GOW3_JITTER_STATS=1`: counts the draws with the scene depth under an upscaler (the
+  GOW3_JITTER_PS full-screen passes are left out). Every ~5 s: `Jitter stats: <frames> frames,
+  jittered x/frame, unjittered y/frame; top unjittered ps: <hash> x<count> (idx n inst m) ...`
+  (top 5, index and instance count of the last draw seen). Frames = Gow3Stats::gpu_frames delta.
+- Disabled2 bit `JitterSmallDraws` = 1 << 47 (140737488355328), inverted sense: set = those small
+  draws get the jitter too. Opt-in because a full-screen quad with the scene depth may leave an
+  edge column unwritten. Set it in disabled-optimizations.txt (second number) and A/B with the
+  stats line and a frame dump.
+- `GOW3_TARGET_DUMP_PS=<hex>[,<hex>...]` + `GOW3_TARGET_DUMP_TRIGGER=<file>`: creating the file
+  arms the next GPU frame; after each draw with a listed pixel shader (low 32 bits of the hash)
+  its colour target 0 (whole image, mip 0 layer 0) goes to `$GOW3_DUMP_DIR` (default out/dump) as
+  `target_<hash>_<frame>_<n>_<w>x<h>_<vkformat>.raw`, written when the GPU is done. At most 8 per
+  trigger. The pass ends after such a draw (the next draw begins a new one), so only use it to
+  measure.
+
+Not verified: none of the three was run (build only).
+
+Measured (24 Oct 2026, same run):
+
+- GOW3_JITTER_STATS: ~336 jittered and 5.0 unjittered scene-depth draws per frame; all unjittered
+  are 6-index single-instance draws of ps c11d3e2c (2/frame), 0bae6524, ab30daa9, f76d1599
+  (1/frame each). Not A/B'd with JitterSmallDraws; whether they are full-screen quads is not
+  checked.
+- DOF factor (ps 4c610459 target, 2560x1440 R8): 0 in every pixel of the gameplay frame, so the
+  tonemap's DOF blend is 0 there: suspect ruled out for this scene (aiming and cutscenes not
+  checked).

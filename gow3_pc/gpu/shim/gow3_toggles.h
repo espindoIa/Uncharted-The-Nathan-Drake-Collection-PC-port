@@ -246,6 +246,15 @@ enum : std::uint64_t {
     /// dispatch run reach the Vulkan recorder as one signal (24 Oct 2026 U3 street: ~20 a run,
     /// ~666k per 5 s, each with its own download pass, Record and kick on stage B).
     RunReleaseBatch = 1ull << 41,
+    /// 24 Oct 2026: with a temporal AA on (DLSS/DLAA, FSR, TAA) the game's own FXAA draw
+    /// (GOW3_GAME_AA_PS, 749bbec9) is skipped: the upscaler already anti-aliased the image and
+    /// FXAA blurred it and the HUD a second time. Set: the game's FXAA runs (old behaviour).
+    /// Not 1 << 31: that bit is RingAssociative; 40 and 41 are DispatchRuns and RunReleaseBatch.
+    GameFxaa = 1ull << 46,
+    /// 24 Oct 2026, inverted sense, opt-in diagnostic: bit set also jitters the draws that use
+    /// the scene depth but have at most 6 indices and one instance (decals, quads; the default
+    /// leaves them unjittered). A full-screen quad with the scene depth may leave an edge column.
+    JitterSmallDraws = 1ull << 47,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;
