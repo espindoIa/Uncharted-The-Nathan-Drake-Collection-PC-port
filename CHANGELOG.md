@@ -6,6 +6,14 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **New: the game keeps a flight record of its last seconds.** A one-frame flash or flicker is
+  over before anyone can press a key, so the engine now always keeps the last ~1000 frames
+  (about 7-15 seconds) of its internal numbers: frame times, upscaler resets, the camera, draws
+  skipped while a shader compiled, textures evicted, and more. They are written to a small file
+  when you press the session recorder's F7-F10 keys, or on their own when the engine sees a stall,
+  an upscaler reset, a skipped draw or a camera cut the upscaler did not notice. The files go to
+  `analysis\<game>\flight\` and the session recorder collects them with your marks. Nothing changes
+  on screen. Not tested in game yet.
 - **New: a session recorder that writes down a play session so a problem can be reported with
   evidence.** Start `Record-Session.cmd` (in the package folder) before or after the game and play
   as usual; it records every game run until you close its window. When something looks wrong, press

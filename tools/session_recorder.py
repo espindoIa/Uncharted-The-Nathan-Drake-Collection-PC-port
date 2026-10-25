@@ -14,8 +14,9 @@ exits, then waits for the next launch. Python standard library only; Windows API
 
 What it never does (the game must not notice it): open the game's boot.log for writing (it is read
 a chunk at a time and closed again), read or write the game's memory, inject anything, or write
-outside the sessions folder, except creating <out>\\dumps\\trigger on a hotkey (the engine's own
-on-demand frame dump, see vk_presenter.cpp) and moving the files that answer it into the session.
+outside the sessions folder, except creating <out>\\dumps\\trigger and <out>\\flight.trigger on a hotkey
+(the engine's own on-demand frame dump, see vk_presenter.cpp, and its numeric flight dump) and moving
+the files that answer them into the session.
 The pure helpers at the top (line classification, Frame stats parsing, PNG, summary) import on any
 OS; they are what gow3_pc/tests/test_session_recorder.py tests."""
 import argparse
@@ -228,10 +229,120 @@ METRIC_COLUMNS = [("cpu_pct", "Process CPU % (of all cores)", "{:.1f}"),
                   ("gpu_power_w", "GPU power W", "{:.0f}")]
 
 
+FLIGHT_WAIT_S = 8.0                 # the engine dumps 60 flips after the trigger: ~1-2 s, 8 s is slack
+# flight_<YYYYmmdd-HHMMSS>-<mmm>_<reason>.csv; the engine writes <name>.tmp and renames, so a .csv is complete
+FLIGHT_RE = re.compile(r"^flight_(\d{8}-\d{6}-\d{3})_(.+)\.csv$")
+FLIGHT_HINT = ("Line up a flight CSV row with boot.timed.log: a row's `unix_ms` is epoch milliseconds; its local "
+               "time is `python -c \"import datetime; print(datetime.datetime.fromtimestamp(UNIX_MS/1000))\"`. "
+               "The first column of boot.timed.log is the local time the recorder saw the line (about 0.5 s "
+               "late, the game's log has no times).")
+
+
+def flight_label(label):
+    """The reason the engine will give a manual dump: label sanitised to [a-z0-9_-], 24 chars, else 'manual'."""
+    return re.sub(r"[^a-z0-9_-]", "", label.lower())[:24] or "manual"
+
+
+def find_flight(flight_dir, reason, since):
+    """Newest finished flight_*_<reason>.csv in the dir modified at or after `since` (epoch s), else None."""
+    best = None
+    try:
+        for p in Path(flight_dir).iterdir():
+            m = FLIGHT_RE.match(p.name)
+            if m and m.group(2) == reason:
+                mtime = p.stat().st_mtime
+                if mtime >= since and (best is None or mtime > best[0]):
+                    best = (mtime, p)
+    except OSError:
+        return None
+    return best[1] if best else None
+
+
+def _num(row, column):
+    try:
+        return float(row.get(column))
+    except (TypeError, ValueError):
+        return None
+
+
+def summarize_flight_csv(path):
+    """Short summary of an engine flight CSV (comment lines start with '#', then a header row). Never
+    raises: a missing column just leaves its key out, an unreadable file gives {'rows': 0, 'error': ...}.
+    Keys: rows, span_s, first_unix_ms, last_unix_ms, dt_ms_max, dt_ms_max_unix_ms, event_rows,
+    event_names {name: rows}, cam_jump_deg_max, cam_jump_unix_ms, d_compiles, d_skipped_draws."""
+    try:
+        with open(path, encoding="utf-8", errors="replace", newline="") as f:
+            rows = list(csv.DictReader(line for line in f if line.strip() and not line.startswith("#")))
+    except OSError as e:
+        return {"rows": 0, "error": repr(e)}
+    out = {"rows": len(rows)}
+    if not rows:
+        return out
+    unix = [_num(r, "unix_ms") for r in rows]
+    t = [v for v in (_num(r, "t_ms") for r in rows) if v is not None]
+    stamps = [v for v in unix if v is not None]
+    if len(t) > 1:
+        out["span_s"] = (max(t) - min(t)) / 1000
+    elif len(stamps) > 1:
+        out["span_s"] = (max(stamps) - min(stamps)) / 1000
+    if stamps:
+        out["first_unix_ms"], out["last_unix_ms"] = min(stamps), max(stamps)
+    for column, key, at in (("dt_ms", "dt_ms_max", "dt_ms_max_unix_ms"),
+                            ("cam_jump_deg", "cam_jump_deg_max", "cam_jump_unix_ms")):
+        values = [(v, u) for v, u in ((_num(r, column), u) for r, u in zip(rows, unix)) if v is not None]
+        if values:
+            best = max(values, key=lambda x: x[0])
+            out[key], out[at] = best[0], best[1]
+    if any("events" in r for r in rows):
+        names = Counter()
+        hit = 0
+        for r in rows:
+            try:
+                mask = int(str(r.get("events") or "0").strip(), 0)
+            except ValueError:
+                mask = int(_num(r, "events") or 0)
+            if mask:
+                hit += 1
+                names.update(n for n in re.split(r"[|;,+\s]+", r.get("event_names") or "") if n not in ("", "-", "0", "none"))
+        out["event_rows"], out["event_names"] = hit, dict(names)
+    for column in ("d_compiles", "d_skipped_draws"):
+        values = [v for v in (_num(r, column) for r in rows) if v is not None]
+        if values:
+            out[column] = sum(values)
+    return out
+
+
+def _local_ms(unix_ms):
+    return stamp(unix_ms / 1000) if unix_ms is not None else "?"
+
+
+def format_flight(result):
+    """One paragraph for summary.md from a mark's flight result (flight_file, flight_status, flight_summary)."""
+    s = result.get("flight_summary")
+    if not result.get("flight_file") or not s:
+        return f"no flight dump: {result.get('flight_status', 'unknown')}"
+    parts = [f"`flight\\{result['flight_file']}`: {s['rows']} rows"]
+    if "span_s" in s:
+        parts[0] += f" over {s['span_s']:.1f} s"
+    if "dt_ms_max" in s:
+        parts.append(f"longest flip {s['dt_ms_max']:g} ms at {_local_ms(s['dt_ms_max_unix_ms'])} "
+                     f"(unix_ms {s['dt_ms_max_unix_ms']:.0f})" if s["dt_ms_max_unix_ms"] is not None
+                     else f"longest flip {s['dt_ms_max']:g} ms")
+    if "event_rows" in s:
+        names = ", ".join(f"{n} x{c}" for n, c in sorted(s["event_names"].items())) or "no names"
+        parts.append(f"{s['event_rows']} rows with events ({names})")
+    if "cam_jump_deg_max" in s:
+        parts.append(f"max camera jump {s['cam_jump_deg_max']:g} deg at {_local_ms(s['cam_jump_unix_ms'])}")
+    if "d_compiles" in s or "d_skipped_draws" in s:
+        parts.append(f"compiles {s.get('d_compiles', 0):g}, skipped draws {s.get('d_skipped_draws', 0):g}")
+    return "; ".join(parts) + "."
+
+
 def build_summary(info):
     """summary.md text from a dict: name, folder, start, end, duration_s, exit_code, game_ended,
-    marks [{label, time, elapsed_s, folder}], frames (summarize_frame_stats), metrics (rows),
-    top_repeats [(line, n)], dropped, notes [str], files [str]."""
+    marks [{label, time, elapsed_s, folder, flight (optional text)}], frames (summarize_frame_stats),
+    metrics (rows), top_repeats [(line, n)], dropped, notes [str], files [str], flight_auto
+    (optional) [{name, reason, time}]."""
     out = [f"# Session {info['name']}", "",
            f"- Started: {info['start']}", f"- Ended: {info['end']}",
            f"- Duration: {info['duration_s'] / 60:.1f} min ({info['duration_s']:.0f} s)"]
@@ -242,6 +353,15 @@ def build_summary(info):
     out += ["", f"## Marks ({len(info['marks'])})", ""]
     out += [f"- {m['label']} at {m['time']} (+{m['elapsed_s']:.0f} s): `{m['folder']}`" for m in info["marks"]] \
         or ["- none"]
+    auto = info.get("flight_auto") or []
+    if auto or any(m.get("flight") for m in info["marks"]):
+        out += ["", "## Flight recorder (numeric per-flip dumps from the engine)", "", FLIGHT_HINT, ""]
+        out += [f"Flight, {m['label']} at {m['time']}: {m['flight']}\n" for m in info["marks"] if m.get("flight")]
+        if auto:
+            counts = Counter(a["reason"] for a in auto)
+            out += ["Automatic dumps (the engine's own triggers, copied to `flight\\auto`): "
+                    + ", ".join(f"{r} x{n}" for r, n in sorted(counts.items())), ""]
+            out += [f"- {a['reason']} at {a['time']}: `{a['name']}`" for a in auto]
     f = info.get("frames") or {}
     out += ["", "## Frame times (from the log's 5 s Frame stats lines)", ""]
     if f:
@@ -546,7 +666,7 @@ class Session:
         self.metrics, self.marks, self.mark_count, self.dumps_taken = [], [], 0, 0
         self.last_stats_line, self.last_row, self.gpu = "", {}, {}
         self.threads, self.exit_code, self.game_ended, self.tailer = [], None, False, None
-        self.dir = None
+        self.dir, self.flight_auto = None, []
 
     # -- infrastructure
     def log(self, text):
@@ -816,6 +936,10 @@ class Session:
         now = time.time()
         folder = self.dir / "marks" / f"{number:02d}_{label}_{time.strftime('%H-%M-%S', time.localtime(now))}"
         folder.mkdir(parents=True)
+        # First thing after the folder: the engine's ring holds the ~1024 flips BEFORE the trigger, so the
+        # earlier it is asked the closer the dump is to what the player just saw. Runs beside the screenshot.
+        flight_result = {"flight_file": None, "flight_status": "error (see recorder.log)"}
+        flight_thread = self.spawn("flight", self.flight_dump, label, folder, flight_result)
         with self.lock:
             tail = list(self.ring)
             data = {"label": label, "number": number, "local_time": stamp(now),
@@ -841,8 +965,9 @@ class Session:
         (folder / "mark.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
         with open(self.dir / "markers.log", "a", encoding="utf-8") as f:
             f.write(f"{data['local_time']} {label} elapsed={data['elapsed_s']}s log_line={data['log_line_number']}\n")
-        self.marks.append({"label": label, "time": data["local_time"], "elapsed_s": data["elapsed_s"],
-                           "folder": str(folder.relative_to(self.dir))})
+        entry = {"label": label, "time": data["local_time"], "elapsed_s": data["elapsed_s"],
+                 "folder": str(folder.relative_to(self.dir))}
+        self.marks.append(entry)
         beep("fail" if failed else "ok")
         dumped = False
         try:
@@ -850,10 +975,58 @@ class Session:
         except Exception as e:
             data["engine_dump"] = {"status": f"error: {e!r}"}
             self.log(f"mark {number} engine dump failed:\n{traceback.format_exc()}")
+        flight_thread.join(timeout=FLIGHT_WAIT_S + 5)
+        data.update(flight_result)
+        entry["flight"] = format_flight(flight_result)
         (folder / "mark.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
         if dumped:
             beep("done")
         self.rec.say(f"mark {number} ({label}) saved: {folder}")
+
+    def flight_dump(self, label, folder, result):
+        """Asks the engine's flight recorder for a dump (first line of <out>\\flight.trigger = the label),
+        waits for the new flight_*_<label>.csv and moves it to <mark>\\flight\\. Fills `result`. The trigger is
+        only written when <out>\\flight exists: an older build ignores the variable and would leave the file
+        to fire at the next launch."""
+        fdir, trigger, reason = self.out / "flight", self.out / "flight.trigger", flight_label(label)
+        if not fdir.is_dir():
+            result["flight_status"] = f"{fdir} missing (the game build has no flight recorder)"
+            return
+        since = time.time()
+        trigger.write_text(reason + "\n", encoding="utf-8")
+        found = None
+        try:
+            while found is None and time.time() < since + FLIGHT_WAIT_S:
+                time.sleep(0.2)
+                found = find_flight(fdir, reason, since)
+        finally:
+            try:
+                trigger.unlink(missing_ok=True)   # never leave a request the game did not take
+            except OSError:
+                pass
+        if not found:
+            result["flight_status"] = f"timed out: no flight_*_{reason}.csv within {FLIGHT_WAIT_S:.0f} s"
+            return
+        target = folder / "flight"
+        target.mkdir(exist_ok=True)
+        shutil.move(str(found), str(target / found.name))
+        result.update(flight_file=found.name, flight_status="ok",
+                      flight_summary=summarize_flight_csv(target / found.name))
+
+    def copy_flight_auto(self):
+        """Copies the engine's automatic dumps (auto-stall, auto-reset, ...) of this session to flight\\auto."""
+        fdir, found = self.out / "flight", []
+        for p in sorted(fdir.iterdir()) if fdir.is_dir() else []:
+            m = FLIGHT_RE.match(p.name)
+            if m and m.group(2).startswith("auto-") and p.stat().st_mtime >= self.start_epoch:
+                (self.dir / "flight" / "auto").mkdir(parents=True, exist_ok=True)
+                shutil.copy2(p, self.dir / "flight" / "auto" / p.name)
+                found.append({"name": p.name, "reason": m.group(2), "time": stamp(p.stat().st_mtime)})
+        self.flight_auto = found
+        if found:
+            counts = Counter(a["reason"] for a in found)
+            self.events.write(f"{stamp()} | [flight] {len(found)} automatic flight dump(s): "
+                              + ", ".join(f"{r} x{n}" for r, n in sorted(counts.items())) + "\n")
 
     def engine_dump(self, folder, wanted):
         """(info, True when files were captured). Creates <out>\\dumps\\trigger: the presenter removes it
@@ -901,6 +1074,7 @@ class Session:
         for t in self.threads:
             t.join(timeout=30)
         end = time.time()
+        self.step("flight auto dumps", self.copy_flight_auto)   # before the events file closes
         for sink in (self.timed, self.events):
             self.step("close", sink.close)
         self.step("close", self.csv_file.close)
@@ -915,7 +1089,8 @@ class Session:
         info = {"name": self.name, "folder": str(self.dir), "start": local_iso(self.start_epoch), "end": local_iso(end),
                 "duration_s": end - self.start_epoch, "exit_code": self.exit_code, "game_ended": self.game_ended,
                 "marks": self.marks, "frames": summarize_frame_stats(self.windows), "metrics": self.metrics,
-                "top_repeats": top, "dropped": self.event_log.dropped(), "notes": self.notes, "files": files}
+                "top_repeats": top, "dropped": self.event_log.dropped(), "notes": self.notes, "files": files,
+                "flight_auto": self.flight_auto}
         self.step("summary.md", lambda: (self.dir / "summary.md").write_text(build_summary(info), encoding="utf-8"))
         if self.handle:
             CloseHandle(self.handle)
@@ -1086,7 +1261,33 @@ def selftest():
                     (out / "dumps" / "trigger").unlink()
                     (out / "dumps" / "display_000_2x2.raw").write_bytes(b"\x01" * 16)
                     return
-        for fn in (write_log, fake_engine):
+        (out / "flight").mkdir()
+        flight_header = ("seq,unix_ms,t_ms,dt_ms,marker,events,event_names,d_compiles,d_skipped_draws,cam_jump_deg\n")
+
+        def flight_csv(path, reason):   # 5 flips, one slow with an event
+            now_ms = int(time.time() * 1000)
+            body = "".join(f"{i},{now_ms + 16 * i},{16 * i},{16.7 if i != 3 else 83.3},0,{0 if i != 3 else 1},"
+                           f"{'-' if i != 3 else 'stall'},{int(i == 3)},{2 * (i == 3)},{0.5 * i}\n" for i in range(5))
+            path.write_text(f"# flight v1 unix_ms={now_ms} reason={reason} frames=5\n{flight_header}{body}", encoding="utf-8")
+
+        def fake_flight():   # the engine's flight recorder: takes the trigger, dumps ~1 s later (tmp, then rename)
+            def name(reason):
+                t = time.time()
+                return f"flight_{time.strftime('%Y%m%d-%H%M%S', time.localtime(t))}-{int(t * 1000) % 1000:03d}_{reason}"
+            time.sleep(1.0)
+            flight_csv(out / "flight" / (name("auto-stall") + ".csv"), "auto-stall")
+            trigger = out / "flight.trigger"
+            for _ in range(150):
+                time.sleep(0.1)
+                if trigger.exists():
+                    reason = trigger.read_text(encoding="utf-8").splitlines()[0]
+                    trigger.unlink()
+                    time.sleep(1.0)
+                    tmp = out / "flight" / (name(reason) + ".tmp")
+                    flight_csv(tmp, reason)
+                    tmp.rename(tmp.with_suffix(".csv"))
+                    return
+        for fn in (write_log, fake_engine, fake_flight):
             threading.Thread(target=fn, daemon=True).start()
         args = argparse.Namespace(root=str(root), out_dir=str(out), sessions_dir=None, keys=DEFAULT_KEYS,
                                   max_engine_dumps=20, no_engine_dump=False, interval=1.0, once=True,
@@ -1127,8 +1328,19 @@ def selftest():
         check(marks and (marks[0].parent / "screen.png").read_bytes()[:8] == b"\x89PNG\r\n\x1a\n", "screen.png signature")
         check(marks and (marks[0].parent / "engine_dump" / "display_000_2x2.raw").exists(), "engine dump moved into the mark")
         check(not (out / "dumps" / "trigger").exists(), "trigger left behind")
+        check(not (out / "flight.trigger").exists(), "flight trigger left behind")
+        mark = json.loads(marks[0].read_text(encoding="utf-8")) if marks else {}
+        flights = list(marks[0].parent.glob("flight/flight_*_texture.csv")) if marks else []
+        check(len(flights) == 1 and mark.get("flight_file") == (flights[0].name if flights else None), "flight csv moved into the mark")
+        fs = mark.get("flight_summary", {})
+        check(fs.get("rows") == 5 and fs.get("event_rows") == 1 and fs.get("dt_ms_max") == 83.3
+              and fs.get("event_names") == {"stall": 1} and fs.get("d_skipped_draws") == 2, f"mark.json flight_summary: {fs}")
+        check(not list((out / "flight").glob("*_texture.csv")), "flight csv still in the game's flight dir")
+        check(len(list((s / "flight" / "auto").glob("flight_*_auto-stall.csv"))) == 1, "auto dump copied to flight\\auto")
         summary = (s / "summary.md").read_text(encoding="utf-8")
         check("Exit code: 3 (" in summary, "summary has the exit code")
+        check("Flight, texture at" in summary and "auto-stall x1" in summary, "summary.md flight paragraphs")
+        check("[flight] 1 automatic" in events, "events.txt counts the auto dump")
         if os.environ.get("SESSION_RECORDER_KEEP"):   # to look at a session by hand
             shutil.copytree(s, os.environ["SESSION_RECORDER_KEEP"])
         print("selftest:", "FAILED: " + "; ".join(problems) if problems else f"ok ({s})")

@@ -24,6 +24,7 @@
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
+#include "gow3_flight.h"
 #include "gow3_settings.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
@@ -476,6 +477,8 @@ struct CompileTimer {
         ++g_gow3_compiles;
         g_gow3_compile_kind_ns[kind] += ns;
         ++g_gow3_compile_kind_count[kind];
+        // gow3 25 Oct 2026: the flight recorder's own count (g_gow3_compiles is zeroed every 5 s).
+        Gow3Flight::Count(Gow3Flight::Compiles), Gow3Flight::Event(Gow3Flight::PipelineCompiled);
     }
 };
 } // namespace
@@ -1061,6 +1064,8 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (!RefreshGraphicsKey(sel)) {
         if (sel.compilation_pending) {
             ++g_gow3_pending_draws;
+            // gow3 25 Oct 2026: a draw missing from this frame, a one-frame flicker suspect.
+            Gow3Flight::Count(Gow3Flight::SkippedDraws), Gow3Flight::Event(Gow3Flight::DrawSkippedPendingCompile);
         }
         return nullptr;
     }
@@ -1103,6 +1108,8 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
             }
         }
         ++g_gow3_pending_draws;
+        // gow3 25 Oct 2026: skipped until the background compile lands (flight recorder).
+        Gow3Flight::Count(Gow3Flight::SkippedDraws), Gow3Flight::Event(Gow3Flight::DrawSkippedPendingCompile);
         return nullptr;
     }
     if (sync_compile) {

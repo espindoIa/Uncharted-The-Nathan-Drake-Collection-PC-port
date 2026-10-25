@@ -30,6 +30,7 @@ New entries go at the end, dated, measured numbers only.
 - Market frame rate = Reflex sleep, pacer replaces it: `Reflex pacer: market frame rate (24 Oct 2026)`
 - Upstream merges: `21 October 2026 (night): upstream 0.5.0 merged`, `Upstream 0.6.0 merged (24 Oct 2026)`
 - Launcher overhaul (sidebar, Home checklist, keyboard/controller, dialogs): `24 October 2026: launcher overhaul`
+- Session recorder and engine flight recorder (retroactive per-flip CSV for one-frame flashes): `25 October 2026: session recorder`, `25 October 2026: engine flight recorder`
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
@@ -4474,3 +4475,63 @@ Merge of upstream v0.6.0 (7b04bac) into claude/merge-upstream-0.6.0 (base a77e0c
 Toggle bits: upstream 0.6.0 adds none (no Disabled/Disabled2 use in its diff); the fork's Disabled2 bits up to 1ull<<41 are unchanged. Fork pieces checked present after the merge: DispatchRun* / StageDispatchRun (vk_rasterizer.cpp), liverpool.cpp cut hooks and RunComputeReleaseMem (liverpool.cpp not touched by upstream), static mesh snapshots, gow3_reflex.cpp, Streamline backend, LDS bounds pass (none touched by upstream), launcher Reflex / FG / Streamline options.
 
 Not verified: any game run (boots are the user's); the save profile, vibration and overlay rows in the launcher GUI; direct mouse aim with the fork's aim patches; GOW3_MIP_TARGETS with the fork's scene-resolution and upscaler paths in U3; dispatch-run counts with upstream's null-V# rule; carry_over on a real update.
+
+## 25 October 2026: engine flight recorder
+
+Why: one-frame flashes, flickers and ghosts are reported but cannot be predicted, so no capture is
+running when one happens, and a key pressed afterwards (the session recorder's F9) only catches the
+frames after it. The engine already knows the numbers that would explain most of them (an upscaler
+reset or not, a camera cut, a draw dropped while its pipeline compiled, a texture evicted, a stall),
+but only prints 5 s summaries. The flight recorder keeps those numbers for every presented flip in a
+ring and writes the ring out after the fact. This also answers open item 8 of the 24 Oct audit list
+above ("no camera-cut detection"): the recorder does not fix it, it shows whether cuts go unnoticed.
+
+**Design** (`gow3_pc/gpu/shim/gow3_flight.{h,cpp}`).
+- `Gow3Flight::OnFlip(movie, frame_gen)` is called at the top of `VideoOutDriver::Flip` (driver.cpp), which the present thread runs once per presented guest flip (early presents included, their later completion not). It runs whenever `GOW3_FLIGHT` is not `0`, independent of `GOW3_FRAME_STATS`.
+- Hot path: an atomic-flag guard (a second caller drops its row, no mutex), one steady clock read, two `exchange`s (events and detail), ~17 relaxed loads of cumulative counters, 19 gauges, one 240-byte row written word by word into a preallocated ring slot under a per-slot sequence lock, the anomaly rules (a few float operations; a 32-value `nth_element` only when an interval is over 60 ms or the camera moved over 2 units; one `acos`). No lock, allocation, file access or print. The first call allocates the ring, starts the dump thread and prints one `Flight:` line (once per process).
+- Hooks elsewhere are one-liners: `Gow3Flight::Event(bit, detail)` (`fetch_or`), `Gow3Flight::Count(id)` (`fetch_add`), `Gow3Flight::Gauge(id, value)` (store of the float bits), `Gow3Flight::Camera(view_to_world, proj_x, proj_y)`; with `GOW3_FLIGHT=0` each is one load of a const flag. None changes rendering.
+- Counters zeroed by the 5 s Frame stats printer (`g_gow3_compiles`, `g_gow3_pending_draws`, `tracker_faults`, `host_copy_waits`, `reduced_draws`, ...) are not read; the recorder counts compiles and skipped draws itself next to the same sites.
+- Dump thread (one, started at the first flip, polls every 50 ms): takes the trigger file (`Gow3TriggerFiles::Watch("GOW3_FLIGHT_TRIGGER")`, the shared 250 ms watcher), holds up to 4 requests, and writes a request once 60 more flips were recorded or 2 s passed (so a request still gets written when the flips stop). It copies the rows out of the ring (rows being rewritten are dropped by the sequence lock; at most a few of the oldest are lost while it copies), builds the CSV, writes `<name>.tmp` and renames it. A failed dump prints one `Flight: dump <reason> failed: ...` line and goes on; a written one prints `Flight: wrote <file> (<n> flips)`.
+- The trigger file is polled by the dump thread, not inside OnFlip as first planned: Take() locks a mutex when a file is pending, and a frozen game (no flips) could then never take an F10 "freeze" mark.
+
+**Hook sites.**
+
+| Site | Feeds |
+| --- | --- |
+| driver.cpp `VideoOutDriver::Flip` | OnFlip; MovieFrame (a movie frame decoded in the last 300 ms, `MovieActive`), fg_on (`Presenter::FrameGenActive`) |
+| vk_pipeline_cache.cpp `CompileTimer` | Count Compiles, PipelineCompiled |
+| vk_pipeline_cache.cpp `GetGraphicsPipeline` (both `++g_gow3_pending_draws`) | Count SkippedDraws, DrawSkippedPendingCompile |
+| vk_temporal_upscaler.cpp `OnFrameStart` | UpscalerReset 1 (settings changed) / 2 (not run last frame), only when `reset` was clear; out_w, out_h |
+| vk_temporal_upscaler.cpp `OnDispatch` | UpscalerReset 3 (trigger without scene color/camera), only when `reset` was clear |
+| vk_temporal_upscaler.cpp `EnsureResources` | UpscalerFeatureCreated, UpscalerReset 4 |
+| vk_temporal_upscaler.cpp `RunUiOnly` / `UpscaleToUi` (stretched) | StretchedOrUiFrame every such frame; UpscalerReset 5 / 6 when `reset` was clear |
+| vk_temporal_upscaler.cpp `RecordFsr4` / `EnsureDlssFeature` / `RecordDlss` | UpscalerReset 7 (FSR 4 fallback), UpscalerFeatureCreated + UpscalerReset 8 (DLSS feature created), UpscalerReset 9 (DLSS fallback) |
+| vk_rasterizer.cpp frame start (after `OnFrameStart`) | HistoryInvalidated (when OnFrameStart reports a change); jit_x, jit_y, lod_bias (`SceneMipBias`) |
+| vk_camera_motion.cpp `OnConstants`, `OnFlatConstants`, `OnVelocityConstants` | cam_*, fwd_*, proj_* (velocity mode: proj = 2/c0, -2/c1 as `TaaDepthParameters`) |
+| vk_camera_motion.cpp `OnDisplayPass` | NoCamera (velocity mode: no valid velocity camera this frame; it never sets `frame_has_camera`, so that flag would say "no camera" every Uncharted frame) |
+| texture_cache.cpp GC pass (`++gc_evictions`) | Count GcEvictions, TextureGcEvict |
+| gow3_flight.cpp OnFlip from `Gow3Settings` | scene_w/h (`active_render_width/height`), upscaler, preset, dlss_model |
+
+**Contract** (the Python side is written against it; names are stable, documented in the header comment of `gow3_flight.h`).
+- Environment: `GOW3_FLIGHT=0` disables everything (default on). `GOW3_FLIGHT_DIR=<dir>` output folder (default: `flight` next to `GOW3_DUMP_DIR`, i.e. `<parent of the dumps dir>\flight`, else `.\flight`). `GOW3_FLIGHT_TRIGGER=<file>`. `GOW3_FLIGHT_AUTO=0` disables anomaly dumps. `GOW3_FLIGHT_FRAMES=<n>` ring size (default 1024, clamped 64..8192).
+- File: `<dir>/flight_<YYYYmmdd-HHMMSS>-<mmm>_<reason>.csv` (local time), written as `<name>.tmp` then renamed. Manual reasons are the trigger file's first line in lower case with every character other than `[a-z0-9_-]` dropped, at most 24, default `manual` (the same rule as `flight_label()` in tools/session_recorder.py, which finds the dump by it); automatic ones `auto-stall`, `auto-reset`, `auto-skipped`, `auto-camjump`.
+- Line 1: `# flight v1 unix_ms=<ms at dump> reason=<reason> frames=<rows> ring=<ring size> build=<exe file name>/<bytes>` (spaces in the exe name become `_`). Line 2: header. Then one row per flip, oldest first: the ring up to the request plus the next 60 flips.
+- Columns (46): `seq, unix_ms, t_ms, dt_ms, marker, events, event_names, event_detail, d_draws, d_dispatches, d_gpu_frames, d_compiles, d_skipped_draws, d_gc_evictions, d_images_registered, d_image_upload_mb, d_buffer_upload_mb, d_copy_mb, d_submissions, d_gc_ms, d_frame_wait_ms, d_present_ms, arena_mb, image_mb, images_live, cam_x, cam_y, cam_z, fwd_x, fwd_y, fwd_z, proj_x, proj_y, jit_x, jit_y, out_w, out_h, lod_bias, scene_w, scene_h, upscaler, preset, dlss_model, fg_on, cam_jump_deg, cam_move`. `unix_ms` is the start's system clock plus the steady time (no system clock read per flip). `marker` is 1 on the row nearest the request (the stall, the reset, the cut, or the flip when a manual trigger was taken). `events` is a `0x`-prefixed hex mask (Python `int(x, 0)` reads it), `event_names` the names joined by `|`: UpscalerReset, HistoryInvalidated, NoCamera, DrawSkippedPendingCompile, PipelineCompiled, UpscalerFeatureCreated, StretchedOrUiFrame, FrameGenOnOff, TextureGcEvict, MovieFrame (bits 0..9). `event_detail` is the last detail of the flip, the UpscalerReset reason 1..9 (table above). `d_*` are changes since the previous row (0 on the first row); `d_submissions`, `d_gc_ms`, `d_frame_wait_ms`, `d_present_ms` come from timers that only run with `GOW3_FRAME_STATS=1` and are 0 otherwise. `cam_jump_deg` / `cam_move` are the forward-axis turn and the position change vs the previous row (0 when either row has no camera).
+- Automatic dumps (no `GOW3_FLIGHT_AUTO=0`): none in the first 5 s, 15 s cooldown per kind, at most 30 per process, at most 4 pending requests in all.
+  - stall: an interval over max(60 ms, 4x the median of the last 32 intervals) (with at least 8 intervals seen).
+  - reset: an UpscalerReset more than 5 s after start, with no MovieFrame / StretchedOrUiFrame in the 2 s before; it is posted 2 s later, and dropped if such a frame comes in those 2 s (so the dump holds 2 s plus 60 flips after the marker).
+  - skipped: a flip with DrawSkippedPendingCompile.
+  - camjump: cam_jump_deg > 30, or cam_move over max(2 units, 8x the median move of the last 32 flips), with no UpscalerReset / HistoryInvalidated in the flip before, the flip itself or the 2 after (gauges are written on the GPU thread and events at the next frame start, so they can be a flip apart): the cut the upscaler did not notice, the flash suspect. The 2-unit floor is a guess: the games' world units are not known.
+- Python side (tools/probe_uncharted.py and tools/session_recorder.py, written separately against this contract): when diagnostics are on, probe_uncharted.py sets `GOW3_FLIGHT_DIR=<out>\flight` and `GOW3_FLIGHT_TRIGGER=<out>\flight.trigger`. On an F7-F10 mark the session recorder writes the mark label into the trigger file, waits for a new `flight_*_<label>.csv` in that folder (up to `FLIGHT_WAIT_S`, 8 s in its first version; the task asked for 3 s) and moves it into the mark folder's `flight\`; at the end of the session it copies the session's `*_auto-*` dumps. Timing of a manual dump: trigger watcher up to 250 ms, dump thread up to 50 ms, then 60 flips (0.5 s at 120 FPS, 2 s at 30 FPS: the 2 s cap), then the write.
+
+**Limits.**
+- Flips only: frames made by DLSS frame generation are not seen (fg_on says when they exist). Loading frames the presenter draws itself (`PresentLoadingFrame`) are not flips either: a level load shows as one long interval (expect auto-stall dumps after loads, one per 15 s at most).
+- Numbers show causes, not pixels: a flash with no event and smooth gauges is not explained by this file.
+- Gauges are the latest values when the flip is recorded; the GPU command thread may already be in the next frame.
+- `UpscalerReset` 2 ("not run last frame") is reported once per streak, so a menu shows one reset, not one per frame.
+- No loading-screen detector apart from UI-only frames (StretchedOrUiFrame); MovieFrame is the driver's 300 ms movie-decode test.
+- No exposure gauge: the port passes no exposure value of its own (FSR 3/DLSS `preExposure` 1.0, FSR 4 auto exposure is an on/off setting), so there is nothing to record.
+
+**Tests.** `flight-test` (`gow3_pc/tests/test_flight.cpp`, CMake target `EXCLUDE_FROM_ALL`, no Vulkan): ring wrap-around (64-slot ring, 200 flips), deltas and the 46 columns of every row, the comment line, the marker (and the nearest row when the requested one is gone), stall in and after the 5 s grace, the 4x-median rule at 50 ms flips (150 ms no, 250 ms yes), the 15 s cooldown, reset with the 2 s quiet time before and after, skipped and the 30-dump cap, camera cuts (90 degree turn, a reset next flip cancels, a 10 degree turn does not count, a 50-unit move does), label sanitising (same results as the Python `flight_label`, path characters removed), the file name, the .tmp-then-rename write (replace, and a folder that cannot be made). `ninja -C out/gpu flight-test && ./out/gpu/flight-test.exe` exits 0; the whole port (`gow3_pc/build.sh`) builds.
+
+**Not verified.** No game run (the player was playing): that OnFlip is reached at the expected rate, that a dump lands in `analysis\<game>\flight\`, the trigger round trip with the session recorder, the CSV of a real flash. The overhead was not measured (the cost above is from the code, not a profile). Which gauges and events move at a real flash is unknown, and so is whether the camera gauges follow the shown camera in all three games (U1/U2 flat camera, velocity mode). The automatic rules' thresholds (60 ms / 4x median, 30 degrees, 2 units) are untested on real sessions; expect noise dumps from level loads (stall) and from shader compiles in the first minutes (skipped) until they are tuned.

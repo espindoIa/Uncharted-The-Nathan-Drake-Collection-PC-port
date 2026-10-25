@@ -32,6 +32,7 @@
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "gow3_flight.h"
 
 namespace Vulkan {
 
@@ -395,8 +396,14 @@ bool TemporalUpscaler::OnFrameStart() {
     }
     Gow3Settings::Get().active_render_width = Scaled() ? render_width : scene_targets.Size().width;
     Gow3Settings::Get().active_render_height = Scaled() ? render_height : scene_targets.Size().height;
+    // gow3 25 Oct 2026 (flight recorder): when the history goes, and why; only on a new reset (a
+    // menu leaves `reset` set for as long as the upscaler does not run).
+    if ((changed || !dispatched_last_frame) && !reset)
+        Gow3Flight::Event(Gow3Flight::UpscalerReset,
+                          changed ? Gow3Flight::ResetSettingsChanged : Gow3Flight::ResetNotRunLastFrame);
     if (changed || !dispatched_last_frame) reset = true;
     if (changed) jitter_index = 0;
+    Gow3Flight::Gauge(Gow3Flight::OutW, float(target_width)), Gow3Flight::Gauge(Gow3Flight::OutH, float(target_height));
     applied_preset = preset;
     applied_output = output;
     applied_upscaler = upscaler;
@@ -478,6 +485,7 @@ void TemporalUpscaler::OnDispatch(u64 cs_hash) {
                         int(bool(scene_color)), int(bool(camera_motion.Depth())),
                         int(camera_motion.Ready()));
         }
+        if (!reset) Gow3Flight::Event(Gow3Flight::UpscalerReset, Gow3Flight::ResetNoInputs); // 25 Oct 2026: flight recorder
         reset = true;
         return;
     }
@@ -631,6 +639,8 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
     taa_next = 0;
     CreatePipelines();
     opaque_valid = false;
+    // gow3 25 Oct 2026: new upscaler resources start without history (flight recorder).
+    Gow3Flight::Event(Gow3Flight::UpscalerFeatureCreated), Gow3Flight::Event(Gow3Flight::UpscalerReset, Gow3Flight::ResetResources);
     reset = true;
     resources_ready = true;
     resources_fsr4 = use_fsr4;
@@ -1872,6 +1882,8 @@ void TemporalUpscaler::RunUiOnly(VideoCore::ImageId color_id, VideoCore::ImageId
     barrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
     barrier.newLayout = vk::ImageLayout::eGeneral;
     cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
+    // gow3 25 Oct 2026: a menu/loading frame; the flight recorder's reset rule skips these.
+    Gow3Flight::Event(Gow3Flight::StretchedOrUiFrame); if (!reset) Gow3Flight::Event(Gow3Flight::UpscalerReset, Gow3Flight::ResetUiOnly);
     reset = true; // returning to 3D must not reuse history from before a menu/loading screen
     done_this_frame = ui_phase = true;
     ui_color = color_id;
@@ -2360,6 +2372,8 @@ void TemporalUpscaler::UpscaleToUi(VideoCore::ImageId source) {
             cmd.blitImage(ldr.GetImage(), vk::ImageLayout::eTransferSrcOptimal, vk::Image(ui_image),
                           vk::ImageLayout::eGeneral, stretch, vk::Filter::eLinear);
         }
+        // gow3 25 Oct 2026: a stretched frame; the flight recorder's reset rule skips these.
+        Gow3Flight::Event(Gow3Flight::StretchedOrUiFrame); if (!reset) Gow3Flight::Event(Gow3Flight::UpscalerReset, Gow3Flight::ResetStretched);
         reset = true; // the history doesn't continue across stretched frames
         done_this_frame = true;
         ui_phase = true;
@@ -2584,6 +2598,7 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image 
         std::printf("Upscaler: falling back to FSR 3.1\n");
         Gow3Settings::Get().upscaler = Gow3Settings::UpscalerFsr3;
         fsr4_failed = true; // EnsureResources creates the FSR 3 context next frame
+        Gow3Flight::Event(Gow3Flight::UpscalerReset, Gow3Flight::ResetFsr4Fallback); // 25 Oct 2026: flight recorder
         reset = true;
     }
     return ok;
@@ -2624,6 +2639,8 @@ TemporalUpscaler::DlssCreate TemporalUpscaler::EnsureDlssFeature(vk::CommandBuff
         result.ok = dlss->CreateFeature(cmdbuf, desc);
         result.end = std::chrono::steady_clock::now();
         result.created = true;
+        // gow3 25 Oct 2026: a new DLSS feature has no history (flight recorder).
+        Gow3Flight::Event(Gow3Flight::UpscalerFeatureCreated), Gow3Flight::Event(Gow3Flight::UpscalerReset, Gow3Flight::ResetDlssFeature);
         reset = true;
     }
     return result;
@@ -2732,6 +2749,7 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
         std::printf("Upscaler: DLSS failed; falling back to FSR 3.1\n");
         Gow3Settings::Get().upscaler = Gow3Settings::UpscalerFsr3;
         dlss_failed = true; // EnsureResources creates the FSR 3 context next frame
+        Gow3Flight::Event(Gow3Flight::UpscalerReset, Gow3Flight::ResetDlssFallback); // 25 Oct 2026: flight recorder
         reset = true;
     }
     return ok;

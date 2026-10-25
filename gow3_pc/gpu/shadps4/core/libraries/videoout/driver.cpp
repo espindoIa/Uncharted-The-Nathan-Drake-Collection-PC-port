@@ -22,6 +22,7 @@
 #endif
 #include "common/assert.h"
 #include "gow3_toggles.h"
+#include "gow3_flight.h"
 #include "gow3_settings.h"
 #include "gow3_graphics.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
@@ -393,8 +394,15 @@ static void LogFrameEvent(char kind) {
     }
 }
 
+namespace {
+bool MovieActive(std::chrono::steady_clock::time_point now); // below, next to PresentThread
+} // namespace
+
 void VideoOutDriver::Flip(const Request& req) {
     LogFrameEvent('P');
+    // gow3 25 Oct 2026: one flight recorder row per presented flip (gow3_flight.h), on this
+    // present thread only, whatever GOW3_FRAME_STATS says: the numbers before a one-frame flash.
+    Gow3Flight::OnFlip(MovieActive(std::chrono::steady_clock::now()), presenter->FrameGenActive());
     // Update HDR status before presenting, then present the frame (gow3: on the swap thread).
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
         presenter->SetHDR(hdr);

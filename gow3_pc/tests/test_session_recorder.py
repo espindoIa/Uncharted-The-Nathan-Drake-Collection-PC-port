@@ -81,6 +81,66 @@ class ImageTests(unittest.TestCase):
         self.assertFalse(sr.is_all_black(bytes(11) + b'\1'))
 
 
+FLIGHT = ("# flight v1 unix_ms=1000 reason=texture frames=3\n"
+          "seq,unix_ms,t_ms,dt_ms,marker,events,event_names,d_compiles,d_skipped_draws,cam_jump_deg\n"
+          "1,1000,0,16.7,0,0,,0,0,0.1\n"
+          "2,1017,17,90.5,0,5,stall|reset,2,1,0.2\n"
+          "3,1108,108,16.7,0,0x1,stall,1,0,12.5\n")
+
+
+class FlightTests(unittest.TestCase):
+    def summarize(self, text):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'flight_20261025-120000-123_texture.csv'
+            path.write_text(text, encoding='utf-8')
+            return sr.summarize_flight_csv(path)
+
+    def test_normal(self):
+        s = self.summarize(FLIGHT)
+        self.assertEqual((s['rows'], s['span_s'], s['dt_ms_max'], s['dt_ms_max_unix_ms']), (3, 0.108, 90.5, 1017))
+        self.assertEqual((s['event_rows'], s['event_names']), (2, {'stall': 2, 'reset': 1}))
+        self.assertEqual((s['cam_jump_deg_max'], s['cam_jump_unix_ms']), (12.5, 1108))
+        self.assertEqual((s['d_compiles'], s['d_skipped_draws']), (3, 1))
+        text = sr.format_flight({'flight_file': 'f.csv', 'flight_status': 'ok', 'flight_summary': s})
+        for needle in ('3 rows', 'longest flip 90.5 ms', 'stall x2', 'max camera jump 12.5'):
+            self.assertIn(needle, text)
+
+    def test_missing_columns(self):
+        s = self.summarize('seq,dt_ms\n1,5\n2,x\n')
+        self.assertEqual((s['rows'], s['dt_ms_max'], s['dt_ms_max_unix_ms']), (2, 5, None))
+        for key in ('event_rows', 'cam_jump_deg_max', 'd_compiles', 'span_s'):
+            self.assertNotIn(key, s)
+        self.assertIn('2 rows', sr.format_flight({'flight_file': 'f.csv', 'flight_summary': s}))
+
+    def test_empty_and_header_only(self):
+        self.assertEqual(self.summarize(''), {'rows': 0})
+        self.assertEqual(self.summarize('# flight v1 unix_ms=1\nseq,dt_ms\n'), {'rows': 0})
+        self.assertEqual(sr.summarize_flight_csv(Path('no_such_flight.csv'))['rows'], 0)
+        self.assertIn('timed out', sr.format_flight({'flight_file': None, 'flight_status': 'timed out'}))
+
+    def test_find_and_label(self):
+        self.assertEqual(sr.flight_label('Texture!'), 'texture')
+        self.assertEqual(sr.flight_label('???'), 'manual')
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / 'flight_20261025-120000-123_texture.tmp').write_text('x')
+            (d / 'flight_20261025-120000-123_auto-stall.csv').write_text('x')
+            self.assertIsNone(sr.find_flight(d, 'texture', 0))
+            good = d / 'flight_20261025-120001-456_texture.csv'
+            good.write_text('x')
+            self.assertEqual(sr.find_flight(d, 'texture', 0), good)
+            self.assertIsNone(sr.find_flight(d, 'texture', good.stat().st_mtime + 10))   # older than the trigger
+            self.assertIsNone(sr.find_flight(d / 'missing', 'texture', 0))
+
+    def test_summary_section(self):
+        marks = [{'label': 'texture', 'time': '10:00:00.000', 'elapsed_s': 1.0, 'folder': 'm', 'flight': 'F-TEXT'}]
+        text = sr.build_summary({'name': 's', 'folder': 'f', 'start': 'a', 'end': 'b', 'duration_s': 1.0,
+                                 'exit_code': 0, 'marks': marks, 'frames': {}, 'metrics': [], 'top_repeats': [],
+                                 'files': [], 'flight_auto': [{'name': 'n.csv', 'reason': 'auto-stall', 'time': 't'}] * 2})
+        for needle in ('Flight, texture at 10:00:00.000: F-TEXT', 'auto-stall x2', 'boot.timed.log'):
+            self.assertIn(needle, text)
+
+
 class MiscTests(unittest.TestCase):
     def test_keys(self):
         self.assertEqual(sr.parse_keys(sr.DEFAULT_KEYS),

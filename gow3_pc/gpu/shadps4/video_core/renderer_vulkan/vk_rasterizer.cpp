@@ -16,6 +16,7 @@
 
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
+#include "gow3_flight.h"
 #include "gow3_settings.h"
 #include "gow3_toggles.h"
 #include "gow3_trigger_files.h"
@@ -3510,8 +3511,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         if (upscaler->OnFrameStart()) {
             object_motion->InvalidateHistory();
             camera_motion->InvalidateHistory();
+            Gow3Flight::Event(Gow3Flight::HistoryInvalidated); // 25 Oct 2026: flight recorder
         }
         camera_motion->SetJitter(upscaler->Jitter());
+        // gow3 25 Oct 2026: this frame's jitter and texture LOD bias for the flight recorder.
+        Gow3Flight::Gauge(Gow3Flight::JitX, upscaler->Jitter()[0]), Gow3Flight::Gauge(Gow3Flight::JitY, upscaler->Jitter()[1]),
+            Gow3Flight::Gauge(Gow3Flight::LodBias, upscaler->SceneMipBias());
         object_motion->OnFrameStart();
         NoteFrameStart();
         static const char* scene_debug = std::getenv("GOW3_SCENE_DEBUG");
