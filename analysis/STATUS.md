@@ -31,6 +31,7 @@ New entries go at the end, dated, measured numbers only.
 - Upstream merges: `21 October 2026 (night): upstream 0.5.0 merged`, `Upstream 0.6.0 merged (24 Oct 2026)`
 - Launcher overhaul (sidebar, Home checklist, keyboard/controller, dialogs): `24 October 2026: launcher overhaul`
 - Session recorder and engine flight recorder (retroactive per-flip CSV for one-frame flashes): `25 October 2026: session recorder`, `25 October 2026: engine flight recorder`
+- Upscaler history reset on camera cuts, flight `d_compiles` fix: `25 October 2026: history reset on camera cuts`
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
@@ -4518,7 +4519,7 @@ above ("no camera-cut detection"): the recorder does not fix it, it shows whethe
 - Environment: `GOW3_FLIGHT=0` disables everything (default on). `GOW3_FLIGHT_DIR=<dir>` output folder (default: `flight` next to `GOW3_DUMP_DIR`, i.e. `<parent of the dumps dir>\flight`, else `.\flight`). `GOW3_FLIGHT_TRIGGER=<file>`. `GOW3_FLIGHT_AUTO=0` disables anomaly dumps. `GOW3_FLIGHT_FRAMES=<n>` ring size (default 1024, clamped 64..8192). `GOW3_FLIGHT_CUT_MOVE=<units>` (default 0.25) and `GOW3_FLIGHT_CUT_DEG=<deg>` (default 30) tune the camjump rule; a value that is not a positive number keeps the default.
 - File: `<dir>/flight_<YYYYmmdd-HHMMSS>-<mmm>_<reason>.csv` (local time), written as `<name>.tmp` then renamed. Manual reasons are the trigger file's first line in lower case with every character other than `[a-z0-9_-]` dropped, at most 24, default `manual` (the same rule as `flight_label()` in tools/session_recorder.py, which finds the dump by it); automatic ones `auto-stall`, `auto-reset`, `auto-skipped`, `auto-camjump`.
 - Line 1: `# flight v1 unix_ms=<ms at dump> reason=<reason> frames=<rows> ring=<ring size> build=<exe file name>/<bytes>` (spaces in the exe name become `_`). Line 2: header. Then one row per flip, oldest first: the ring up to the request plus the next 60 flips.
-- Columns (47): `seq, unix_ms, t_ms, dt_ms, marker, events, event_names, event_detail, d_draws, d_dispatches, d_gpu_frames, d_compiles, d_skipped_draws, d_gc_evictions, d_images_registered, d_image_upload_mb, d_buffer_upload_mb, d_copy_mb, d_submissions, d_gc_ms, d_frame_wait_ms, d_present_ms, arena_mb, image_mb, images_live, cam_x, cam_y, cam_z, fwd_x, fwd_y, fwd_z, proj_x, proj_y, jit_x, jit_y, out_w, out_h, lod_bias, scene_w, scene_h, upscaler, preset, dlss_model, fg_on, cam_jump_deg, cam_move, presents`. `unix_ms` is the start's system clock plus the steady time (no system clock read per flip). `marker` is 1 on the row nearest the request (the stall, the reset, the cut, or the flip when a manual trigger was taken). `events` is a `0x`-prefixed hex mask (Python `int(x, 0)` reads it), `event_names` the names joined by `|`: UpscalerReset, HistoryInvalidated, NoCamera, DrawSkippedPendingCompile, PipelineCompiled, UpscalerFeatureCreated, StretchedOrUiFrame, FrameGenOnOff, TextureGcEvict, MovieFrame, LoadingFrame (bits 0..10). `event_detail` is the last detail of the flip, the UpscalerReset reason 1..9 (table above). `d_*` are changes since the previous row (0 on the first row); `d_submissions`, `d_gc_ms`, `d_frame_wait_ms`, `d_present_ms` come from timers that only run with `GOW3_FRAME_STATS=1` and are 0 otherwise. `cam_jump_deg` / `cam_move` are the forward-axis turn and the position change vs the previous row (0 when either row has no camera). `presents` is the frames shown for the last present before the flip (1; 2 with frame generation 2x; under Streamline its own count, which it reports one more frame late; 0 when Streamline gave no state).
+- Columns (47): `seq, unix_ms, t_ms, dt_ms, marker, events, event_names, event_detail, d_draws, d_dispatches, d_gpu_frames, d_compiles, d_skipped_draws, d_gc_evictions, d_images_registered, d_image_upload_mb, d_buffer_upload_mb, d_copy_mb, d_submissions, d_gc_ms, d_frame_wait_ms, d_present_ms, arena_mb, image_mb, images_live, cam_x, cam_y, cam_z, fwd_x, fwd_y, fwd_z, proj_x, proj_y, jit_x, jit_y, out_w, out_h, lod_bias, scene_w, scene_h, upscaler, preset, dlss_model, fg_on, cam_jump_deg, cam_move, presents`. `unix_ms` is the start's system clock plus the steady time (no system clock read per flip). `marker` is 1 on the row nearest the request (the stall, the reset, the cut, or the flip when a manual trigger was taken). `events` is a `0x`-prefixed hex mask (Python `int(x, 0)` reads it), `event_names` the names joined by `|`: UpscalerReset, HistoryInvalidated, NoCamera, DrawSkippedPendingCompile, PipelineCompiled, UpscalerFeatureCreated, StretchedOrUiFrame, FrameGenOnOff, TextureGcEvict, MovieFrame, LoadingFrame (bits 0..10). `event_detail` is the last detail of the flip, the UpscalerReset reason 1..9 (table above; 10 = camera cut since the next section). `d_*` are changes since the previous row (0 on the first row); `d_submissions`, `d_gc_ms`, `d_frame_wait_ms`, `d_present_ms` come from timers that only run with `GOW3_FRAME_STATS=1` and are 0 otherwise. `cam_jump_deg` / `cam_move` are the forward-axis turn and the position change vs the previous row (0 when either row has no camera). `presents` is the frames shown for the last present before the flip (1; 2 with frame generation 2x; under Streamline its own count, which it reports one more frame late; 0 when Streamline gave no state).
 - Automatic dumps (no `GOW3_FLIGHT_AUTO=0`): none in the first 5 s, 15 s cooldown per kind (skipped: 60 s), at most 30 per process, at most 4 pending requests in all. A "quiet frame" below is a row with MovieFrame, StretchedOrUiFrame or LoadingFrame (a row's events are those since the previous flip, so they cover the interval before it).
   - stall: an interval over max(60 ms, 4x the median of the last 32 intervals) (with at least 8 intervals seen), unless the row is a quiet frame or a quiet frame came within 2 s before the interval began (a level load, a movie's end).
   - reset: an UpscalerReset more than 5 s after start, with no quiet frame in the 2 s before; it is posted 2 s later, and dropped if such a frame comes in those 2 s (so the dump holds 2 s plus 60 flips after the marker).
@@ -4545,3 +4546,78 @@ above ("no camera-cut detection"): the recorder does not fix it, it shows whethe
 - First finding: the frame where the scene appears after the menu (11 draws/frame before, 434 after) moves the camera 161 degrees and 106 units with 115 draws skipped for pending compiles, and no UpscalerReset or HistoryInvalidated in that flip or the next two: the temporal history crosses the cut (the static review's "no history reset after a load" finding, now seen in numbers; not yet fixed).
 - `d_compiles` stayed 0 at the markers although PipelineCompiled events and skipped draws appeared: the Compiles counter hook in CompileTimer may not cover the background compiles (to check).
 - FPS with the recorder on / off, 30 s each after a 15 s settle, one boot each, same save: on 54.8, off 54.1, on 54.5, off 59.5. Boot-to-boot noise (about 5 FPS, the last run had the warmest cache) is far larger than any recorder cost; no cost is visible, none is proven.
+
+## 25 October 2026: history reset on camera cuts
+
+Why: the flight recorder's first game run (section above, U3 chapter 2 meat market save, Continue,
+4K) showed two unnoticed cuts per boot, the same in both boots: seq 184 (100 draws, 40 skipped for
+pending compiles) turning the camera 168.2 degrees and moving it 102.3 units, and the frame where
+the scene appears (434 draws, 115 skipped; seq 1848, and 1682 in the second boot) turning 161.5
+degrees and moving 106.5 units, with no UpscalerReset or HistoryInvalidated in that flip or the
+two after (auto-camjump dumps). The port had no camera-cut detection at all: the upscaler (DLSS, FSR 3/4, TAA) blended the
+history from before the cut into the first frames of the scene (open item 8 of the 24 Oct audit
+list).
+
+**Rule** (`gow3_pc/gpu/shim/gow3_camera_cut.h`, header-only `Gow3CameraCut::Detector`). Once per
+frame, on the frame's first camera (velocity pass constants c12..c23 in Uncharted's velocity mode,
+the scene-constant camera of U1, the flat camera of U2), compared with the previous frame's:
+- a cut when the forward axis turned more than 45 degrees, or
+- the position moved more than max(floor, 16x the median per-frame move of the last 32 non-cut
+  camera frames); floor 1.0 world unit, `GOW3_CUT_MOVE=<units>` changes it (a value that is not a
+  positive number keeps 1.0), or
+- the previous camera is older than 0.5 s (no camera frames in between: menus, movies, loads).
+- The first camera ever and a camera without a usable forward axis (length outside 0.5..2) are
+  not cuts; a cut's own move is kept out of the median.
+- Conservative on purpose: mouse flicks reach ~30 degrees per frame at 60 FPS; walking at 0.05
+  units a frame gives the 1.0 floor (16x would be 0.8), a vehicle at 0.5 a frame an 8-unit limit.
+- The 45 degrees and 16x are stricter than the flight recorder's camjump report (30 degrees, 8x
+  over 0.25 units), so a reported camjump may be a fast turn the reset rightly ignores.
+
+**What a cut does** (`CameraMotion::CheckCut`, vk_camera_motion.cpp; `TemporalUpscaler::NoteCameraCut`,
+vk_temporal_upscaler.cpp).
+- CameraMotion sets `camera_cut` for the frame (cleared at the display pass). With the scene-constant
+  and flat cameras it sets `previous = current` (identity reprojection: zero camera motion); in
+  velocity mode `RecordVelocity` writes mode 3 (zero motion) that frame.
+- `Run` and `RunScaled` call `NoteCameraCut()` before the motion pass and before every read of
+  `reset` (TAA's reset flag, FSR 3/4 and DLSS `reset`, frame generation's `was_reset`): it sets
+  `reset`, raises the flight events UpscalerReset with the new reason 10 `ResetCameraCut` (only when
+  `reset` was clear, like the other sites) and HistoryInvalidated, and counts
+  `Gow3Stats::camera_cuts`. With `GOW3_FRAME_STATS=1` the 5 s printer adds `Camera cuts: N (upscaler
+  history reset)` when N > 0.
+- The decision does not depend on `GOW3_FLIGHT`.
+
+**Toggle.** Disabled2 bit 42 `CameraCutReset` (value 4398046511104, the next free bit after
+`RunReleaseBatch` 1<<41), read live; bit set = old behaviour (no cut detection). The detector keeps
+following the camera while the bit is set, so clearing it mid-run starts from the current pose.
+
+**`d_compiles` stayed 0: cause and fix.** The flight CSV mapping was right (`row.cum[CCompiles] =
+g_counters[Compiles]`, `delta(CCompiles)` in the right column). In the 25 Oct dumps PipelineCompiled
+appears only in row 1 and never again while hundreds of draws were skipped: the background
+compiles never reach `CompileTimer`. `CompileTimer` covers only the GPU thread's synchronous
+compiles (`CompileModule`, the synchronous branches of `GetGraphicsPipeline` / `GetComputePipeline`).
+The async shader jobs (`QueueShader`), the async graphics pipelines (`GetGraphicsPipeline`'s
+`AsyncGraphicsCompilation`) and the compute precompiles (`RunPrecompile`) run on compiler workers
+with only `PhaseTimer g_gow3_async_ns`. Fix (vk_pipeline_cache.cpp, `CountBackgroundCompile`): count
+Compiles and raise PipelineCompiled where the GPU thread publishes each result: `PublishShaders`
+(a shader or permutation registered), `PublishGraphics` (a pipeline emplaced), `Adopt` (a
+precompiled compute pipeline added; not when the GPU thread compiled it meanwhile). One count per
+completed compile; failed compiles are not counted. The 5 s `Frame stats` compile count
+(`g_gow3_compiles`, GPU-thread compile time) is unchanged. No flight-test change: the cause was
+outside gow3_flight.
+
+**Tests.** `camera-cut-test` (`gow3_pc/tests/test_camera_cut.cpp`, CMake `EXCLUDE_FROM_ALL`, no
+Vulkan): walking 0.05 units and 2 degrees a frame = no cut; a 35-degree flick = no cut; 161 degrees
+with 106 units = cut; 50 degrees alone and 106 units alone = cut; the same camera 0.6 s later = cut,
+0.4 s later = no cut; the 1.0 floor while walking; a zero forward axis ignored; a vehicle at 0.5 a
+frame: limit 8, 0.9 no cut, 9 cut; `GOW3_CUT_MOVE` 4 / -3 / abc and a 4-unit floor. Exit codes:
+`ninja -C out/gpu camera-cut-test flight-test` 0, `camera-cut-test.exe` 0, `flight-test.exe` 0
+(all passed), `gow3_pc/build.sh` 0.
+
+**Not verified.** No game run: that the cut fires at U3's Continue frame (and with which rule:
+stale, turn or move), that the ghost of the menu image is gone, how many cuts a normal session
+shows (cutscene shot changes should count; a fast vehicle or a respawn might too), and that no
+reset fires during ordinary play. U1's scene-constant and U2's flat cameras are not tested in a
+game either; their `previous = current` path is code reading only. The world units (and so the
+1.0 floor) are not known per game. With `RunScaled` called twice in a frame the cut would be
+counted twice in `Camera cuts` (the reset itself is idempotent). `d_compiles` after the fix was
+not seen in a CSV.

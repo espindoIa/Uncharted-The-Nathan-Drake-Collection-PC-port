@@ -246,6 +246,12 @@ enum : std::uint64_t {
     /// dispatch run reach the Vulkan recorder as one signal (24 Oct 2026 U3 street: ~20 a run,
     /// ~666k per 5 s, each with its own download pass, Record and kick on stage B).
     RunReleaseBatch = 1ull << 41,
+    /// Bit set: old behaviour (read live). Clear, a camera cut (forward axis turned over 45
+    /// degrees, a move over max(GOW3_CUT_MOVE 1.0, 16x the median move), or a previous camera
+    /// older than 0.5 s) resets the upscaler history and zeroes that frame's camera motion
+    /// (gow3_camera_cut.h). 25 Oct 2026 flight recorder, U3 chapter 2 Continue: the first scene
+    /// frame turned 161 degrees and moved 106 units with no reset.
+    CameraCutReset = 1ull << 42,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;
@@ -277,6 +283,8 @@ inline std::atomic<unsigned long> gpu_thread_id{0}; ///< Windows thread id of th
 inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0};
 /// Frames the GPU command thread has started (display pass), for per-frame diagnostics.
 inline std::atomic<std::uint64_t> gpu_frames{0};
+/// Upscaler history resets for camera cuts (CameraCutReset), printed and zeroed by Frame stats.
+inline std::atomic<std::uint64_t> camera_cuts{0};
 /// Wall time spent in operations suspected of stalls (ns, all threads).
 inline std::atomic<std::uint64_t> t_resident{0}, t_protect{0}, t_image_create{0}, t_refresh{0},
     t_copy{0}, copy_bytes{0}, t_read_faults{0}, read_faults{0},

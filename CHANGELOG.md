@@ -6,6 +6,14 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Fix: no ghost of the previous image after a camera cut.** When the camera jumps, for example
+  when you leave the menu into the game or a cutscene switches shots, the anti-aliasing / upscaler
+  (DLSS, FSR, TAA) no longer blends in the image from before the cut. A cut is a turn of more than
+  45 degrees or a jump far larger than the camera's usual movement in one frame, or the first frame
+  after half a second without a game camera; ordinary fast mouse turns are not cuts. To compare
+  with the old behaviour, set bit 42 (4398046511104) in the second number of
+  `disabled-optimizations.txt`. Not tested in the game yet. The flight record's compile count now
+  also counts shaders compiled in the background (it showed 0 before).
 - **New: the game keeps a flight record of its last seconds.** A one-frame flash or flicker is
   over before anyone can press a key, so the engine now always keeps the last ~1000 frames
   (about 7-15 seconds) of its internal numbers: frame times, upscaler resets, the camera, draws

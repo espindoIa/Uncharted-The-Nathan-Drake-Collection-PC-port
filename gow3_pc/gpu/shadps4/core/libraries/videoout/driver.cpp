@@ -683,6 +683,11 @@ void VideoOutDriver::Flip(const Request& req) {
                         (present_now[2] - window_present[2]) / (window * 1e7),
                         (present_now[3] - window_present[3]) / (window * 1e7));
             std::copy(std::begin(present_now), std::end(present_now), std::begin(window_present));
+            // gow3 25 Oct 2026: upscaler history resets for camera cuts (Disabled2 CameraCutReset).
+            if (const u64 cuts = Gow3Stats::camera_cuts.exchange(0)) {
+                std::printf("Camera cuts: %llu (upscaler history reset)\n",
+                            static_cast<unsigned long long>(cuts));
+            }
             // gow3 20 Oct 2026 (GitHub #95: memory rising over a long session): what holds memory,
             // every 5 s, so a long run shows which part grows.
             {

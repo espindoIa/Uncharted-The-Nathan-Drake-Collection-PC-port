@@ -481,6 +481,13 @@ struct CompileTimer {
         Gow3Flight::Count(Gow3Flight::Compiles), Gow3Flight::Event(Gow3Flight::PipelineCompiled);
     }
 };
+// gow3 25 Oct 2026: a background compile landed (shader, graphics pipeline or compute
+// precompile). Their worker jobs never pass through CompileTimer, so the flight recorder's
+// d_compiles stayed 0 in the 25 Oct U3 run while hundreds of draws waited for them. Counted
+// where the GPU thread publishes the result: once per compile, failures not counted.
+void CountBackgroundCompile() {
+    Gow3Flight::Count(Gow3Flight::Compiles), Gow3Flight::Event(Gow3Flight::PipelineCompiled);
+}
 } // namespace
 
 bool PipelineCache::QueueShader(Program& program, HwStage stage, SwStage l_stage,
@@ -626,6 +633,7 @@ void PipelineCache::PublishShaders(bool wait) {
             build->module = nullptr;
             program->pending.reset();
         }
+        CountBackgroundCompile();
         retire();
     }
 }
@@ -663,6 +671,7 @@ void PipelineCache::PublishGraphics(bool wait) {
         RegisterPipelineData(key, std::hash<GraphicsPipelineKey>{}(key), build->data);
         graphics_pipelines.emplace(key, std::move(build->pipeline));
         ++num_new_pipelines;
+        CountBackgroundCompile();
         it = pending_graphics.erase(it);
     }
 }
@@ -955,6 +964,7 @@ void PipelineCache::Adopt(PrecompiledCompute& job) {
         it.value() = std::move(job.pipeline);
         RegisterPipelineData(job.key, job.sdata);
         ++num_new_pipelines;
+        CountBackgroundCompile();
     }
     if (!job.waited) {
         ++precompile_stats[1];

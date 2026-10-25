@@ -439,6 +439,10 @@ add_executable(flight-test EXCLUDE_FROM_ALL ../tests/test_flight.cpp shim/gow3_f
     shim/gow3_settings.cpp shim/gow3_trigger_files.cpp)
 target_include_directories(flight-test PRIVATE shim)
 target_compile_options(flight-test PRIVATE -UNDEBUG -Wall -Wextra)
+# gow3 25 Oct 2026: the upscaler's camera cut decision (shim/gow3_camera_cut.h, header-only).
+add_executable(camera-cut-test EXCLUDE_FROM_ALL ../tests/test_camera_cut.cpp)
+target_include_directories(camera-cut-test PRIVATE shim)
+target_compile_options(camera-cut-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 add_executable(readback-sources-test EXCLUDE_FROM_ALL ../tests/test_readback_sources.cpp)
 target_include_directories(readback-sources-test PRIVATE shadps4)
 target_compile_options(readback-sources-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)

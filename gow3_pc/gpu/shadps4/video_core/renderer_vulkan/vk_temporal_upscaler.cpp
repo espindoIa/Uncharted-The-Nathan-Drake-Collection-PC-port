@@ -1210,6 +1210,7 @@ void TemporalUpscaler::Run() {
         }
     };
     mark("upscaler motion vectors");
+    NoteCameraCut();
     if (camera_motion.VelocityMode()) {
         camera_motion.RecordVelocity(cmdbuf, input_depth_view, *motion_view, w, h);
     } else {
@@ -1890,6 +1891,19 @@ void TemporalUpscaler::RunUiOnly(VideoCore::ImageId color_id, VideoCore::ImageId
     ui_depth = depth_id;
 }
 
+void TemporalUpscaler::NoteCameraCut() {
+    // Before the motion pass and every `reset` read of Run/RunScaled (TAA, FSR 3/4, DLSS and
+    // frame generation's was_reset). The flight recorder shows it as UpscalerReset 10 with
+    // HistoryInvalidated; GOW3_FRAME_STATS counts it ("Camera cuts").
+    if (!camera_motion.CameraCut()) {
+        return;
+    }
+    if (!reset) Gow3Flight::Event(Gow3Flight::UpscalerReset, Gow3Flight::ResetCameraCut);
+    Gow3Flight::Event(Gow3Flight::HistoryInvalidated);
+    Gow3Stats::camera_cuts.fetch_add(1, std::memory_order_relaxed);
+    reset = true;
+}
+
 void TemporalUpscaler::RunScaled() {
     if (auto* profiler = GpuProfiler::Get()) {
         const char* label = Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa
@@ -1973,6 +1987,7 @@ void TemporalUpscaler::RunScaled() {
     barrier(vk::Image(motion_image), vk::ImageAspectFlagBits::eColor, vk::ImageLayout::eUndefined,
             all, vk::AccessFlagBits2::eNone, vk::ImageLayout::eGeneral,
             vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite);
+    NoteCameraCut();
     if (camera_motion.VelocityMode()) {
         camera_motion.RecordVelocity(cmdbuf, depth_view, *motion_view, w, h);
     } else {

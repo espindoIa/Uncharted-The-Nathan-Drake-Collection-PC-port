@@ -94,6 +94,7 @@ enum ResetReason : int {
     ResetFsr4Fallback = 7,    ///< FSR 4 failed: FSR 3 next frame
     ResetDlssFeature = 8,     ///< the DLSS feature was (re)created
     ResetDlssFallback = 9,    ///< DLSS failed: FSR 3 next frame
+    ResetCameraCut = 10,      ///< a camera cut (gow3_camera_cut.h, Disabled2 CameraCutReset)
 };
 
 /// Monotonic counters of the recorder's own (the 5 s Frame stats printer zeroes its own copies).
