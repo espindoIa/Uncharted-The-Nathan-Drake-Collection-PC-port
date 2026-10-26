@@ -31,6 +31,10 @@ int gow3gpu_prepare_cpu_write(void *addr, uint64_t size);
 int gow3gpu_forward_copy(void *dst, const void *src, uint64_t size);
 /* GOW3_WRITE_LOG=1: prints the logged GPU-side writes to guest memory near the fault. */
 void gow3gpu_dump_guest_writes(void *ucontext);
+/* The fatal fault handler, before the process ends: a fault on a pipeline cache warm-up thread
+ * (a graphics driver crash building a cached pipeline) leaves a mark in the cache folder, and
+ * the next start rebuilds the cache instead of crashing on the same pipeline again. */
+void gow3gpu_note_fatal_fault(void);
 /* Keyboard text entry through the game window (IME dialog). begin returns 0 when
  * no window exists; poll returns 0 typing, 1 confirmed, 2 cancelled (UTF-8 text). */
 int gow3gpu_text_input_begin(const char *initial_utf8, const char *prompt_utf8);
@@ -44,6 +48,10 @@ int gow3gpu_choice_poll(void);
  * number 1-3; 128 earned flags), then each newly earned trophy, shown as a popup. */
 void gow3gpu_trophy_list(const char *pack_path, int list, const uint32_t earned[4]);
 void gow3gpu_trophy_earned(int id);
+/* uc2mp: the multiplayer match loading screen drawn over the game (title: mode, map: its name,
+ * rules: one line, picture: a PNG path or NULL), until called with active 0. */
+void gow3gpu_match_loading(int active, const char *title, const char *map, const char *rules,
+                           const char *picture);
 /* 1 while the in-game settings menu is open: the game's pad input is held neutral. */
 int gow3gpu_overlay_captures_input(void);
 /* gow3 22 Oct 2026, NVIDIA Reflex (gpu/shim/gow3_reflex.cpp): the guest is about to read the pad.

@@ -19,6 +19,8 @@
 #include "runtime.h"
 #include "gpu/gow3gpu.h"
 #include "runtime_gamesettings.h"
+#include "runtime_uc2mp_diag.h"
+#include "runtime_uc2mp_tick.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -122,7 +124,15 @@ static void play_click(PadData *d) {
 }
 
 static void apply_light_bar(SDL_Gamepad *g);
-/* Opens the first gamepad SDL knows about; called under lock. */
+/* GOW3_PAD_INDEX=<n> (gow3 25 Oct 2026, local co-op: two game windows on one PC, one controller
+ * each): this game reads only the n-th controller SDL lists (1 = the first), none while fewer are
+ * connected; window.cpp then lets controller input in without the focus. Unset: the first one. */
+static int pad_index(void) {
+    static int index=-1;
+    if (index<0) { const char *e=getenv("GOW3_PAD_INDEX"); index=e && atoi(e)>0 ? atoi(e) : 0; }
+    return index;
+}
+/* Opens the first gamepad SDL knows about (or the GOW3_PAD_INDEX-th); called under lock. */
 static SDL_Gamepad *current_gamepad(void) {
     if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
     if (sdl_ready<0) return NULL;
@@ -130,12 +140,17 @@ static SDL_Gamepad *current_gamepad(void) {
     if (!gamepad) {
         int count=0;
         SDL_JoystickID *ids=SDL_GetGamepads(&count);
-        if (ids && count>0) {
-            gamepad=SDL_OpenGamepad(ids[0]);
+        const int want=pad_index() ? pad_index()-1 : 0;
+        if (ids && count>want) {
+            gamepad=SDL_OpenGamepad(ids[want]);
             if (gamepad) {
-                ++connected_count; printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(gamepad));
+                ++connected_count; printf("Runtime: gamepad connected: %s%s\n",SDL_GetGamepadName(gamepad),
+                                          pad_index() ? " (GOW3_PAD_INDEX)" : "");
                 apply_light_bar(gamepad);
             }
+        } else if (pad_index()) {
+            static int told=-1;
+            if (told!=count) { told=count; printf("Runtime: GOW3_PAD_INDEX=%d: %d controller(s) connected, waiting\n",pad_index(),count); fflush(stdout); }
         }
         SDL_free(ids);
     }
@@ -814,6 +829,7 @@ static ABI int32_t pad_close(int32_t handle) {
     opened=0; return 0;
 }
 static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
+    UC2MP_THREAD_OBSERVE(UC2MP_DIAG_PAD_READ_STATE);
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!data) return ERR_INVALID_ARG;
     gow3gpu_reflex_input_sample(); /* before the lock: the first read of a frame may sleep (Reflex) */
@@ -834,6 +850,7 @@ static int buffered_report(PadData *out,const PadData *sampled) {
     return 1;
 }
 static ABI int32_t pad_read(int32_t handle, PadData *data, int32_t count) {
+    UC2MP_THREAD_OBSERVE(UC2MP_DIAG_PAD_READ);
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!data || count<1 || count>64) return ERR_INVALID_ARG;
     gow3gpu_reflex_input_sample(); /* before the lock, as in pad_read_state */
@@ -842,6 +859,9 @@ static ABI int32_t pad_read(int32_t handle, PadData *data, int32_t count) {
     sample(&sampled); ++reads;
     int result=buffered_report(data,&sampled);
     pthread_mutex_unlock(&lock);
+    /* Observed UC2 v1.02 caller shares the lobby's game thread. TLS dispatch
+     * rejects all other callers; never perform network IO under pad lock. */
+    runtime_uc2mp_tick_run();
     return result;
 }
 static ABI int32_t pad_info(int32_t handle, ControllerInfo *info) {

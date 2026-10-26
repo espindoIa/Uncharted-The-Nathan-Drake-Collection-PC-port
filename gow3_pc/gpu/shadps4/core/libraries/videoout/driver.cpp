@@ -796,6 +796,37 @@ void VideoOutDriver::CompletePresentedFlips() {
 
 void VideoOutDriver::CompleteFlip(const Request& req) {
     LogFrameEvent('C');
+    // gow3 26 Oct 2026 (GitHub #236, AMD): the guest sees the flip done only once the GPU has
+    // finished the frame, as on the console (the flip follows the frame's end of pipe). Before,
+    // the status changed as soon as the present was queued: Uncharted 2 then reused the frame's
+    // memory while the GPU still drew it, and on a slow AMD GPU (Radeon 780M; RX 9070 reported)
+    // the title screen's text ("Press X", the copyright line) was missing in a quarter to half
+    // of the frames. GOW3_FINISH_AT_FLIP=1 (the whole GPU idle at every flip) cured it at 20% of
+    // the frame rate; this waits on the flip thread only, the GPU command thread goes on.
+    // GOW3_FLIP_AFTER_GPU=1: on, otherwise off (opt-in until it is tested on AMD GPUs).
+    {
+        static const bool flip_after_gpu = [] {
+            const char* env = std::getenv("GOW3_FLIP_AFTER_GPU");
+            const bool on = env && env[0] && env[0] != '0';
+            std::printf("VideoOut: flips complete after the frame's GPU work: %s "
+                        "(GOW3_FLIP_AFTER_GPU)\n",
+                        on ? "on" : "off");
+            std::fflush(stdout);
+            return on;
+        }();
+        if (flip_after_gpu && req.ready_semaphore && req.ready_tick) {
+            const vk::Semaphore ready_semaphore{static_cast<VkSemaphore>(req.ready_semaphore)};
+            const u64 ready_tick = req.ready_tick;
+            const vk::SemaphoreWaitInfo wait_info = {
+                .semaphoreCount = 1,
+                .pSemaphores = &ready_semaphore,
+                .pValues = &ready_tick,
+            };
+            // Bounded: a lost device must not hang the flip thread (the old behaviour then).
+            (void)presenter->GetInstance().GetDevice().waitSemaphores(wait_info, 2'000'000'000ULL);
+        }
+    }
+
     // Update flip status.
     auto* port = req.port;
     {
@@ -939,11 +970,15 @@ void VideoOutDriver::PrepareNextEopFlip() {
     Vulkan::SubmitLog::Event("E", "%d", flip.index);
     Vulkan::Frame* frame = presenter->PrepareFrame(flip.port->groups[buffer.group_index],
                                                    buffer.address_left);
+    void* const ready_semaphore = static_cast<VkSemaphore>(frame->ready_semaphore);
+    const u64 ready_tick = frame->ready_tick;
     {
         // Interrupts of earlier flips may have removed entries meanwhile: this flip is the
         // first unprepared one still.
         std::scoped_lock lock{eop_mutex};
         eop_flips[eop_prepared].frame = frame;
+        eop_flips[eop_prepared].ready_semaphore = ready_semaphore;
+        eop_flips[eop_prepared].ready_tick = ready_tick;
         ++eop_prepared;
     }
     {
@@ -955,6 +990,8 @@ void VideoOutDriver::PrepareNextEopFlip() {
             .index = flip.index,
             .eop = true,
             .present_only = true,
+            .ready_semaphore = ready_semaphore,
+            .ready_tick = ready_tick,
         });
     }
     request_cv.notify_one();
@@ -975,6 +1012,8 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
     AmdGpu::g_gow3_flips.fetch_add(1, std::memory_order_relaxed);
     // gow3: an end-of-pipe flip whose frame was prepared at its flip packet (PrepareNextEopFlip).
     Vulkan::Frame* frame = nullptr;
+    void* ready_semaphore = nullptr;
+    u64 ready_tick = 0;
     if (is_eop) {
         std::scoped_lock lock{eop_mutex};
         if (!eop_flips.empty()) {
@@ -984,6 +1023,8 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
                 --eop_prepared;
                 if (flip.port == port && flip.index == index) {
                     frame = flip.frame;
+                    ready_semaphore = flip.ready_semaphore;
+                    ready_tick = flip.ready_tick;
                 } else {
                     LOG_ERROR(Lib_VideoOut, "Flip prepared for buffer {} but buffer {} flipped",
                               flip.index, index);
@@ -1000,6 +1041,11 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
         ASSERT_MSG(buffer.group_index >= 0, "Trying to flip an unregistered buffer!");
         const auto& group = port->groups[buffer.group_index];
         frame = presenter->PrepareFrame(group, buffer.address_left);
+    }
+    if (!prepared) {
+        // Read now: a presented frame may be recycled before its flip completes.
+        ready_semaphore = static_cast<VkSemaphore>(frame->ready_semaphore);
+        ready_tick = frame->ready_tick;
     }
 
     // gow3 19 Oct 2026: the frame goes to the present thread now; only the guest-visible flip
@@ -1019,12 +1065,15 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
                 .index = index,
                 .eop = is_eop,
                 .present_only = true,
+                .ready_semaphore = ready_semaphore,
+                .ready_tick = ready_tick,
             });
         }
         request_cv.notify_one();
         WakePresentThread();
     }
-    const auto queue_flip = [this, frame, port, flip_arg, index, is_eop, present_early] {
+    const auto queue_flip = [this, frame, port, flip_arg, index, is_eop, present_early,
+                             ready_semaphore, ready_tick] {
         LogFrameEvent('Q');
         {
             std::scoped_lock lock{mutex};
@@ -1035,6 +1084,8 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
                 .index = index,
                 .eop = is_eop,
                 .presented = present_early,
+                .ready_semaphore = ready_semaphore,
+                .ready_tick = ready_tick,
             });
         }
         request_cv.notify_one();

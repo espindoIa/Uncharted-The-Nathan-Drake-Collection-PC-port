@@ -215,6 +215,11 @@ FRAME_BEGIN_WAIT_PATCHES = {
 # runs for it: NaN compares false. The assert's path (53 bytes) now takes that reset instead when
 # the target itself is a number (velocity register xmm5 zeroed first, as on the reset's usual
 # way in); a NaN target still asserts. UNCHARTED_FOCUS_RESET=0 keeps the original.
+# The 1.00 checks and assert paths (exact bytes; each occurs once in its 1.00 executable only).
+U3_FOCUS_100 = ("c4e37904cb00c5f0c2c900c5f850c183f80f7438e8c3c110004885c07427488d3dd698c100"
+                "488d350595c100488d15e598c100488d0d3b95c10041b8690700004531c9ffd0cd41")
+U2_FOCUS_100 = ("c4e37904c900c5f0c2c900c5f850c183f80f7438e8a8d71a004885c07427488d3d4c9c8300"
+                "488d354b998300488d155b9c8300488d0d7e99830041b84d0400004531c9ffd0cd41")
 FOCUS_NAN_PATCHES = {
     "big3-ps4_Shipping.elf": [
         ("Uncharted 3 player focus: reset instead of asserting on NaN", [
@@ -223,6 +228,13 @@ FOCUS_NAN_PATCHES = {
              bytes.fromhex("488b05f73302014885c07427488d3d74ff8900488d3546fd8900488d1583ff8900"
                            "488d0d6ece7d0041b86a0700004531c9ffd0cd41"),
              bytes.fromhex("c5d057edc5f8284580c5f8c2c800c5f850c183f80f0f84a5feffffcd41") + b"\xcc" * 24),
+            # 1.00 (26 Oct 2026, GitHub #148: the same assert, int 0x41 at 0x3908e9, on a copy
+            # without update 1.02): the same function at 0x390330. The assert path at 0x3908b8 is
+            # 51 bytes (it fetches the handler with a call); the target sits at rbp-0xa0, the
+            # reset is 0x390779 and its velocity register is xmm4.
+            (U3_FOCUS_100, 20, bytes.fromhex(U3_FOCUS_100)[20:],
+             bytes.fromhex("c5d857e4c5f8288560ffffffc5f8c2c800c5f850c183f80f0f84a3feffffcd41")
+             + b"\xcc" * 19),
         ]),
     ],
     # Uncharted 2 (1.02) PlayerBase::UpdateFocus (player-base.cpp:1101, 0x7272e0): the same spring
@@ -238,6 +250,12 @@ FOCUS_NAN_PATCHES = {
                            "488d0dbdcb6c0041b84d0400004531c9ffd0cd41"),
              bytes.fromhex("c5f8284da0c5f0c2d100c5f850c283f80f7511c5e857d2c5f82993c0020000"
                            "e9e7feffffcd41") + b"\xcc" * 15),
+            # 1.00 (26 Oct 2026, GitHub #24's first U2 log: int 0x41 at 0x33ba44): the same function
+            # at 0x33b4f0, assert path at 0x33ba13 (51 bytes). Its snap (0x33b8f9) takes the target
+            # from rbp-0x60 as in 1.02 (and its y from rbp-0xa0, stored on every way in).
+            (U2_FOCUS_100, 20, bytes.fromhex(U2_FOCUS_100)[20:],
+             bytes.fromhex("c5f8284da0c5f0c2d100c5f850c283f80f7511c5e857d2c5f82993c0020000"
+                           "e9c2feffffcd41") + b"\xcc" * 13),
         ]),
     ],
 }
@@ -479,13 +497,22 @@ UNLOCK_PATCHES = {
 # orthographic cameras keep their own branches. The zoom loads jump to small stubs in dead assert
 # branches of the projection code (each now starts with int 0x41, so it still stops the game), and
 # back. Applied only to render sizes wider than 16:9 (UNCHARTED_HOR_PLUS=0: never).
-_XMM_BASE = {"rbx": 3, "rdi": 7}
+_GPR = {name: number for number, name in enumerate(
+    ("rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+     "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"))}
+_NOPS = {3: b"\x0f\x1f\x00", 4: b"\x0f\x1f\x40\x00", 5: b"\x0f\x1f\x44\x00\x00"}
 
 
 def _vex_mem(op, dst, src, base, disp):
-    """op xmm<dst>, xmm<src>, [base + disp32] (scalar single, VEX 2-byte; vmovss: src 0)."""
-    return bytes([0xc5, 0x80 | (~src & 15) << 3 | 2, op, 0x80 | dst << 3 | _XMM_BASE[base]]) + \
-        struct.pack("<i", disp)
+    """op xmm<dst>, xmm<src>, [base + disp32] (scalar single; vmovss: src 0): VEX 2-byte for
+    rax..rdi, 3-byte for r8..r15, with the SIB byte that rsp/r12 as a base need."""
+    reg = _GPR[base]
+    modrm = bytes([0x80 | dst << 3 | (reg & 7)]) + (b"\x24" if reg & 7 == 4 else b"")
+    if reg < 8:
+        prefix = bytes([0xc5, 0x80 | (~src & 15) << 3 | 2])
+    else:
+        prefix = bytes([0xc4, 0xc1, (~src & 15) << 3 | 2])
+    return prefix + bytes([op]) + modrm + struct.pack("<i", disp)
 
 
 def _vex_rip(op, dst, src, at, target):
@@ -496,27 +523,33 @@ def _vex_rip(op, dst, src, at, target):
 def hor_plus_variant(pattern, zoom, aspect, sites, caves):
     """One patch variant: sites (offset, base register, xmm with the zoom, a free xmm) are
     `vmovss xmm, [base + zoom]` loads; caves (offset, size, original first bytes) are the dead
-    assert branches that take the stubs. Offsets are from the start of the pattern's match."""
+    assert branches that take the stubs. Offsets are from the start of the pattern's match (a
+    cave may lie before it or in a neighbouring function: its original bytes are checked too)."""
     edits, cave_list = [], [list(cave) + [2] for cave in caves]  # + bytes used (after int 0x41)
     stubs = {}
     for offset, base, dst, free in sites:
         assert dst < 8 and free < 8 and dst != free
-        cave = next(c for c in cave_list if c[3] + 37 + 8 <= c[1])
-        stubs.setdefault(cave[0], []).append((cave[0] + cave[3], offset, base, dst, free))
-        cave[3] += 37
+        length = len(_vex_mem(0x10, dst, 0, base, zoom))
+        size = 21 + 2 * length
+        cave = next(c for c in cave_list if c[3] + size + 8 <= c[1])
+        stubs.setdefault(cave[0], []).append((cave[0] + cave[3], offset, base, dst, free, length))
+        cave[3] += size
     for cave_offset, size, original, used in cave_list:
         if cave_offset not in stubs:
             continue
         k, one = cave_offset + used, cave_offset + used + 4
         code = b"\xcd\x41"
-        for at, site, base, dst, free in stubs[cave_offset]:
+        for at, site, base, dst, free, length in stubs[cave_offset]:
+            mul_at = at + 8
+            min_at = mul_at + length
+            jmp_at = min_at + 8 + length
             code += (_vex_rip(0x10, free, 0, at, k) +                     # vmovss free, [16/9]
                      _vex_mem(0x59, free, free, base, aspect) +           # vmulss free, free, [aspect]
-                     _vex_rip(0x5d, free, free, at + 16, one) +           # vminss free, free, [1.0]
+                     _vex_rip(0x5d, free, free, min_at, one) +            # vminss free, free, [1.0]
                      _vex_mem(0x59, dst, free, base, zoom) +              # vmulss dst, free, [zoom]
-                     b"\xe9" + struct.pack("<i", site + 8 - (at + 37)))  # jmp back
+                     b"\xe9" + struct.pack("<i", site + length - (jmp_at + 5)))  # jmp back
             edits.append((site, _vex_mem(0x10, dst, 0, base, zoom),
-                          b"\xe9" + struct.pack("<i", at - (site + 5)) + b"\x0f\x1f\x00"))
+                          b"\xe9" + struct.pack("<i", at - (site + 5)) + _NOPS[length - 5]))
         edits.insert(0, (cave_offset, original, code + struct.pack("<ff", 16 / 9, 1.0)))
     return pattern, edits
 
@@ -537,6 +570,54 @@ HOR_PLUS_PATCHES = {
                          0x254, 0x250,
                          [(0x10, "rbx", 4, 0), (0x267, "rbx", 4, 0), (0xb2f, "rdi", 0, 1)],
                          [(0x26, 0xb6, bytes.fromhex("488b055d16b9004885c0"))]),
+    ]),
+    # Shadows past the 16:9 area (Uncharted 2): the culling frustums of the sun, rain and local
+    # (flashlight, lamp) shadows are built from the render camera's own zoom and aspect, in
+    # copies of the frustum-plane code (view-frustum.cpp MakeSunShadowViewFrustum 0xcccc90,
+    # MakeRainShadowViewFrustum 0xccd080, MakeLocalShadowViewFrustum 0xccda70). With the 16:9
+    # zoom their side planes stopped at the 16:9 picture: casters past it were culled from the
+    # shadow maps, and shadows at the sides came and went as the camera turned. Their zoom loads
+    # get the same zoom * min(1, aspect * 16/9); each stub goes in that function's own numPlanes
+    # assert (UNCHARTED_UW_SHADOWS=0: not applied).
+    ("Uncharted 2 ultrawide: sun shadows as wide as the view", [
+        hor_plus_variant("c5fa10b350020000 c5fa10ab54020000 c4637904ce00", 0x254, 0x250,
+                         [(0x8, "rbx", 5, 0)],
+                         [(-0x194, 0x35, bytes.fromhex("488b0573128a004885c0"))]),
+    ]),
+    ("Uncharted 2 ultrawide: rain shadows as wide as the view", [
+        hor_plus_variant("c5fa10ab50020000 c5fa10a354020000 c4637904c500", 0x254, 0x250,
+                         [(0x8, "rbx", 4, 3)],
+                         [(-0x124, 0x35, bytes.fromhex("488b05a50e8a004885c0"))]),
+    ]),
+    ("Uncharted 2 ultrawide: local light shadows as wide as the view", [
+        hor_plus_variant("c4c17a10942454020000 c4c17a10ac2450020000", 0x254, 0x250,
+                         [(0x0, "r12", 2, 5)],
+                         [(0x183, 0x35, bytes.fromhex("488b05c6018a004885c0"))]),
+    ]),
+    # The scene view's GPU constants (0xcfcb00, called from the scene view setup 0xc901c0): two more copies of the frustum code and the normalized side planes
+    # written into a constant buffer, for the render camera (r12) and a second view (r13). Same
+    # zoom (a square view keeps its own: min(1, 1.0 * 16/9) = 1). Stubs in the function's two
+    # SetConstantBuffers asserts and two of the neighbouring function 0xd01020's
+    # (UNCHARTED_UW_VIEW_CONSTANTS=0: not applied).
+    ("Uncharted 2 ultrawide: view constants as wide as the view (1)", [
+        hor_plus_variant("c4c17a109c2454020000 c4417a10bc2450020000", 0x254, 0x250,
+                         [(0x0, "r12", 3, 5)],
+                         [(0x10e7, 0x38, bytes.fromhex("488b0549fa86004885c0"))]),
+    ]),
+    ("Uncharted 2 ultrawide: view constants as wide as the view (2)", [
+        hor_plus_variant("c4c17a10842454020000 c57a100d???????? c5b25ec8", 0x254, 0x250,
+                         [(0x0, "r12", 0, 1)],
+                         [(0x2a24, 0x38, bytes.fromhex("488b0519da86004885c0"))]),
+    ]),
+    ("Uncharted 2 ultrawide: view constants as wide as the view (3)", [
+        hor_plus_variant("c4c17a109d54020000 c4c17a10a550020000", 0x254, 0x250,
+                         [(0x0, "r13", 3, 4)],
+                         [(0x28d4, 0x35, bytes.fromhex("488b0504c486004885c0"))]),
+    ]),
+    ("Uncharted 2 ultrawide: view constants as wide as the view (4)", [
+        hor_plus_variant("c4c17a108554020000 c5da5ec8", 0x254, 0x250,
+                         [(0x0, "r13", 0, 1)],
+                         [(0x2189, 0x35, bytes.fromhex("488b0568c186004885c0"))]),
     ])],
     # Infinite far 0x11c1107 (both of its paths), finite 0x11c11e1 and 0x11c1406, frustum planes
     # 0x11c1f21 (Uncharted 3 1.02).
@@ -548,6 +629,18 @@ HOR_PLUS_PATCHES = {
                           (0x32e, 0x65, bytes.fromhex("488b059313a3004885c0"))]),
     ])],
 }
+
+
+def hor_plus_patches(executable):
+    """HOR_PLUS_PATCHES of the game, without the groups switched off in the environment."""
+    skip = []
+    if os.environ.get("UNCHARTED_UW_SHADOWS", "1") == "0":
+        skip.append("shadows as wide as the view")
+    if os.environ.get("UNCHARTED_UW_VIEW_CONSTANTS", "1") == "0":
+        skip.append("view constants as wide as the view")
+    return [patch for patch in HOR_PLUS_PATCHES.get(executable, [])
+            if not any(text in patch[0] for text in skip)]
+
 
 PATCHES = {
     "eboot.bin": EBOOT_PATCHES,
@@ -565,6 +658,38 @@ def job_sleep_enabled():
     Spinning job threads starve 4-6 core CPUs (GPU thread 5% of a core), heat laptops and, on a
     16-core desktop, used about 4 more cores for 2% fewer FPS."""
     return os.environ.get("UNCHARTED_JOB_SLEEP", "auto").strip().lower() not in ("0", "off", "no")
+
+
+def u3_exposure_bias():
+    """UNCHARTED_U3_EXPOSURE=<EV> (launcher: Uncharted 3 exposure; 0 = the game's own): GitHub
+    #199/#195/#204/#212, Uncharted 3 too bright on some RTX 30/40 PCs, not on the test PC."""
+    try:
+        bias = float(os.environ.get("UNCHARTED_U3_EXPOSURE", "0").strip() or 0)
+    except ValueError:
+        return 0.0
+    return max(-2.0, min(1.0, bias)) if abs(bias) >= 0.05 else 0.0
+
+
+def u3_exposure_patch(bias):
+    """Uncharted 3 1.02's tonemap constants (pavlikdcx's patch in GitHub #199): the filmic exposure
+    bias, read from the render settings at [rbx+0x72c] on two paths (image 0xed9d30 / 0xed9d49),
+    gets <bias> EV more before the tonemap. Main path: the load jumps to a stub in the code
+    segment's zero padding (image 0x1648800) that adds the bias; second path: its add of -0.5
+    (shared constant 0x144b3b8) reads our own (-0.5 + bias) instead."""
+    pattern = "c5fa10932c070000 c5f057c9 c5fa100570165700 e9d1000000 c5fa10832c070000 c5fa58055f165700"
+    cave = 0x1648800 - 0xed9d30  # from the pattern's start
+    stub = bytes.fromhex("c5fa10932c070000")                                    # vmovss xmm2, [rbx+0x72c]
+    stub += bytes.fromhex("c5ea5815") + struct.pack("<i", 0x40 - (len(stub) + 8))  # vaddss xmm2, xmm2, [cave+0x40]
+    stub += bytes.fromhex("c5f057c9")                                           # vxorps xmm1, xmm1, xmm1
+    stub += b"\xe9" + struct.pack("<i", 12 - (cave + len(stub) + 5))            # jmp back (pattern + 12)
+    stub = stub.ljust(0x40, b"\xcc") + struct.pack("<ff", bias, -0.5 + bias)
+    jump = b"\xe9" + struct.pack("<i", cave - 5) + b"\x90" * 7
+    second = struct.pack("<i", (cave + 0x44) - (0x21 + 8))                       # disp of the 2nd path's add
+    return (f"Uncharted 3 exposure {bias:+.2f} EV (UNCHARTED_U3_EXPOSURE)", [
+        (pattern, [(0, bytes.fromhex("c5fa10932c070000c5f057c9"), jump),
+                   (cave, bytes(len(stub)), stub),
+                   (0x25, bytes.fromhex("5f165700"), second)]),
+    ])
 
 
 def apply_patches(image, patches):
@@ -819,15 +944,21 @@ def sfo_value(game, key):
 def game_version(game):
     """APP_VER of the game folder; 01.02 when its executables are 1.02 although param.sfo says
     otherwise (dumps with the update merged in that kept the 1.00 param.sfo). The check is Uncharted
-    2's torch code as 1.02 compiled it (TORCH_FORWARD_PATCHES; 1.00 lays it out differently)."""
+    2's torch code as 1.02 compiled it (TORCH_FORWARD_PATCHES; 1.00 lays it out differently).
+    26 Oct 2026 (GitHub #148, #176): 01.00 when param.sfo says 01.02 but the executables are 1.00
+    (Uncharted 2's 1.00 UpdateFocus code, U2_FOCUS_100): the launcher showed 1.02 and no warning,
+    and the games crashed where update 1.02 has the port's fixes."""
     version = sfo_value(game, "APP_VER")
-    if version and version < "01.02":
-        try:
-            code = (game / "big2-ps4_Shipping.elf").read_bytes()
-        except OSError:
-            return version
-        if pattern_regex(TORCH_FORWARD_PATCHES[0][1][0][0]).search(code):
-            return "01.02"
+    if not version:
+        return version
+    try:
+        code = (game / "big2-ps4_Shipping.elf").read_bytes()
+    except OSError:
+        return version
+    if version < "01.02" and pattern_regex(TORCH_FORWARD_PATCHES[0][1][0][0]).search(code):
+        return "01.02"
+    if version >= "01.02" and bytes.fromhex(U2_FOCUS_100) in code:
+        return "01.00"
     return version
 
 
@@ -907,6 +1038,9 @@ def run_once(args, executable, guest_args, loadexec):
                   f"{title.name}-patch.")
         return run_game(args, base, executable, guest_args, loadexec)
     print(f"Update {sfo_value(update, 'APP_VER') or '?'}: {update}")
+    if (update_version := game_version(update)) and update_version < "01.02":
+        print(f"The update folder holds version {update_version} executables (its param.sfo says "
+              f"otherwise): the fixes written for 1.02 are skipped. Extract update 1.02 again.")
     try:
         if os.environ.get("UNCHARTED_TEST_OVERLAY") == "1":  # test: the drive-without-links path
             raise SystemExit("UNCHARTED_TEST_OVERLAY=1")
@@ -1025,11 +1159,109 @@ def remove_pipeline_binaries(cache):
     threading.Thread(target=work, name="remove-pipeline-binaries", daemon=True).start()
 
 
+def instance_suffix():
+    """UNCHARTED_INSTANCE=<n> (n >= 2; co-op tests, 25 Oct 2026): another game on this PC with its
+    own folders (analysis/<game>-i<n>, analysis/uncharted-user-i<n>), so that two instances can
+    play each other over the LAN transport (gow3_pc/src/runtime_net.c). Instance 1, the default,
+    uses the normal folders."""
+    value = os.environ.get("UNCHARTED_INSTANCE", "1").strip()
+    return f"-i{int(value)}" if value.isdigit() and int(value) >= 2 else ""
+
+
+# What a new instance's user folder starts with (copied once from the main one): settings, saves,
+# trophies and the shader caches (an empty cache would compile for minutes).
+INSTANCE_USER_SEED = ("probe.ini", "probe-u1.ini", "probe-u2.ini", "probe-u3.ini",
+                      "disabled-optimizations.txt", "skip.txt", "savedata", "trophy", "cache", "shader")
+
+
+def user_dir():
+    """The user folder (saves, settings, caches) of this instance."""
+    main_user = ROOT / "analysis/uncharted-user"
+    suffix = instance_suffix()
+    if not suffix:
+        return main_user
+    user = ROOT / f"analysis/uncharted-user{suffix}"
+    if not user.exists():
+        user.mkdir(parents=True)
+        for name in INSTANCE_USER_SEED:
+            source = main_user / name
+            if source.is_dir():
+                shutil.copytree(source, user / name)
+            elif source.is_file():
+                shutil.copy2(source, user / name)
+        print(f"Instance {suffix[2:]}: new user folder {user} (settings, saves and caches copied)")
+    return user
+
+
+def net_mode():
+    """LAN multiplayer (the launcher's Multiplayer page, Uncharted 2 only, 25 Oct 2026):
+    UNCHARTED_NET_MODE=host|join starts Uncharted 2's own online game ("task online") with the
+    LAN transport (gow3_pc/src/runtime_net.c) and the stand-ins for the removed session layer
+    (runtime_coop.c's netinit). Off unless set."""
+    mode = os.environ.get("UNCHARTED_NET_MODE", "").strip().lower()
+    return mode if mode in ("host", "join") else ""
+
+
+def net_lobby():
+    """The lobby before each match (runtime_coop_menu.c mpmenu lobby); UNCHARTED_NET_LOBBY=0 = off."""
+    return os.environ.get("UNCHARTED_NET_LOBBY", "1").strip() != "0"
+
+
+def net_game_env(env, user, roots):
+    """The runtime settings of a net game; returns the /app0 overlay it needs (tools/net_overlay.py,
+    built from the player's own game files; roots = the /app0 folders, topmost first).
+      UNCHARTED_NET_ADDRESS  host: [address:]port to listen on (default 0.0.0.0:27000);
+                             join: the host's address[:port] (port 27000 unless given)
+      UNCHARTED_NET_GAME     host: the net game (*net-games* index; 114 = The Village co-op)
+      UNCHARTED_NET_TITLE    host: its title in the LAN search
+      UNCHARTED_NET_NAME     the player's name
+      UNCHARTED_NET_SKIN     the player's character: an actor of the game (e.g. mp-hero-elena,
+                             hero-default); every machine shows this player with it (GOW3_NET_SKIN,
+                             runtime_net.c / runtime_coop_mp.c). Ignored when the game lacks it.
+    A joiner gets its player id and the net game from the host's welcome: the boot commands wait
+    for it (netwait) before setting up the net game (netinit auto). The per-game settings (levels,
+    teams, default character) follow from the net game inside the runtime (runtime_coop_mp.c)."""
+    from net_overlay import build_overlay, actor_exists
+    skin = os.environ.get("UNCHARTED_NET_SKIN", "").strip().lower()
+    if skin and not actor_exists(roots, skin):
+        print(f"Net game: character {skin} is not in the game files: the default one is used")
+        skin = ""
+    overlay = build_overlay(roots, user / "net-overlay", [skin] if skin else [])
+    if skin:
+        env["GOW3_NET_SKIN"] = skin
+    boot = user / "net-boot.txt"
+    # mpmenu auto (runtime_coop_menu.c): the game's own results pages after a round (25 Oct, run f6)
+    # mpmenu lobby (25 Oct): the game's own Custom Game lobby first, the host's Start Game starts
+    # every game (no "task online" then); UNCHARTED_NET_LOBBY=0 starts the match at once as before.
+    boot.write_text("at 1\nnetwait\nnetinit auto 64\nmpmenu auto\n" + ("mpmenu lobby\n" if net_lobby() else ""),
+                    encoding="ascii")
+    env["GOW3_COOP_BOOT"] = str(boot)
+    # Multiplayer data the Collection does not ship (e.g. the bullets' MP explosion settings,
+    # the first shot faulted) falls back to its single-player twin (runtime_coop_mp.c).
+    env.setdefault("GOW3_COOP_MP_TWINS", "1")
+    address = os.environ.get("UNCHARTED_NET_ADDRESS", "").strip()
+    if name := os.environ.get("UNCHARTED_NET_NAME", "").strip():
+        env["GOW3_NET_NAME"] = name[:31]
+    if net_mode() == "host":
+        env["GOW3_NET_HOST"] = address or "0.0.0.0:27000"
+        env["GOW3_NET_GAME"] = os.environ.get("UNCHARTED_NET_GAME", "114").strip() or "114"
+        env["GOW3_NET_TITLE"] = os.environ.get("UNCHARTED_NET_TITLE", "")[:47]
+        print(f"Net game: hosting net game {env['GOW3_NET_GAME']} on {env['GOW3_NET_HOST']}")
+    else:
+        if address and ":" not in address:
+            address += ":27000"
+        env["GOW3_NET_JOIN"] = address or "127.0.0.1:27000"
+        env["GOW3_NET_ID"] = "auto"
+        print(f"Net game: joining {env['GOW3_NET_JOIN']}")
+    return overlay
+
+
 def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=()):
     """game: the folder the prepare scripts read; app0 (default: game) with overlays laid over
     it is what the game sees as /app0."""
-    out = ROOT / "analysis" / ("uncharted" if executable == "eboot.bin" else Path(executable).stem)
-    user = ROOT / "analysis/uncharted-user"
+    stem = "uncharted" if executable == "eboot.bin" else Path(executable).stem
+    out = args.analysis_root / stem if args.analysis_root else ROOT / "analysis" / (stem + instance_suffix())
+    user = args.user_dir
     user.mkdir(parents=True, exist_ok=True)
     scripts = ROOT / "gow3_pc/scripts"
     for script in ("prepare.py", "link_modules.py", "content_profile.py"):
@@ -1062,7 +1294,9 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     if "x" in size and os.environ.get("UNCHARTED_HOR_PLUS", "1") != "0":
         size_w, size_h = (int(value) for value in size.split("x"))
         if size_w / size_h > 16 / 9 + 0.01:
-            patches.extend(HOR_PLUS_PATCHES.get(executable, []))
+            patches.extend(hor_plus_patches(executable))
+    if executable == "big3-ps4_Shipping.elf" and (bias := u3_exposure_bias()):
+        patches.append(u3_exposure_patch(bias))
     if job_sleep_enabled():
         patches.extend(JOB_SLEEP_PATCHES)
         # Diagnostics: UNCHARTED_JOB_SLEEP_SPINS=<n> idle spins before a worker sleeps (1000).
@@ -1461,7 +1695,7 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     window_icon = game_window_icon(game)
     if window_icon:
         env.setdefault("GOW3_WINDOW_ICON", str(window_icon))
-    command = [str(game_executable()), str(out / "boot-linked.bin"),
+    command = [str(args.runtime_executable or game_executable()), str(out / "boot-linked.bin"),
                "--no-game-hooks", "--low-image", "--content-profile", str(out / "content.bin"),
                "--app0", str(app0 or game), "--user", str(user)]
     # gow3 24 Oct 2026, co-op research: UNCHARTED_COOP_OVERLAY=<dir> lays one more folder over
@@ -1469,7 +1703,12 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     # analysis/triage-1022/coop-work/make_coop_overlay.py). Off unless set.
     if coop_overlay := os.environ.get("UNCHARTED_COOP_OVERLAY"):
         command += ["--app0-overlay", coop_overlay]
-    for overlay in overlays:
+    if executable == "big2-ps4_Shipping.elf" and net_mode():
+        command += ["--app0-overlay", str(net_game_env(env, user, [*overlays, app0 or game]))]
+    # UNCHARTED_MOD_DIR: folders laid over the game before the update (the first holding a file
+    # wins), e.g. the multiplayer menu built by tools/uc2mp_menu.py.
+    mods = [m for m in os.environ.get("UNCHARTED_MOD_DIR", "").split(os.pathsep) if m]
+    for overlay in [*mods, *overlays]:
         command += ["--app0-overlay", str(overlay)]
     # guest_args is the game's complete argv; argv[0] is the program name.
     command += ["--guest-path", guest_args[0] if guest_args else "/app0/" + executable]
@@ -1503,6 +1742,10 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
     start = time.monotonic()
     with (out / (name + ".log")).open("wb") as log:
         process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
+        result["process_id"] = process.pid
+        running = {"pid": process.pid, "runtime": str(Path(command[0]).resolve()),
+                   "started_unix_ns": time.time_ns(), "active": True}
+        (out / (name + ".running.json")).write_text(json.dumps(running, indent=2), encoding="utf-8")
         # Freeze watchdog (needs the Frame stats lines, i.e. diagnostics on). UNCHARTED_HANG_SECONDS
         # sets its wait (30 s), 0 turns it off.
         hang_seconds = int(os.environ.get("UNCHARTED_HANG_SECONDS", "30") or 0)
@@ -1530,6 +1773,8 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
             result["exit_code"] = process.wait()
             result["timed_out"] = True
     result["elapsed_seconds"] = round(time.monotonic() - start, 3)
+    running.update(active=False, exit_code=result["exit_code"])
+    (out / (name + ".running.json")).write_text(json.dumps(running, indent=2), encoding="utf-8")
     (out / (name + ".json")).write_text(json.dumps(result, indent=2), encoding="utf-8")
     # The game has ended: the log can take the freeze reports' names (the launcher looks there).
     if args.boot and hang_reports:
@@ -1582,6 +1827,12 @@ def main():
                          for sub in ("uroot", "") if (ROOT / "game" / title / sub / "eboot.bin").is_file()),
                         ROOT / "game/CUSA02320")
     parser.add_argument("--game", type=Path, default=default_game)
+    parser.add_argument("--analysis-root", type=Path,
+                        help="Separate build/log directory for isolated experiments")
+    parser.add_argument("--user-dir", type=Path,
+                        help="Separate player-data directory for isolated experiments")
+    parser.add_argument("--runtime-executable", type=Path,
+                        help="Run this runtime directly without replacing the installed executable")
     parser.add_argument("--boot", action="store_true", help="Execute guest code after preparation")
     parser.add_argument("--executable", choices=EXECUTABLES, default="eboot.bin")
     parser.add_argument("--guest-arg", action="append", default=None,
@@ -1593,9 +1844,16 @@ def main():
     parser.add_argument("--capture", action="store_true", help="Request a renderer frame dump every three seconds")
     parser.add_argument("--seconds", type=int, default=30, help="External process time limit; 0 disables it")
     args = parser.parse_args()
+    if args.runtime_executable:
+        args.runtime_executable = args.runtime_executable.resolve()
+        if not args.runtime_executable.is_file():
+            parser.error("--runtime-executable must name an existing file")
     if args.seconds < 0:
         parser.error("--seconds must be nonnegative")
-    user = ROOT / "analysis/uncharted-user"
+    user = args.user_dir.resolve() if args.user_dir else user_dir()
+    args.user_dir = user
+    if args.analysis_root:
+        args.analysis_root = args.analysis_root.resolve()
     user.mkdir(parents=True, exist_ok=True)
     backup_saves(user)
     loadexec = user / "loadexec.txt"
@@ -1609,6 +1867,8 @@ def main():
             guest_args = ["/app0/eboot.bin"]
         else:
             guest_args = ["eboot.bin", "ispartofuccollection"]
+            if executable == "big2-ps4_Shipping.elf" and net_mode() and not net_lobby():
+                guest_args += ["task", "online"]  # Uncharted 2's own online game (net_mode)
     while True:
         loadexec.unlink(missing_ok=True)
         result = run_once(args, executable, guest_args, loadexec)

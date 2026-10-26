@@ -1231,16 +1231,19 @@ void Presenter::PresentLoadingFrame() {
     barrier(vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eColorAttachmentOptimal,
             vk::AccessFlagBits::eTransferWrite, vk::AccessFlagBits::eColorAttachmentWrite);
     Gow3Overlay::Render(cmdbuf, swapchain.ImageView(), extent);
-    barrier(vk::ImageLayout::eColorAttachmentOptimal, vk::ImageLayout::ePresentSrcKHR,
+    barrier(vk::ImageLayout::eColorAttachmentOptimal, swapchain.FinalLayout(),
             vk::AccessFlagBits::eColorAttachmentWrite, {});
     SubmitInfo info{};
-    info.AddWait(swapchain.GetImageAcquiredSemaphore());
-    info.AddSignal(swapchain.GetPresentReadySemaphore());
+    if (!swapchain.IsHeadless()) {
+        info.AddWait(swapchain.GetImageAcquiredSemaphore());
+        info.AddSignal(swapchain.GetPresentReadySemaphore());
+    }
     present_scheduler.Flush(info);
     if (const Dlss* dlss = Dlss::Get(); dlss && dlss->ViaStreamline()) {
         Gow3Streamline::FrameGenSetMode(false, 1); // a loading frame has nothing to interpolate
         frame_gen_active.store(false, std::memory_order_relaxed);
     }
+    if (swapchain.IsHeadless()) present_scheduler.Finish();
     {
         std::scoped_lock present_lock{PresentLock(instance)};
         swapchain.Present();
@@ -1340,11 +1343,15 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     // Flush vulkan commands.
 
     SubmitInfo info{};
-    info.AddWait(swapchain.GetImageAcquiredSemaphore());
+    if (!swapchain.IsHeadless()) info.AddWait(swapchain.GetImageAcquiredSemaphore());
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
-    info.AddSignal(swapchain.GetPresentReadySemaphore());
+    if (!swapchain.IsHeadless()) info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
     scheduler.Flush(info);
+    // No WSI acquire/present semaphores exist offscreen. Finish the real GPU
+    // submission before image reuse; the frame-ready timeline and present-done
+    // fence above remain intact. This mode prioritizes diagnostics over speed.
+    if (swapchain.IsHeadless()) scheduler.Finish();
     SubmitLog::Event("A2", "%u", frame->id);
     if (is_game_frame && !is_reusing_frame && !instance.HasPresentWait()) {
         WatchDisplay(instance.GetDevice(), frame->present_done);
@@ -1442,7 +1449,7 @@ void Presenter::BlitToSwapchain(vk::CommandBuffer cmdbuf, vk::Image source, u32 
                                          : vk::AccessFlagBits::eNone,
                 .oldLayout = vk::ImageLayout::eTransferDstOptimal,
                 .newLayout = overlay ? vk::ImageLayout::eColorAttachmentOptimal
-                                     : vk::ImageLayout::ePresentSrcKHR,
+                                     : swapchain.FinalLayout(),
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .image = swapchain_image,
@@ -1468,7 +1475,7 @@ void Presenter::BlitToSwapchain(vk::CommandBuffer cmdbuf, vk::Image source, u32 
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
                 .dstAccessMask = vk::AccessFlagBits::eNone,
                 .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
-                .newLayout = vk::ImageLayout::ePresentSrcKHR,
+                .newLayout = swapchain.FinalLayout(),
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .image = swapchain_image,

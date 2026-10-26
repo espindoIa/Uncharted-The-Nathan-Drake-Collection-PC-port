@@ -6,6 +6,23 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Merged BilalReloaded's 0.6.1, 0.6.2 and 0.7.0 (26 October).** Their notes are in the subsection
+  "From BilalReloaded's 0.6.1, 0.6.2 and 0.7.0" below; the package version is now 0.7.0. Where
+  the fork differs: the launcher's new **IGPU** preset (integrated graphics) draws at 540p, or 720p
+  on the strongest iGPUs, never 360p, because the fork's render resolution starts at 540p (30 FPS on
+  Vega and 2-CU Radeon, 60 on the rest); **Uncharted 3 exposure** is under System, and **Add to
+  Steam** too. Uncharted 2 LAN multiplayer stays a hidden preview: start the launcher with
+  `UNCHARTED_MULTIPLAYER=1` (or create `analysis\uncharted-user\multiplayer-preview`) to get a
+  Multiplayer section; it starts Uncharted 2 whichever game is chosen. The saved-pipeline checks of
+  the AMD crash fix also apply to the fork's cached motion-vector shaders (a cached pipeline is only
+  built from the very shaders it was saved with); pipelines saved before this build have no such
+  record and load as before. Presents stay on the graphics queue when the screen is
+  on the game's own GPU, as since 22 October; RivaTuner on a laptop with another GPU on the screen
+  keeps the separate present queue, which upstream turns off. New and off by default:
+  `GOW3_FLIP_AFTER_GPU=1` (the guest sees a flip done only after its frame's GPU work, for the
+  title-screen text missing on slow AMD GPUs, #236), `GOW3_MAX_QUEUES=1..3`, `GOW3_HEADLESS=1`
+  (offscreen diagnostic swapchain). Not tested in game.
+
 - **Menus and subtitles: font fidelity (26 October).** The three main high-resolution
   font atlases are rebuilt with less contour smoothing to keep the letters closer to
   their original shapes. The typeface, spacing, accents and shadows are retained;
@@ -400,6 +417,84 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   Deck).** Ported from BilalReloaded's upstream commit 696bcb1. The wipe now uses the PS4's
   1920x1080 when the resolution patch is on. Tested: the patch script parses. Not tested: a
   sub-720p run (the boots did not apply the resolution patch).
+
+### From BilalReloaded's 0.6.1, 0.6.2 and 0.7.0 (merged 26 Oct)
+
+Upstream's notes for these three releases (25-26 October 2026), in their words. The Uncharted 2
+and 3 LAN multiplayer, the Steam library detection in the launcher and the package fixes came
+over as they are; the entries above say where the fork differs.
+
+#### 26 October 2026 (0.7.0)
+
+- **Uncharted 3 washed out / too bright on GeForce RTX 30 and 40 cards** (#199, #195, #204, #212):
+  the game's automatic exposure adds up each row's brightness in a compute shader whose last six
+  steps have no barriers: they rely on the PS4 GPU running 64 threads in lockstep. These cards run
+  32 at a time, so the sums came out too small (1056 instead of 2616 on the title screen) and the
+  exposure about 2.2 times too high. The shader (aec539f0) now gets the barriers on every GPU,
+  like Uncharted 3's cloth shaders; only that shader is compiled again. The title
+  screen's mean brightness on an affected laptop went from 205 to 166, the same as on other cards.
+- **Uncharted 3: no subtitles over movies with upscaling** (#237, #243, #222): every movie frame is
+  one compute pass that writes the screen from the decoded picture and the subtitle layer. With no
+  normal frame in between, the upscaler's interface phase of the last game or menu frame stayed on
+  during the whole movie, so the subtitles went to an image the movie never read. A compute pass
+  that writes the screen now ends that phase, and the movie is shown as the game drew it.
+- **AMD: crash at start in the shader warm-up** (#230, #201, #206, #185; the driver crashed at the
+  same place for everyone): a saved pipeline named its shaders by program and variant number, and
+  the motion-vector variants could be paired with a different shader on the next start. Saved
+  pipelines now record exactly which shaders they were built from and are skipped when those don't
+  match. A crash while the saved shaders load is also noted, and the next start clears and rebuilds
+  the cache by itself.
+- **Chapter 8 crash on game version 1.00** (`m_lookAt.X() == m_lookAt.X()`, #148, likely #210): the
+  camera focus fix made for 1.02 in 0.2 now has 1.00 variants for Uncharted 2 and 3.
+  UNCHARTED_FOCUS_RESET=0 turns it off.
+- **1.00 executables with a 1.02 version file** (#148, #176): some copies have update 1.02's
+  param.sfo but the 1.00 game executables, so the launcher said 1.02 and the 1.02 fixes were
+  skipped. Such a copy is now reported as 1.00, and the "install update 1.02" warning shows.
+- **Launcher: Advanced -> Uncharted 3 exposure**: an optional, lower exposure for Uncharted 3
+  (-0.3, -0.6 or -1.0 EV; "Game's" = unchanged), based on pavlikdcx's patch in #199.
+- **Launcher: IGPU preset** for Intel and AMD integrated graphics (540-720p, FSR 1 to 1080p),
+  chosen as the recommended preset when the game ran on integrated graphics; adapted from PR #223
+  by memeguyoffical.
+- **Launcher: Add to Steam** (Advanced -> STEAM): adds the port (or each game) to Steam's library
+  as a non-Steam game, with library pictures from the player's own game files. Steam's
+  shortcuts.vdf is read and written losslessly, with a backup; Steam must be closed.
+- **Merged pull requests:** #240 (Windows test builds and test expectations) and #227 (the package
+  zip is written with Python's zipfile, forward-slash paths) by moistman7; #231 by Sparks and #244
+  by fidalgojoao (research and code that is off in this release).
+
+#### 25 October 2026 (0.6.2)
+
+- **The launcher did not open after updating to 0.6.1** (#208): the launcher's new network search
+  for the coming Uncharted 2 multiplayer is in a separate file, `launcher/net_lan.py`, which the
+  launcher loaded at start. The package build copied only the launcher's two older files, so 0.6.1
+  shipped without it and the launcher stopped before its window appeared. The package now copies
+  every launcher file, and the launcher opens even when that optional file is missing.
+
+#### 25 October 2026 (0.6.1)
+
+- **Fewer random crashes in all three games** (crashes like "execute access to 0" or a sudden
+  close to the desktop, possibly also #205): the games' PS4 code keeps some values in the 128
+  bytes just below the stack pointer, a space the PS4's calling rules leave alone. Windows does
+  not: when it handles a page fault (the port uses them to track memory the GPU writes) it builds
+  its exception record right there and can overwrite those values. We had fixed two such routines
+  by hand (the shader constant tables in 0.4.1, the particle grouping in 0.6.0). Now the port finds
+  every routine that keeps values below the stack when a game starts (162 in Drake's Fortune, 144
+  in Uncharted 2, 153 in Uncharted 3) and runs each of their memory accesses that can fault with
+  the stack moved out of the way first. In a test that overwrites that space after every fault,
+  as Windows 10 does, the games now run instead of crashing at start, and the frame rate is
+  unchanged (Uncharted 2 uncapped: 96.6 vs 96.8 FPS). GOW3_RED_ZONE=0 turns it off.
+- **Drake's Fortune: mouse aiming without the "stick" feel** (#190): the aim camera's remembered
+  direction is now turned directly by the mouse, as in Uncharted 2 and 3 since 0.6.0: the same
+  movement turns the same angle, slow or fast (about 260 degrees for a fast swipe in our test, as
+  in Uncharted 2), with no speed cap and no acceleration. The game makes new aim cameras during
+  one press (after a roll), and each gets every mouse turn exactly once.
+- **RivaTuner's on-screen display flickered** (#127, #128): since 0.5.0 the game presents its frames
+  on a queue of its own, and RivaTuner missed some of them (its overlay was missing from 5 of 60
+  captures in Uncharted 3 with DLSS at a 120 FPS limit). With RivaTuner running, frames are
+  presented on the graphics queue again (60 of 60).
+- **Uncharted 2 ultrawide: shadows at the sides of the screen** came and went as the camera turned
+  at 21:9 and 32:9: the sun, rain and lamp shadows decided what casts a shadow with the 16:9 view.
+  They now use the full width (thanks to Ferosnow95, #192).
 
 ### From BilalReloaded's 0.6.0 (merged 24 Oct)
 

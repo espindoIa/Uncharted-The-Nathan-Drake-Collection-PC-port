@@ -1,3 +1,4 @@
+#include "test_environment.h"
 // gow3.ini graphics keys (gow3_settings.cpp, gow3_graphics.h).
 #include <cassert>
 #include <cstdio>
@@ -51,8 +52,8 @@ int main() {
                "render_resolution=1440p\nengine_fps=240\ndeferred_readback=0\nstale_readback=1\n"
                "fsr1=1\nrcas=0\nrcas_strength=40\nframes_queued=2\n";
     }
-    _putenv_s("GOW3_CONFIG", path);
-    _putenv_s("GOW3_ASYNC_SHADERS", "");
+    SetTestEnv("GOW3_CONFIG", path);
+    SetTestEnv("GOW3_ASYNC_SHADERS", "");
     auto& v = Gow3Settings::Get();
     Gow3Settings::Load();
     assert(v.display_mode == G::Borderless && !v.vsync && v.fps_limit == 100 && !v.async_shaders);
@@ -60,11 +61,11 @@ int main() {
     assert(v.fsr1 && !v.rcas && v.rcas_strength == 40 && v.frames_queued == 2);
     assert(!Gow3Settings::GraphicsNeedRestart());
     assert(v.applied_engine_fps == 240);  // no GOW3_ENGINE_FPS: the configured rate
-    _putenv_s("GOW3_ENGINE_FPS", "60");    // run.py: the frame rate patch did not apply
+    SetTestEnv("GOW3_ENGINE_FPS", "60");    // run.py: the frame rate patch did not apply
     Gow3Settings::Load();
     assert(v.engine_fps == 240 && v.applied_engine_fps == 60 && !Gow3Settings::GraphicsNeedRestart());
-    _putenv_s("GOW3_ENGINE_FPS", "");
     // 6036c2a: only the readback modes need a restart; engine_fps no longer does.
+    SetTestEnv("GOW3_ENGINE_FPS", "");
     v.engine_fps = 120;
     assert(!Gow3Settings::GraphicsNeedRestart());
     v.deferred_readback = true;
@@ -88,7 +89,7 @@ int main() {
         out << "display_mode=huge\nfps_limit=7\nrender_resolution=8K\nengine_fps=1\n"
                "rcas_strength=250\nframes_queued=9\n";
     }
-    _putenv_s("GOW3_ASYNC_SHADERS", "1");  // the environment still wins at start
+    SetTestEnv("GOW3_ASYNC_SHADERS", "1");  // the environment still wins at start
     v.async_shaders = false;
     Gow3Settings::Load();
     assert(v.display_mode == G::Windowed && v.fps_limit == 60 && v.render_resolution == 0 && v.engine_fps == 120);

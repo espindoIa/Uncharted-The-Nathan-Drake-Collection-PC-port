@@ -112,6 +112,11 @@ private:
         bool presented = false;
         /// gow3: from the presents queue: present the frame, the flip completes later.
         bool present_only = false;
+        /// gow3 26 Oct 2026 (GOW3_FLIP_AFTER_GPU): the frame's GPU-work semaphore (a VkSemaphore)
+        /// and tick, read when the frame was prepared: a presented frame may be recycled before
+        /// CompleteFlip runs.
+        void* ready_semaphore = nullptr;
+        u64 ready_tick = 0;
 
         operator bool() const noexcept {
             return frame != nullptr;
@@ -176,6 +181,8 @@ private:
         s32 index;
         s64 flip_arg;
         Vulkan::Frame* frame = nullptr;
+        void* ready_semaphore = nullptr;
+        u64 ready_tick = 0;
     };
     std::mutex eop_mutex;
     std::deque<EopFlip> eop_flips;

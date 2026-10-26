@@ -144,6 +144,8 @@ int main(int argc, char** argv) {
                              "blue_orb_multiplier=1000\n", "gold_orb_multiplier=0\n"}) {
         assert(saved.find(line) != std::string::npos);
     }
+    Gow3Settings::Load();
+    assert(v.blue_orb_multiplier == 100.0f && v.gold_orb_multiplier == 0.1f);
     std::remove(path);
     std::puts("PASS: stat multipliers");
 }

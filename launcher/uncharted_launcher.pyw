@@ -27,6 +27,10 @@ from tkinter import font as tkfont, messagebox
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
 import art  # launcher/art.py: icons, anti-aliased shapes, the games' art (25 Oct 2026)
+try:  # launcher/net_lan.py: Uncharted 2 games hosted on this network (Multiplayer page). Optional:
+    import net_lan  # without it (0.6.1's package missed it, #208) the launcher must still open
+except ImportError:
+    net_lan = None
 import updater  # launcher/updater.py: updates from the GitHub releases
 import widgets
 from widgets import (ACCENT, ACCENT_HI, BG, DIM, GOOD, HOVER_LINE, INK, LINE, MUTED, PANEL, PANEL_HI, STAGE, STOP_RED, TEXT, Badge, Chip, Dialog, Dropdown, InfoTip, ScrollBar, Segmented, Toast, Toggle, copy_text, on_activate, on_keys)  # launcher/widgets.py
@@ -44,6 +48,8 @@ USER_DIR = ROOT / "analysis" / "uncharted-user"
 INI_FILE = USER_DIR / "probe.ini"
 RUN_SCRIPT = ROOT / "tools" / "probe_uncharted.py"
 PREFIX_CONFIG_FILE = Path(os.environ.get("APPDATA", Path.home())) / "Uncharted Launcher" / "launcher.json"
+# Uncharted 2's net games for the Multiplayer page (the co-op research's *net-games* table).
+NET_GAMES_FILE = ROOT / "launcher" / "net_games.json"
 
 
 def wine_kernel32():
@@ -157,6 +163,52 @@ CREDITS = ("Credits: based on BilalReloaded's Uncharted PC port (github.com/bc16
 # The link at the top right: label, address.
 LINKS = (("GitHub", FORK_URL),)
 
+def multiplayer_preview():
+    """The Multiplayer page (Uncharted 2 over the network, 25 Oct 2026) is hidden until it
+    works: UNCHARTED_MULTIPLAYER=1 or a file named multiplayer-preview in analysis\\uncharted-user
+    shows it."""
+    return os.environ.get("UNCHARTED_MULTIPLAYER") == "1" or (USER_DIR / "multiplayer-preview").exists()
+
+
+# The characters a player can pick on the Multiplayer page (actor, label): Uncharted 2's
+# multiplayer skins that ship in the Collection, and Drake's own models. Only those whose actor is
+# in the player's game files are offered (net_characters); "" = the net game's default model.
+NET_CHARACTERS = [
+    ("", "Default (Drake)"), ("hero-default", "Drake"), ("hero-parka", "Drake (winter)"),
+    ("mp-hero-chloe-variation", "Chloe"), ("mp-hero-elena", "Elena"), ("mp-hero-elena-divesuit", "Elena (dive suit)"),
+    ("mp-hero-divesuit", "Drake (dive suit)"), ("mp-hero-sullivan-blue", "Sully (blue)"),
+    ("mp-hero-sullivan-red", "Sully (red)"), ("mp-hero-sullivan-winter", "Sully (winter)"),
+    ("mp-hero-eddie", "Eddy Raja"), ("mp-hero-navarro", "Navarro"), ("mp-hero-roman", "Roman"),
+    ("mp-hero-red", "Harry Flynn"), ("mp-hero-pirate", "Pirate"), ("mp-hero-merc", "Mercenary"),
+    ("mp-hero-udf", "UDF soldier"), ("mp-hero-skeleton-1-glow", "Skeleton (glow)"),
+    ("mp-hero-skeleton-1-platinum", "Skeleton (platinum)"),
+]
+
+
+def net_characters(game_dir):
+    """NET_CHARACTERS whose actor package is in the game folder (all when it is not known)."""
+    actors = Path(game_dir) / "u2data" / "build" / "main" / "actor27" / "ps4" if game_dir else None
+    if not actors or not actors.is_dir():
+        return list(NET_CHARACTERS)
+    return [(a, label) for a, label in NET_CHARACTERS if not a or (actors / (a + ".pak")).exists()]
+
+
+def net_games():
+    """The net games the Multiplayer page offers (index = the game's *net-games* entry, label):
+    the complete entries of launcher/net_games.json, else The Village co-op."""
+    games = []
+    try:
+        data = json.loads(NET_GAMES_FILE.read_text(encoding="utf-8"))
+        for entry in data.get("games", []) if isinstance(data, dict) else data:
+            if entry.get("complete") and isinstance(entry.get("index"), int):
+                mode = {"coop": "Co-op"}.get(entry.get("kind"), (entry.get("mode") or "").title())
+                label = " - ".join(part for part in (entry.get("map") or entry.get("name"), mode) if part)
+                games.append({"index": entry["index"], "label": label or f"Net game {entry['index']}"})
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
+    return games or [{"index": 114, "label": "The Village - Co-op"}]
+
+
 # 25 Oct 2026: each game has its colour (the accent while it is selected: the gold of Drake's
 # Fortune's coin, the red of Among Thieves' "2", the orange of Drake's Deception's "3").
 GAMES = [
@@ -176,6 +228,9 @@ SECTIONS = (("home", "Home"), ("display", "Display"), ("performance", "Performan
 SECTION_ICONS = {"home": "home", "display": "display", "performance": "performance", "controls": "controls",
                  "gameplay": "gameplay", "system": "system"}  # launcher/assets/icons
 OLD_SECTIONS = {"setup": "home", "cheats": "gameplay", "advanced": "system"}
+if multiplayer_preview():  # Uncharted 2 over the network (page_multiplayer), hidden until it works
+    SECTIONS += (("multiplayer", "Multiplayer"),)
+    SECTION_ICONS["multiplayer"] = "play"
 
 
 def section_name(name):
@@ -908,7 +963,9 @@ def game_update_dir(folder):
 
 def app_version(folder):
     """APP_VER of a game folder (sce_sys/param.sfo); 01.02 when the executables are 1.02 although
-    param.sfo says otherwise (dumps with the update merged in that kept the 1.00 param.sfo)."""
+    param.sfo says otherwise (dumps with the update merged in that kept the 1.00 param.sfo), and
+    01.00 when they are 1.00 although param.sfo says 01.02 (26 Oct 2026, #148 and #176: the
+    launcher showed 1.02, the games ran 1.00 and crashed where 1.02 has fixes)."""
     try:
         data = (Path(folder) / "sce_sys" / "param.sfo").read_bytes()
         _, _, keys, values, count = struct.unpack_from("<IIIII", data)
@@ -917,7 +974,11 @@ def app_version(folder):
             key = data[keys + key_at:data.index(bytes(1), keys + key_at)].decode()
             if key == "APP_VER":
                 version = data[values + value_at:values + value_at + length].rstrip(bytes(1)).decode()
-                return "01.02" if version < "01.02" and has_update_102_code(folder) else version
+                if version < "01.02" and has_update_102_code(folder):
+                    return "01.02"
+                if version >= "01.02" and has_update_100_code(folder):
+                    return "01.00"
+                return version
     except (OSError, ValueError, struct.error):
         pass
     return None
@@ -931,18 +992,36 @@ UPDATE_102_CODE = bytes.fromhex("488d05cc9fd500 8b4850 84c9 7440 8a50".replace("
 _update_102_cache = {}
 
 
-def has_update_102_code(folder):
+# Uncharted 2's PlayerBase::UpdateFocus assert as version 1.00 compiled it (exact bytes; also in
+# the dumped 1.00 executable as it is). tools/probe_uncharted.py U2_FOCUS_100.
+UPDATE_100_CODE = bytes.fromhex(
+    "c4e37904c900c5f0c2c900c5f850c183f80f7438e8a8d71a004885c07427488d3d4c9c8300"
+    "488d354b998300488d155b9c8300488d0d7e99830041b84d0400004531c9ffd0cd41")
+
+
+def _executable_codes(folder):
+    """(has the 1.02 code, has the 1.00 code) of the folder's Uncharted 2 executable; both False
+    when it is missing. Cached by file and write time."""
     path = Path(folder) / "big2-ps4_Shipping.elf"
     try:
         key = (str(path), path.stat().st_mtime_ns)
     except OSError:
-        return False
+        return False, False
     if key not in _update_102_cache:
         try:
-            _update_102_cache[key] = UPDATE_102_CODE in path.read_bytes()
+            data = path.read_bytes()
+            _update_102_cache[key] = (UPDATE_102_CODE in data, UPDATE_100_CODE in data)
         except OSError:
-            _update_102_cache[key] = False
+            _update_102_cache[key] = (False, False)
     return _update_102_cache[key]
+
+
+def has_update_102_code(folder):
+    return _executable_codes(folder)[0]
+
+
+def has_update_100_code(folder):
+    return _executable_codes(folder)[1]
 
 
 def desktop_folder():
@@ -1036,10 +1115,21 @@ def resolution_options(aspect):
 # render resolution is new (October 2026): confirm in play. All three games draw at 4K
 # natively except Drake's Fortune, which stops at 1620p (its memory layout) and upscales.
 PRESETS = {
+    # IGPU card adapted from PR #223 by memeguyoffical (the card, its values and the iGPU detection).
+    "igpu": {
+        "title": "IGPU", "summary": "30–60 FPS  •  540–720p, FSR 1",
+        "detail": "Intel and AMD integrated graphics: the game draws at 540p (720p on the strongest "
+                  "iGPUs) and FSR 1 scales it up to your screen. About 30 FPS on Vega and 2-CU "
+                  "Radeon, 60 on Radeon 680M/760M/780M and Iris Xe. No anti-aliasing; the lowest "
+                  "memory use.",
+        "resolution": "960x540",
+        "values": {"fps_limit": "60", "frames_queued": "1", "vsync": "1", "async_shaders": "1",
+                   "fsr1": "1", "rcas": "1", "rcas_strength": "75", "upscaler": "off"},
+    },
     "low": {
         "title": "LOW", "summary": "60 FPS  •  720p + FSR 1",
-        "detail": "For integrated and older graphics cards: the game draws at 720p and FSR 1 scales "
-                  "it up to your screen.",
+        "detail": "For older graphics cards: the game draws at 720p and FSR 1 scales it up to your "
+                  "screen.",
         "resolution": "1280x720",
         "values": {"fps_limit": "60", "frames_queued": "1", "vsync": "1", "async_shaders": "1",
                    "fsr1": "1", "rcas": "1", "rcas_strength": "75"},
@@ -1067,7 +1157,7 @@ PRESETS = {
                    "fsr1": None, "rcas": "1", "rcas_strength": "50"},
     },
 }
-PRESET_ORDER = ("low", "medium", "high", "ultra")
+PRESET_ORDER = ("igpu", "low", "medium", "high", "ultra")
 
 
 def anti_aliasing_options():
@@ -1115,19 +1205,39 @@ def preset_values(name):
     return values
 
 
-def gpu_names():
-    """The graphics cards: the one the game used last (its log names it), else Windows' list."""
+def gpu_log_info():
+    """The graphics card the game used last, as its log names it: {"name", "integrated"}.
+    None when no log has it. The log lists every card as "GPU 0: <name> (DiscreteGpu)" and the one
+    chosen as "GPU: using <name>"; the kind is None when the log predates that line."""
     logs = [ROOT / "analysis" / g["log"] / "boot.log" for g in GAMES]
     for log in sorted((log for log in logs if log.exists()), key=lambda p: p.stat().st_mtime, reverse=True):
+        name, kinds = None, {}
         try:
             with open(log, encoding="utf-8", errors="replace") as lines:
                 for number, line in enumerate(lines):
                     if line.startswith("GPU: using "):
-                        return [line[len("GPU: using "):].strip()]
+                        name = line[len("GPU: using "):].strip()
+                    elif line.startswith("GPU ") and ": " in line:
+                        head, _, card = line.partition(": ")
+                        if head[4:].strip().isdigit() and card.rstrip().endswith(")"):
+                            model, _, kind = card.rstrip().rpartition(" (")
+                            kinds[model] = kind[:-1]
                     if number > 400:
                         break
         except OSError:
-            pass
+            continue
+        if name:
+            kind = kinds.get(name)
+            return {"name": name, "integrated": True if kind == "IntegratedGpu"
+                    else False if kind == "DiscreteGpu" else None}
+    return None
+
+
+def gpu_names():
+    """The graphics cards: the one the game used last (its log names it), else Windows' list."""
+    info = gpu_log_info()
+    if info:
+        return [info["name"]]
     try:
         result = subprocess.run(["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_VideoController).Name"],
                                 capture_output=True, text=True, timeout=20, creationflags=NO_WINDOW)
@@ -1158,12 +1268,81 @@ def vulkan_gpus():
     return _VULKAN_GPUS
 
 
+# Integrated graphics by model name (IGPU card adapted from PR #223 by memeguyoffical): the log says
+# it exactly ("(IntegratedGpu)"), but Windows' list and older logs only give the name. AMD APUs:
+# Vega, the 610M-890M Radeon and the unnamed "Radeon Graphics"; Intel: Iris Xe, UHD/HD and the
+# integrated Arc (130V-150V, 130T/140T, "Arc Graphics"). Separate cards: a discrete Arc A/B (also
+# the laptop A370M-A770M and Arc Pro A40-B60), a Radeon RX, Vega 56/64, Radeon VII, and GeForce
+# laptop chips with the same numbers (GTX 660M/680M). Strix Halo (Radeon 8040S-8060S) is
+# integrated too, but as fast as a mid-range card: it is not an IGPU-preset GPU.
+INTEGRATED_AMD = re.compile(
+    r"\bradeon\s*(?:610m|640m|660m|680m|740m|760m|780m|860m|880m|890m)\b"
+    r"|\bradeon\s+graphics\b|\bradeon\s+vega\b|\bvega\s*(?:3|6|7|8|9|10|11)\b"
+    r"|\bryzen\s+.*\bgraphics\b")
+DISCRETE_ARC = re.compile(r"\barc\s*(?:pro\s*)?[ab]\d{2,3}")
+STRIX_HALO = re.compile(r"\bradeon\s*80[4-6]0s\b")
+
+
+def gpu_name_key(name):
+    return " ".join((name or "").lower().replace("(tm)", " ").replace("(r)", " ").split())
+
+
+def gpu_strix_halo(name):
+    """True for the Ryzen AI Max APUs (Radeon 8040S/8050S/8060S): integrated, but no low-end GPU."""
+    return bool(STRIX_HALO.search(gpu_name_key(name)))
+
+
+def gpu_integrated(name):
+    """True for low-end integrated graphics (the IGPU preset's GPUs), from the model name."""
+    n = gpu_name_key(name)
+    if not n or gpu_strix_halo(n) or "nvidia" in n or "geforce" in n:
+        return False
+    if "vega 56" in n or "vega 64" in n or "radeon vii" in n or re.search(r"\brx\s*\d", n):
+        return False
+    if "intel" in n:
+        return not DISCRETE_ARC.search(n)
+    return bool(INTEGRATED_AMD.search(n))
+
+
+def igpu_class(name):
+    """How strong an integrated GPU is, for the IGPU preset's own defaults: "weak" (30 FPS: Vega,
+    the 2-4 CU Radeon, older Intel UHD/HD), "mainstream" (60 FPS at 540p: Radeon 680M/760M/780M,
+    Iris Xe) or "strong" (60 FPS at 720p: Radeon 880M/890M, integrated Arc)."""
+    n = gpu_name_key(name)
+    if ("intel" in n and "arc" in n) or re.search(r"\b(880m|890m)\b", n):
+        return "strong"
+    if re.search(r"\b(680m|760m|780m|860m)\b", n) or ("intel" in n and "iris xe" in n):
+        return "mainstream"
+    if "intel" in n or "vega" in n or re.search(r"\b(610m|640m|660m|740m)\b", n) \
+            or "radeon graphics" in n:
+        return "weak"
+    return "mainstream"
+
+
+def gpu_recommendation(name, integrated=None):
+    """The Home preset for a card: IGPU for low-end integrated graphics (the game log's
+    "(IntegratedGpu)" when known, else the model name), else gpu_tier. Strix Halo never takes IGPU."""
+    n = gpu_name_key(name)
+    if gpu_strix_halo(n):
+        return gpu_tier(n)
+    # A name that is a separate card (discrete Arc, GeForce, Radeon RX) never takes IGPU.
+    if integrated is None or DISCRETE_ARC.search(n) \
+            or re.search(r"\b(?:nvidia|geforce|radeon vii)\b|\brx\s*(?:\d|vega)", n):
+        integrated = gpu_integrated(n)
+    return "igpu" if integrated else gpu_tier(name)
+
+
 def gpu_tier(name):
     """The Home preset for a graphics card, from its model name; None when not known.
-    Rough classes: Low = integrated and older entry cards, Medium = 1080p cards (GTX 1060-1660,
-    RTX x060, RX 580-7600), High = 1440p cards, Ultra = 4K cards (RTX x080/x090,
-    RTX 4070 Ti and up, RX 6800 XT/7900/9070). High and Ultra laptop chips count one class lower."""
-    n = (name or "").lower().replace("(tm)", "").replace("(r)", "")
+    Low-end integrated graphics take IGPU (30-60 FPS below 1080p with FSR 1); the others: Low =
+    older entry cards, Medium = 1080p cards (GTX 1060-1660, RTX x060, RX 580-7600, Strix Halo),
+    High = 1440p cards, Ultra = 4K cards (RTX x080/x090, RTX 4070 Ti and up, RX 6800 XT/7900/9070).
+    High and Ultra laptop chips count one class lower."""
+    n = gpu_name_key(name)
+    if gpu_strix_halo(n):
+        return "medium"
+    if gpu_integrated(n):
+        return "igpu"
     nvidia = re.search(r"\b(rtx|gtx|gt|mx)\s*(\d{3,4})\s*(ti)?\s*(super)?", n)
     amd = re.search(r"\brx\s*(\d{3,4})\s*(xtx|xt|gre)?", n)
     arc = re.search(r"\barc\s*([ab])(\d{3})", n)
@@ -1214,7 +1393,7 @@ def gpu_tier(name):
     elif arc:
         tier = "medium" if int(arc.group(2)) >= 500 else "low"
     elif "intel" in n or ("radeon" in n and "graphics" in n):
-        tier = "low"  # integrated graphics
+        tier = "low"  # other Intel (Arc Pro) and Radeon graphics the checks above did not place
     else:
         return None
     if "laptop" in n or "max-q" in n or "mobile" in n or re.search(r"\d{3,4}m\b", n):
@@ -1477,7 +1656,7 @@ class Launcher:
         self.widgets = {}
         # The graphics card (as last detected; detect_gpu checks again) for the Home preset advice.
         self.gpu_name = self.config.get("gpu")
-        self.recommended = gpu_tier(self.gpu_name)
+        self.recommended = gpu_recommendation(self.gpu_name)
         self.fonts()
         self.apply_accent()
         root.title(f"{APP_TITLE} - {EDITION}")
@@ -1547,20 +1726,22 @@ class Launcher:
 
     def detect_gpu(self):
         """Finds the graphics card in the background (Windows' list takes a moment) and marks the
-        Home preset that suits it."""
+        Home preset that suits it. The game log's "(IntegratedGpu)" is exact; the model name
+        is the fallback, and all there is when the card has never run the game."""
         found = []
-        threading.Thread(target=lambda: found.append(gpu_names()), daemon=True).start()
+        threading.Thread(target=lambda: found.append((gpu_log_info(), gpu_names())), daemon=True).start()
 
         def done():
             if not found:
                 self.root.after(200, done)
                 return
-            names = found[0]
+            info, names = found[0]
             if not names:
                 return
             known = [name for name in names if gpu_tier(name)]
             name = max(known, key=lambda n: PRESET_ORDER.index(gpu_tier(n))) if known else names[0]
-            self.gpu_name, self.recommended = name, gpu_tier(name)
+            integrated = info.get("integrated") if info and info.get("name") == name else None
+            self.gpu_name, self.recommended = name, gpu_recommendation(name, integrated)
             if self.config.get("gpu") != name:
                 self.config["gpu"] = name
                 write_config(self.config)
@@ -1591,6 +1772,7 @@ class Launcher:
             self.f_body_bold = (game, 11, "bold")
             self.f_small = (game, 10)  # 11 pushes Display's choices under their descriptions
             self.f_tab = (game, 11)
+            self.f_caps = (game, 8)
             self.f_play = (game, 20)
             widgets.BODY_FONT, widgets.BOLD_FONT = (game, 11), (game, 12, "bold")
             return
@@ -1607,6 +1789,7 @@ class Launcher:
         self.f_body_bold = ("Segoe UI Semibold", 10)
         self.f_small = ("Segoe UI", 9)
         self.f_tab = ("Segoe UI Semibold", 10)
+        self.f_caps = ("Segoe UI Semibold", 8)
         self.f_play = (bold, 19, "bold")
 
     def apply_accent(self):
@@ -2168,11 +2351,17 @@ class Launcher:
             "gameplay": self.page_cheats(),
             "system": self.page_advanced(),
         }
+        if multiplayer_preview():
+            self.pages["multiplayer"] = self.page_multiplayer()
 
     def show_tab(self, name, save=True):
         """Shows a section (old tab names map to theirs: section_name)."""
         name = section_name(name)
         InfoTip.dismiss()
+        self.current_tab = name
+        if name == "multiplayer" and not getattr(self, "net_searched", False):
+            self.net_searched = True
+            self.root.after(300, self.search_net_games)
         if save and self.config.get("tab") != name:
             self.config["tab"] = name
             write_config(self.config)
@@ -2351,22 +2540,26 @@ class Launcher:
         grid = tk.Frame(page, bg=BG)
         grid.pack(side="top", fill="x")
         self.preset_cards = {}
-        card_h = self.px(150)
+        # Five presets in 3 + 2: five in one row would squeeze the descriptions.
+        columns = 3
+        card_h = self.px(170)
 
         def resized(name, width):
             canvas, w, h = self.preset_cards[name]
             if width != w:
                 self.preset_cards[name] = (canvas, width, h)
                 self.draw_preset(name)
-        # Four cards that share the column's width (spacer columns between them).
+        # Cards that share the column's width (spacer columns between them).
         for i, name in enumerate(PRESET_ORDER):
+            row, column = divmod(i, columns)
             canvas = tk.Canvas(grid, width=self.px(150), height=card_h, bg=BG, highlightthickness=2,
                                highlightbackground=BG, highlightcolor=ACCENT, takefocus=1, cursor="hand2")
-            canvas.grid(row=0, column=2 * i, sticky="ew")
+            canvas.grid(row=row, column=2 * column, sticky="ew",
+                        pady=(0 if row == 0 else self.px(16), 0))
             on_activate(canvas, lambda n=name: self.apply_preset(n))
-            grid.columnconfigure(2 * i, weight=1, uniform="preset")
-            if i:
-                grid.columnconfigure(2 * i - 1, minsize=self.px(16))
+            grid.columnconfigure(2 * column, weight=1, uniform="preset")
+            if column:
+                grid.columnconfigure(2 * column - 1, minsize=self.px(16))
             canvas.bind("<Button-1>", lambda e, n=name: self.apply_preset(n))
             canvas.bind("<Enter>", lambda e, n=name: self.draw_preset(n, hover=True))
             canvas.bind("<Leave>", lambda e, n=name: self.draw_preset(n))
@@ -2404,9 +2597,9 @@ class Launcher:
         for name in self.preset_cards:
             self.draw_preset(name)
         if self.recommended:
-            self.setup_intro.config(text=f"Recommended for your graphics card ({self.gpu_name}): "
-                                         f"{PRESETS[self.recommended]['title'].title()}. Every setting can still be "
-                                         "changed in Display and Performance.")
+            label = "iGPU" if self.recommended == "igpu" else PRESETS[self.recommended]["title"].title()
+            self.setup_intro.config(text=f"Recommended for your graphics card ({self.gpu_name}): {label}. "
+                                         "Every setting can still be changed in Display and Performance.")
         else:
             self.setup_intro.config(text="Pick a quality level. Every setting can still be changed in Display "
                                          "and Performance.")
@@ -2506,17 +2699,37 @@ class Launcher:
 
     def apply_preset(self, name):
         settings = self.game_settings()
-        settings["resolution"] = PRESETS[name]["resolution"]
+        resolution = PRESETS[name]["resolution"]
+        values = preset_values(name)
+        if name == "igpu":
+            # IGPU card adapted from PR #223 by memeguyoffical. One card for every low-end
+            # integrated GPU: its class chooses the render resolution and the frame limit. The
+            # fork draws at the render resolution itself (no render scale), whose lowest
+            # step is 540p: Vega and the 2-CU Radeon keep 540p at 30 FPS (upstream used 360p);
+            # Radeon 680M/760M/780M and Iris Xe reach 60 at 540p; Radeon 880M/890M and
+            # integrated Arc draw 720p.
+            kind = igpu_class(self.gpu_name)
+            if kind == "weak":
+                values["fps_limit"] = "30"
+            elif kind == "strong":
+                resolution = "1280x720"
+        settings["resolution"] = resolution
         if "resolution" in self.widgets:
             self.widgets["resolution"].set(settings["resolution"])
         self.refresh_render_size()
-        for key, value in preset_values(name).items():
+        for key, value in values.items():
             self.ini[key] = value
             widget = self.widgets.get(key)
             if isinstance(widget, Toggle):
                 widget.set(value == "1")
             elif isinstance(widget, (Segmented, Dropdown)):
                 widget.set(value)
+        if name == "igpu":
+            # The command thread is the limit on an integrated GPU, and multithreaded rendering
+            # takes part of it. Drake's Fortune keeps it off (its gun and camera misbehave with it).
+            settings["multithreaded"] = self.current_game()["key"] != "u1"
+            if isinstance(self.widgets.get("multithreaded"), Toggle):
+                self.widgets["multithreaded"].set(settings["multithreaded"])
         self.sync_sharpening()
         self.refresh_dependencies()  # a preset can change the upscaler
         settings["preset"] = name
@@ -3145,6 +3358,17 @@ class Launcher:
             "menu to switch. Languages marked + voices are also spoken in your copy of the game.", language,
             short="Pick a language here, then press Square in a game's main menu to switch.", badge=ALL_GAMES)
 
+        # GitHub #199/#195/#204/#212: Uncharted 3 too bright on some PCs (pavlikdcx's exposure patch,
+        # tools/probe_uncharted.py u3_exposure_patch).
+        def u3_exposure(parent):
+            return Segmented(parent, (("0", "Game's"), ("-0.3", "-0.3"), ("-0.6", "-0.6"), ("-1.0", "-1.0")),
+                             str(self.config.get("u3_exposure", "0")),
+                             lambda v: self.change_config("u3_exposure", v), self.f_small, recommended="0")
+        self.row(page, "Uncharted 3 exposure",
+                 "If Uncharted 3 looks washed out or too bright on your PC (bright skies and highlights), "
+                 "lower its exposure here: -0.3 a little, -1.0 about half as bright. Game's = unchanged.",
+                 u3_exposure, short="Lower Uncharted 3's exposure if it looks washed out. Game's = unchanged.")
+
         def speakers(parent):
             return Segmented(parent, (("auto", "Auto"), ("2", "Stereo"), ("6", "5.1"), ("8", "7.1")),
                              str(self.config.get("speakers", "auto")),
@@ -3208,6 +3432,9 @@ class Launcher:
                     side="left", padx=(self.px(6), 0))
         section("SHORTCUTS", (("Desktop shortcut", self.desktop_shortcut), ("Game shortcuts", self.game_shortcuts)),
                 "Game shortcuts: one per game on the desktop, each starts its game directly.")
+        section("STEAM", (("Add to Steam", lambda: self.add_to_steam(per_game=False)),
+                          ("Add games to Steam", lambda: self.add_to_steam(per_game=True))),
+                "A non-Steam game in your library: the Collection, or one entry per game.")
         section("FOLDERS", (("Open log folder", self.open_logs), ("Open save folder", self.open_saves),
                             ("Change game folder", self.choose_game_dir),
                             ("Install game from .pkg", self.install_game_pkg)))
@@ -3237,6 +3464,225 @@ class Launcher:
         return button
 
     # -- PLAY and the status (left column, under the games) ------------------------------------
+
+    # -- multiplayer (preview) --------------------------------------------------------------
+
+    def text_entry(self, parent, key, default, width=18):
+        """A one-line text box whose text is kept in the launcher's settings under key: a framed
+        well (gold frame while typing) with room around the text."""
+        value = tk.StringVar(value=str(self.config.get(key, default)))
+        well = tk.Frame(parent, bg=BG, highlightthickness=1, highlightbackground=LINE)
+        entry = tk.Entry(well, textvariable=value, width=width, font=self.f_body, bg=BG, fg=TEXT,
+                         insertbackground=ACCENT, relief="flat", highlightthickness=0)
+        entry.pack(fill="x", expand=True, padx=self.px(8), pady=self.px(4))
+        entry.bind("<FocusIn>", lambda e: well.config(highlightbackground=ACCENT))
+        entry.bind("<FocusOut>", lambda e: well.config(highlightbackground=LINE))
+        well.bind("<Button-1>", lambda e: entry.focus_set())
+        value.trace_add("write", lambda *a: self.change_config(key, value.get().strip()))
+        return well
+
+    def gold_button(self, parent, label, action, small=False):
+        """A main action (Host, Join): gold, like the PLAY button."""
+        button = tk.Label(parent, text=label, font=self.f_tab if small else self.f_body_bold, bg=ACCENT, fg=INK,
+                          padx=self.px(12 if small else 20), pady=self.px(4 if small else 8), cursor="hand2")
+        button.bind("<Button-1>", lambda e: action())
+        button.bind("<Enter>", lambda e: button.config(bg=ACCENT_HI))
+        button.bind("<Leave>", lambda e: button.config(bg=ACCENT))
+        return button
+
+    def caps_label(self, parent, text, bg=PANEL):
+        return tk.Label(parent, text=text, font=self.f_caps, bg=bg, fg=DIM, anchor="w")
+
+    def mp_card(self, parent, title, text):
+        """A bordered panel with a gold title and a short explanation; returns (card, inside)."""
+        card = tk.Frame(parent, bg=PANEL, highlightthickness=1, highlightbackground=LINE)
+        inside = tk.Frame(card, bg=PANEL)
+        inside.pack(fill="both", expand=True, padx=self.px(20), pady=self.px(16))
+        tk.Label(inside, text=title, font=self.f_tab, bg=PANEL, fg=ACCENT, anchor="w").pack(side="top", fill="x")
+        tk.Label(inside, text=text, font=self.f_small, bg=PANEL, fg=MUTED, anchor="w", justify="left",
+                 wraplength=self.px(470)).pack(side="top", fill="x", pady=(self.px(3), self.px(14)))
+        return card, inside
+
+    def page_multiplayer(self):
+        """Uncharted 2's own online games between PCs (the LAN transport, gow3_pc/src/runtime_net.c;
+        tools/probe_uncharted.py net_mode). Hidden until it works (multiplayer_preview), and
+        started with Uncharted 2 whichever game is chosen (play)."""
+        page = self.page()
+        # Header strip: what this is, the preview mark, the player's name.
+        banner = tk.Frame(page, bg=PANEL, highlightthickness=1, highlightbackground=LINE)
+        banner.pack(side="top", fill="x", pady=(0, self.px(12)))
+        tk.Frame(banner, bg=ACCENT, width=self.px(4)).pack(side="left", fill="y")
+        about = tk.Frame(banner, bg=PANEL)
+        about.pack(side="left", fill="both", expand=True, padx=self.px(18), pady=self.px(14))
+        head = tk.Frame(about, bg=PANEL)
+        head.pack(side="top", fill="x")
+        tk.Label(head, text="Uncharted 2 Multiplayer", font=self.f_card_title, bg=PANEL, fg=TEXT).pack(side="left")
+        tk.Label(head, text="PREVIEW", font=self.f_caps, bg=ACCENT, fg=INK, padx=self.px(7),
+                 pady=self.px(1)).pack(side="left", padx=(self.px(12), 0))
+        tk.Label(about, text="Naughty Dog's own co-op and competitive modes, played between PCs on your "
+                             "network. Not finished yet: a game may not start, or may crash.",
+                 font=self.f_small, bg=PANEL, fg=MUTED, anchor="w", justify="left",
+                 wraplength=self.px(620)).pack(side="top", fill="x", pady=(self.px(5), 0))
+        characters = net_characters(self.game_dir())
+        character = tk.Frame(banner, bg=PANEL)
+        character.pack(side="right", padx=(0, self.px(20)), pady=self.px(14))
+        self.caps_label(character, "CHARACTER").pack(side="top", fill="x")
+        value = str(self.config.get("net_skin", ""))
+        if value not in {a for a, _ in characters}:
+            value = ""
+        self.widgets["net_skin"] = Dropdown(character, characters, value,
+                                            lambda v: self.change_config("net_skin", v), self.f_body)
+        self.widgets["net_skin"].pack(side="top", fill="x", pady=(self.px(4), 0))
+        name = tk.Frame(banner, bg=PANEL)
+        name.pack(side="right", padx=self.px(20), pady=self.px(14))
+        self.caps_label(name, "YOUR NAME").pack(side="top", fill="x")
+        self.text_entry(name, "net_name", "Drake", width=22).pack(side="top", pady=(self.px(4), 0))
+
+        columns = tk.Frame(page, bg=BG)
+        columns.pack(side="top", fill="both", expand=True)
+        columns.columnconfigure(0, weight=1, uniform="multiplayer")
+        columns.columnconfigure(1, weight=1, uniform="multiplayer")
+        host, inside = self.mp_card(columns, "HOST A GAME",
+                                    "Choose a map and mode, then host. Players on your network find your "
+                                    "game under Join a game; they load the same map.")
+        host.grid(row=0, column=0, sticky="nsew", padx=(0, self.px(8)))
+        join, joining = self.mp_card(columns, "JOIN A GAME",
+                                     "A game hosted on your network, or a host's address.")
+        join.grid(row=0, column=1, sticky="nsew", padx=(self.px(8), 0))
+
+        # Host card.
+        games = net_games()
+        value = str(self.config.get("net_game", games[0]["index"]))
+        if value not in {str(g["index"]) for g in games}:
+            value = str(games[0]["index"])
+        self.caps_label(inside, "MAP AND MODE").pack(side="top", fill="x")
+        self.widgets["net_game"] = Dropdown(inside, [(str(g["index"]), g["label"]) for g in games], value,
+                                            lambda v: self.change_config("net_game", v), self.f_body)
+        self.widgets["net_game"].pack(side="top", fill="x", pady=(self.px(4), 0))
+        self.gold_button(inside, "HOST GAME", self.host_net_game).pack(side="top", anchor="w",
+                                                                        pady=(self.px(18), self.px(10)))
+        tk.Label(inside, text="Uses port 27000. The first time, Windows asks whether Uncharted may use the "
+                              "network: allow it for private networks.",
+                 font=self.f_small, bg=PANEL, fg=DIM, anchor="w", justify="left",
+                 wraplength=self.px(470)).pack(side="top", fill="x")
+        # Local co-op: the same map and mode in two windows on this PC, one controller each.
+        tk.Frame(inside, bg=LINE, height=1).pack(side="top", fill="x", pady=(self.px(14), self.px(12)))
+        self.caps_label(inside, "ON THIS PC: PLAYER 2'S CHARACTER").pack(side="top", fill="x")
+        value = str(self.config.get("net_skin2", ""))
+        if value not in {a for a, _ in characters}:
+            value = ""
+        self.widgets["net_skin2"] = Dropdown(inside, characters, value,
+                                             lambda v: self.change_config("net_skin2", v), self.f_body)
+        self.widgets["net_skin2"].pack(side="top", fill="x", pady=(self.px(4), 0))
+        self.gold_button(inside, "LOCAL CO-OP (2 CONTROLLERS)", self.local_net_game).pack(
+            side="top", anchor="w", pady=(self.px(12), self.px(8)))
+        tk.Label(inside, text="Two game windows side by side, the first controller plays the left one, the "
+                              "second the right one. Needs a strong PC: two games run at once.",
+                 font=self.f_small, bg=PANEL, fg=DIM, anchor="w", justify="left",
+                 wraplength=self.px(470)).pack(side="top", fill="x")
+
+        # Join card: the games found, then join by address.
+        found = tk.Frame(joining, bg=PANEL)
+        found.pack(side="top", fill="x")
+        self.caps_label(found, "ON YOUR NETWORK").pack(side="left")
+        self.flat_button(found, "\u21bb  Refresh", self.search_net_games).pack(side="right")
+        self.net_list = tk.Frame(joining, bg=PANEL)
+        self.net_list.pack(side="top", fill="x", pady=(self.px(6), self.px(14)))
+        self.show_net_games(None)
+        tk.Frame(joining, bg=LINE, height=1).pack(side="top", fill="x", pady=(0, self.px(12)))
+        self.caps_label(joining, "BY ADDRESS").pack(side="top", fill="x")
+        by_address = tk.Frame(joining, bg=PANEL)
+        by_address.pack(side="top", fill="x", pady=(self.px(4), self.px(8)))
+        self.gold_button(by_address, "JOIN", lambda: self.join_net_game(self.config.get("net_address", "")),
+                         small=True).pack(side="right", padx=(self.px(8), 0))
+        self.text_entry(by_address, "net_address", "").pack(side="left", fill="x", expand=True)
+        tk.Label(joining, text="The host's IP address, with :port when it is not 27000. Over the internet, "
+                               "the host opens the port on their router, or you both use a virtual "
+                               "network such as Tailscale.",
+                 font=self.f_small, bg=PANEL, fg=DIM, anchor="w", justify="left",
+                 wraplength=self.px(470)).pack(side="top", fill="x")
+        return page
+
+    def search_net_games(self):
+        if getattr(self, "net_searching", False) or not hasattr(self, "net_list"):
+            return
+        self.net_searching = True
+        self.show_net_games("searching")
+        found = queue.Queue()
+        threading.Thread(target=lambda: found.put(self._find_net_games()), daemon=True).start()
+
+        def done():
+            try:
+                games = found.get_nowait()
+            except queue.Empty:
+                self.root.after(100, done)
+                return
+            self.net_searching = False
+            self.show_net_games(games)
+        self.root.after(100, done)
+
+    @staticmethod
+    def _find_net_games():
+        if net_lan is None:
+            return OSError("launcher\\net_lan.py is missing")
+        try:
+            return net_lan.find_games()
+        except OSError as error:
+            return error
+
+    def show_net_games(self, games):
+        """The Join card's list: None (not searched), "searching", an error, [] or the games."""
+        for child in self.net_list.winfo_children():
+            child.destroy()
+        if not isinstance(games, list) or not games:
+            if isinstance(games, OSError):
+                text = f"The search failed: {games}"
+            elif games == "searching":
+                text = "Looking for games on your network..."
+            elif games is None:
+                text = "Press Refresh to look for games."
+            else:
+                text = "No games on your network right now. The host presses HOST GAME first; or join by address."
+            box = tk.Frame(self.net_list, bg=BG, highlightthickness=1, highlightbackground=LINE)
+            box.pack(side="top", fill="x")
+            tk.Label(box, text=text, font=self.f_small, bg=BG, fg=MUTED, anchor="w", justify="left",
+                     wraplength=self.px(440)).pack(side="top", fill="x", padx=self.px(12), pady=self.px(12))
+            return
+        for game in games:
+            line = tk.Frame(self.net_list, bg=BG, highlightthickness=1, highlightbackground=LINE)
+            line.pack(side="top", fill="x", pady=(0, self.px(6)))
+            address = f"{game['address']}:{game['port']}"
+            self.gold_button(line, "JOIN", lambda a=address: self.join_net_game(a), small=True) \
+                .pack(side="right", padx=self.px(10), pady=self.px(8))
+            text = tk.Frame(line, bg=BG)
+            text.pack(side="left", fill="x", expand=True, padx=self.px(12), pady=self.px(7))
+            tk.Label(text, text=game["title"] or f"Net game {game['game']}", font=self.f_body_bold, bg=BG,
+                     fg=TEXT, anchor="w").pack(side="top", fill="x")
+            tk.Label(text, text=f"Host {game['host'] or '?'}   \u00b7   {game['players']}/{game['most']} players"
+                                f"   \u00b7   {game['address']}",
+                     font=self.f_small, bg=BG, fg=MUTED, anchor="w").pack(side="top", fill="x")
+
+    def host_net_game(self):
+        games = net_games()
+        index = str(self.config.get("net_game", games[0]["index"]))
+        label = next((g["label"] for g in games if str(g["index"]) == index), games[0]["label"])
+        self.play(net={"mode": "host", "address": "0.0.0.0:27000", "game": index, "title": label})
+
+    def local_net_game(self):
+        """Local co-op: this PC hosts on 127.0.0.1 in the left half of the screen with the first
+        controller; a second game (instance 2: its own log and user folders) joins it in the right
+        half with the second controller (GOW3_PAD_INDEX, GOW3_WINDOW_HALF)."""
+        games = net_games()
+        index = str(self.config.get("net_game", games[0]["index"]))
+        label = next((g["label"] for g in games if str(g["index"]) == index), games[0]["label"])
+        self.play(net={"mode": "host", "address": "127.0.0.1:27000", "game": index, "title": label, "local": True})
+
+    def join_net_game(self, address):
+        address = (address or "").strip()
+        if not address:
+            self.info("Type the host's address (e.g. 192.168.1.20), or pick a game found on your network.")
+            return
+        self.play(net={"mode": "join", "address": address})
 
     def draw_play(self, hover=False):
         """PLAY in the game's colour, or STOP while a game runs; drawn on its piece of the backdrop."""
@@ -3484,7 +3930,11 @@ class Launcher:
         if not self.process:
             self.play()
 
-    def play(self):
+    def play(self, net=None):
+        """net: a Multiplayer page start (host or join an Uncharted 2 net game), else the chosen game."""
+        if net and self.process:
+            self.info("A game is already running.")
+            return
         if not RUN_SCRIPT.exists():
             self.error(f"Start script missing:\n{RUN_SCRIPT}")
             return
@@ -3499,13 +3949,29 @@ class Launcher:
         self.follow_ini()  # the in-game menu's last changes, not older values kept here
         self.save_ini({k: self.ini.get(k, v) for k, v in INI_DEFAULTS.items()})
         write_config(self.config)
-        game = self.current_game()
+        game = next(g for g in GAMES if g["key"] == "u2") if net else self.current_game()
         env = os.environ.copy()
+        # The Multiplayer page: Uncharted 2's own online game (tools/probe_uncharted.py net_mode).
+        for key in ("UNCHARTED_NET_MODE", "UNCHARTED_NET_ADDRESS", "UNCHARTED_NET_GAME", "UNCHARTED_NET_TITLE",
+                    "UNCHARTED_NET_NAME", "UNCHARTED_NET_SKIN", "UNCHARTED_INSTANCE", "GOW3_PAD_INDEX",
+                    "GOW3_WINDOW_HALF"):
+            env.pop(key, None)
+        if net:
+            env["UNCHARTED_NET_MODE"] = net["mode"]
+            env["UNCHARTED_NET_ADDRESS"] = net.get("address", "")
+            env["UNCHARTED_NET_NAME"] = str(self.config.get("net_name", ""))[:31]
+            env["UNCHARTED_NET_SKIN"] = str(self.config.get("net_skin", ""))
+            if net.get("local"):  # local co-op: the left window, the first controller, no mouse
+                env.update({"GOW3_PAD_INDEX": "1", "GOW3_WINDOW_HALF": "left", "GOW3_MOUSE": "0"})
+            if net["mode"] == "host":
+                env["UNCHARTED_NET_GAME"] = net["game"]
+                env["UNCHARTED_NET_TITLE"] = net["title"]
         env["UNCHARTED_DIAGNOSTICS"] = "1" if self.config.get("diagnostics", True) else "0"
         env["UNCHARTED_TORCH_FORWARD"] = "1" if self.config.get("torch_forward", True) else "0"
         env["UNCHARTED_JOB_SLEEP"] = "0" if self.config.get("job_sleep", "auto") == "off" else "1"
         env["UNCHARTED_LANGUAGE"] = str(self.config.get("language", "1"))
         env["UNCHARTED_SPEAKERS"] = str(self.config.get("speakers", "auto"))
+        env["UNCHARTED_U3_EXPOSURE"] = str(self.config.get("u3_exposure", "0"))
         env["UNCHARTED_UNLOCK"] = "1" if self.config.get("unlock", False) else "0"
         env["UNCHARTED_UNLOCK_REWARDS"] = "1" if self.config.get("unlock_rewards", False) else "0"
         if self.chosen_update():
@@ -3552,8 +4018,66 @@ class Launcher:
         except OSError:
             self.run_log = None
         threading.Thread(target=self.read_output, args=(self.process,), daemon=True).start()
+        self.partner = None
+        if net and net.get("local"):
+            # The joiner: instance 2 (analysis/<game>-i2, analysis/uncharted-user-i2), the right
+            # window, the second controller. It connects again every second until the host listens.
+            partner_env = dict(env)
+            name = str(self.config.get("net_name", "") or "Drake")
+            partner_env.update({"UNCHARTED_INSTANCE": "2", "UNCHARTED_NET_MODE": "join",
+                                "UNCHARTED_NET_ADDRESS": "127.0.0.1:27000", "UNCHARTED_NET_NAME": (name + " 2")[:31],
+                                "UNCHARTED_NET_SKIN": str(self.config.get("net_skin2", "")),
+                                "GOW3_PAD_INDEX": "2", "GOW3_WINDOW_HALF": "right", "GOW3_MOUSE": "0"})
+            for key in ("UNCHARTED_NET_GAME", "UNCHARTED_NET_TITLE"):
+                partner_env.pop(key, None)
+            # 15 s later: the first game has prepared its files (both read the same game folder).
+            self.partner_start = (self.process, command, partner_env)
+            self.root.after(15000, self.start_partner)
         self.set_status(f"Starting {game['name']}...", "Preparing game files and code patches.")
         self.draw_play()
+
+    def start_partner(self):
+        pending = getattr(self, "partner_start", None)
+        self.partner_start = None
+        if not pending or not self.process or pending[0] is not self.process or self.process.poll() is not None:
+            return  # stopped meanwhile
+        _, command, env = pending
+        try:
+            self.partner = subprocess.Popen(command, cwd=str(ROOT), env=env, stdout=subprocess.PIPE,
+                                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                            creationflags=NO_WINDOW, text=True, encoding="utf-8", errors="replace")
+            threading.Thread(target=self.read_partner_output, args=(self.partner,), daemon=True).start()
+        except OSError as error:
+            self.partner = None
+            self.error(f"Could not start the second game:\n{error}")
+
+    def read_partner_output(self, process):
+        """Local co-op: the second game's start script output, kept in launcher-last-run-2.log."""
+        try:
+            log = open(USER_DIR / "launcher-last-run-2.log", "w", encoding="utf-8")
+        except OSError:
+            log = None
+        for line in process.stdout:
+            if log:
+                try:
+                    log.write(line)
+                    log.flush()
+                except (OSError, ValueError):
+                    log = None
+        if log:
+            try:
+                log.write(f"exit code {process.wait()}\n")
+                log.close()
+            except (OSError, ValueError):
+                pass
+
+    def stop_partner(self):
+        partner = getattr(self, "partner", None)
+        self.partner = None
+        self.partner_start = None
+        if partner and partner.poll() is None:
+            subprocess.run(["taskkill", "/PID", str(partner.pid), "/T", "/F"], creationflags=NO_WINDOW,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def read_output(self, process):
         log = getattr(self, "run_log", None)
@@ -3697,6 +4221,7 @@ class Launcher:
     def finished(self, code):
         self.process = None
         self.next_start_noted = False
+        self.stop_partner()  # local co-op: the second game ends with the first
         self.draw_play()
         reason = self.crash_reason()
         # A freeze is reported however the game was closed (STOP, or Task Manager).
@@ -3760,6 +4285,7 @@ class Launcher:
         threading.Thread(target=lambda: subprocess.run(
             ["taskkill", "/PID", str(pid), "/T", "/F"], creationflags=NO_WINDOW,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL), daemon=True).start()
+        self.stop_partner()
         self.set_status("Stopping the game...")
 
     # -- system actions ---------------------------------------------------------------------
@@ -3993,6 +4519,62 @@ class Launcher:
                           "\n\nEach starts its game directly with the launcher's settings. From a command "
                           "prompt: \"Uncharted Launcher.exe\" --play u1 (or u2, u3).")
         self.in_background(work, done)
+
+    def add_to_steam(self, per_game=False):
+        """Adds the Collection (or each game, started with --play) to Steam's library as a non-Steam
+        game, with pictures made from the game's own files (launcher/steam_library.py)."""
+        try:
+            import steam_library
+        except ImportError as error:
+            self.error(f"Add to Steam is missing a launcher file:\n{error}")
+            return
+        while steam_library.steam_running():
+            if not self.ask_okcancel(
+                    "Steam is open. Steam saves its own list of games when it closes, so a game "
+                    "added now would be lost.\n\nClose Steam completely (Steam menu -> Exit, or "
+                    "right-click its icon by the clock -> Exit), then press OK."):
+                return
+        games = [(game["key"], game["name"]) for game in GAMES] if per_game else None
+        targets = steam_library.launch_targets(ROOT, STARTER_EXE, sys.executable,
+                                               Path(__file__).resolve(), games)
+        names = [steam_library.COLLECTION_NAME] + [game["name"] for game in GAMES]
+        game_dir = self.game_dir() if is_game_dir(self.game_dir()) else None
+        self.root.config(cursor="watch")
+        self.root.update_idletasks()
+        try:
+            results = steam_library.add_to_steam(targets, ASSETS / "uncharted.ico", game_dir, all_names=names)
+        except steam_library.SteamError as error:
+            if error.kind == "no_steam":
+                text = ("Steam was not found on this PC (no Steam account folder in Steam's userdata). "
+                        "Install Steam and sign in once, then try again.")
+                if WINE:
+                    text += ("\n\nOn Linux, add the launcher from Steam itself: Games -> Add a Non-Steam "
+                             "Game to My Library.")
+            else:
+                text = ("Steam's list of non-Steam games could not be read, so it was left as it is:\n"
+                        f"{error.detail}")
+            self.error(text)
+            return
+        except OSError as error:
+            self.error(f"Could not write Steam's list of games:\n{error}")
+            return
+        finally:
+            self.root.config(cursor="")
+        lines = []
+        for folder, name, result in results:
+            who = f"{name} ({folder.name})" if name else f"Steam account {folder.name}"
+            changes = [f"{count} {word}" for count, word in ((result["added"], "added"),
+                                                            (result["updated"], "updated"),
+                                                            (result["removed"], "replaced")) if count]
+            lines.append(f"{who}: {', '.join(changes)}")
+        added = "the three games" if per_game else f"\"{steam_library.COLLECTION_NAME}\""
+        pictures = ("Library pictures come from your game files."
+                    if game_dir else "No library pictures: choose the game folder first, then add again.")
+        backups = [str(result["backup"]) for _, _, result in results if result["backup"]]
+        self.info(f"Added {added} to Steam:\n" + "\n".join(lines) +
+                  f"\n\n{pictures}" +
+                  (f"\n\nThe previous list was saved as:\n" + "\n".join(backups) if backups else "") +
+                  f"\n\nStart Steam again: {'they are' if per_game else 'it is'} in your Library.")
 
     def reset(self):
         name = self.current_game()["name"]

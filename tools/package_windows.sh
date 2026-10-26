@@ -77,14 +77,17 @@ fi
 [[ ! -e $stage/gow3_pc/out/NvLowLatencyVk.dll ]] || { echo "NvLowLatencyVk.dll must not be packaged" >&2; exit 1; }
 
 cp gow3_pc/scripts/*.py "$stage/gow3_pc/scripts/"
-cp tools/probe_uncharted.py tools/hang_report.py tools/apply_update.py tools/play.py tools/install_update.py "$stage/tools/"
+cp tools/probe_uncharted.py tools/hang_report.py tools/apply_update.py tools/play.py tools/install_update.py \
+    tools/net_overlay.py "$stage/tools/"
 # Session recorder (a player runs Record-Session.cmd beside the game; it uses python\python.exe).
 cp tools/session_recorder.py "$stage/tools/"
 cp Record-Session.cmd "$stage/"
 # PkgTool (LibOrbisPkg, LGPL-3.0): Advanced -> Install game update unpacks the player's own update PKG.
 mkdir -p "$stage/tools/pkgtool"
 cp tools/pkgtool/PkgTool.exe tools/pkgtool/LibOrbisPkg.dll "$stage/tools/pkgtool/"
-cp launcher/uncharted_launcher.pyw launcher/updater.py launcher/widgets.py launcher/art.py "$stage/launcher/"
+# Every launcher module and data file (upstream 0.6.1 shipped without net_lan.py, which the
+# launcher imported at start: it did not open, GitHub #208).
+cp launcher/*.py launcher/*.pyw launcher/*.json "$stage/launcher/"
 # The package's version (tools/VERSION; the launcher's updates compare it with the releases).
 cp tools/VERSION "$stage/VERSION"
 cp launcher/assets/uncharted.ico launcher/assets/icon.png launcher/assets/grain.png "$stage/launcher/assets/"
@@ -172,7 +175,14 @@ if [[ -f gow3_pc/out/gow3_dlss.dll && ! -f $stage/gow3_pc/out/gow3_dlss.dll ]] &
         compgen -G "downloads/dlss-sdk-*/LICENSE.txt" > /dev/null; then
     cp gow3_pc/out/gow3_dlss.dll "$stage/gow3_pc/out/"
     mkdir -p "$licenses/nvidia-dlss" "$licenses/gow3-dlss-bridge"
-    cp downloads/dlss-sdk-*/LICENSE.txt "$licenses/nvidia-dlss/LICENSE.txt"
+    dlss_license=${NVIDIA_DLSS_LICENSE:-}
+    if [[ -z $dlss_license ]]; then
+        for file in downloads/dlss-sdk-*/LICENSE.txt; do
+            [[ -f $file ]] && { dlss_license=$file; break; }
+        done
+    fi
+    [[ -f $dlss_license ]] || { echo 'Need the DLSS license (NVIDIA_DLSS_LICENSE).' >&2; exit 1; }
+    cp "$dlss_license" "$licenses/nvidia-dlss/LICENSE.txt"
     cp gow3_pc/gpu/dlss_bridge/LICENSE.txt "$licenses/gow3-dlss-bridge/LICENSE.txt"
 fi
 [[ ! -e $stage/gow3_pc/out/nvngx_dlss.dll ]] || { echo "nvngx_dlss.dll must not be packaged" >&2; exit 1; }
@@ -207,8 +217,7 @@ if [[ -n $forbidden ]]; then
 fi
 
 rm -f dist/Uncharted-windows.zip
-(cd dist/stage && powershell -NoProfile -Command \
-    "Compress-Archive -Path Uncharted-windows -DestinationPath ../Uncharted-windows.zip")
+"$python_home/python.exe" -m zipfile -c dist/Uncharted-windows.zip "$stage"
 rm -rf dist/Uncharted-windows
 mv "$stage" dist/Uncharted-windows
 du -sh dist/Uncharted-windows dist/Uncharted-windows.zip
