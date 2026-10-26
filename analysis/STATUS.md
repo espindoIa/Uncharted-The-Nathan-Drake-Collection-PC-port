@@ -5276,3 +5276,10 @@ Fork `qequ/Uncharted-The-Nathan-Drake-Collection-PC-port`, branch `uncharted` (r
 - `launcher/uncharted_launcher.pyw`: `main()` lifts the window once (topmost for 0.5 s, `focus_force`), not for `--play` (the window is withdrawn there); a missing Pillow shows a message box before the exception, since pythonw has no console. The fork's other change in that commit, a message box and `launcher-error.log` when `main()` raises, was already here (`log_launcher_error`, `__main__` handler).
 - Verified (26 Oct): launcher syntax check exit 0; `test_uncharted_launcher_ui` 49 tests exit 0; `py -3 -c "...with_name('pythonw.exe')"` prints this PC's `pythonw.exe` (exit 0) and `pythonw` is also on PATH.
 - Not verified: the raise at start on a real double-click while another window has the focus; the `.cmd` on a PC without Python on PATH (only the `py` lookup line was run); a launch without Pillow.
+
+### Ported: the FSR pass waits for the game's frame (qequ fc1d782)
+
+- Bug present here: `Presenter::PrepareFrame` (`vk_presenter.cpp`, the non-upscaled display branch) made the display buffer ready for `eFragmentShader` only, while `FsrPass::Render` (`host_passes/fsr_pass.cpp`) reads it in compute shaders (EASU when the window is larger than the image, RCAS when equal: `Gow3Graphics::FsrPassRuns`). Nothing ordered the game's last draws before those reads. The fork saw tile-shaped holes in logos, menu text and chapter titles on an AMD RX 9060 XT (13 of 20 Uncharted 2 title frames damaged, 0 of 20 with the fix); its frame dumps never showed it because their own transfer barrier waits first.
+- Change: `eFragmentShader | eComputeShader` in that `Transit`, with the why as a comment. The upscaled branch (`DisplayOverride`) already ends with an `eAllCommands` barrier, so it is untouched. Cost: none measurable expected (a stage mask on an existing barrier).
+- Verified (26 Oct): `gow3_pc/build.sh` exit 0 in this worktree.
+- Not verified: any game run or frame capture; the bug on this PC's GPU (the symptom was seen on AMD only, this PC is NVIDIA: it may never have shown here, the barrier is required by the spec either way); no performance A/B.

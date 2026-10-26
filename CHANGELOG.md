@@ -6,6 +6,12 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Fix: the sharpening and upscaling pass could read a frame before the game finished drawing it
+  (from the qequ fork, 26 October).** On the paths where the port's own FSR 1 or RCAS pass runs
+  (window the size of the game's image with sharpening on, or a larger window with FSR 1), logos,
+  menu text and chapter titles could come out with tile-shaped holes, frame to frame (13 of 20 title
+  screen frames on the fork author's AMD RX 9060 XT). The pass now waits for the game's frame. Not
+  reproduced or measured on this PC's GPU.
 - **Launcher: starting from the source tree is easier to diagnose (from the qequ fork, 26 October).**
   `Start-Uncharted.cmd` finds `pythonw` through the Python launcher (`py`) when Python is not on
   PATH, the launcher raises its window once at start so it does not open behind the window in front,
