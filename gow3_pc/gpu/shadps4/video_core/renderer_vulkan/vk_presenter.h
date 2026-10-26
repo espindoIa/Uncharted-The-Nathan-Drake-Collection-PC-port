@@ -93,6 +93,7 @@ public:
     /// presentation); otherwise HDR means the guest's own PQ image, passed through.
     void SetHDR(bool enable, bool encode = false) {
         if (!IsHDRSupported()) {
+            pp_settings.hdr = 0; // the swapchain may have fallen back to SDR (Swapchain::Create)
             return;
         }
         swapchain.SetHDR(enable);

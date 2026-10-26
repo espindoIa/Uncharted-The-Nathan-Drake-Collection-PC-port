@@ -94,6 +94,20 @@ void Swapchain::Create(u32 width_, u32 height_) {
         return;
     }
 
+    // gow3 26 Oct 2026 (review): HDR can go away after start (Windows HDR turned off, window moved
+    // to an SDR monitor). Asking for HDR10 then fails the creation and kills the game: ask the
+    // surface again and fall back to SDR; the presenter's next SetHDR sees HasHDR() false.
+    if (needs_hdr) {
+        FindPresentFormat();
+        if (!supports_hdr) {
+            needs_hdr = false;
+            Gow3Settings::Get().hdr_supported = false;
+            ImGui::Core::OnSurfaceFormatChange(surface_format.format);
+            std::printf("HDR: the surface no longer offers HDR10, back to SDR\n");
+            std::fflush(stdout);
+        }
+    }
+
     SetSurfaceProperties();
 
     const std::array queue_family_indices = {
