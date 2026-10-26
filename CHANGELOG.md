@@ -6,6 +6,16 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **HDR highlights in the scene no longer ship the games' shader (26 October).** The scene HDR
+  (HDR output on, NVIDIA GPU, DLSS/FSR/TAA or the 1:1 path) used a replacement of the games'
+  tone pass that had been compiled from Naughty Dog's shader and sat in the repository and the
+  package. It is gone from both: the port now takes the tone pass the game itself provides when it
+  starts, adds its own HDR tone mapping (RenoDX, MIT, and the port's code) to it in memory and
+  nothing of the game's code is copied anywhere. If that fails (other GPUs, a game version that
+  does not match), the log says `HDR: no scene HDR (...)` and the HDR10 output carries the SDR
+  scene, as on GPUs without the support. With HDR off nothing changes. The package gains two
+  SPIRV-Tools libraries, about 4 MB (`libSPIRV-Tools-link.dll`, `libSPIRV-Tools-opt.dll`). Not tested on
+  an HDR display here.
 - **Fix: turning Windows HDR off (or moving the window to an SDR monitor) with HDR output on no
   longer closes the game (26 October).** The swapchain asked for HDR10 again when it was recreated
   and failed; it now asks the display first and falls back to SDR, as with HDR off. Turning HDR on
@@ -30,8 +40,8 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   picture is the game's own brightened to the peak you set, with the HUD, menus and the in-game
   overlay at their own brightness (**HDR peak / game / HUD brightness**, in nits: 203 is the HDR
   reference white). On NVIDIA GPUs with the DLSS, FSR 3/4 or TAA anti-aliasing modes the scene itself
-  also gets real highlights (a replacement of the games' tone pass, based on RenoDX, MIT; the package
-  carries its license), at the game's own size too (the launcher then takes the upscaling path at
+  also gets real highlights (the games' tone pass with RenoDX tone mapping, MIT, added at start; the
+  package carries its license), at the game's own size too (the launcher then takes the upscaling path at
   1:1; it is dropped again when the display offers no HDR10). The scene highlights need the
   velocity camera (`UNCHARTED_MOTION_SOURCE=velocity`); with the default flat camera HDR is only the
   HDR10 encoding of the game's SDR picture and the upscalers keep working. Turning HDR on or off in

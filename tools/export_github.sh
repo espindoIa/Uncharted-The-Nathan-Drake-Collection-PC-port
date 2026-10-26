@@ -61,10 +61,13 @@ while read -r path; do
     mkdir -p "$dest/gow3_pc/$path"
 done <<< "$submodules"
 
-forbidden=$(cd "$dest" && find . -path ./.git -prune -o \( -iname eboot.bin -o -iname '*.elf' \
+# 26 Oct 2026: gow3_pc/hdr/hdr_tone.spv is the port's own HDR epilogue (RenoDX + the port's code, no
+# game code), the one SPIR-V file allowed; fs_*_hdr.* would be the game's tone pass (derived at run
+# time from the player's game instead, gpu/shim/gow3_hdr_tone.cpp) and never goes out.
+forbidden=$(cd "$dest" && find . -path ./.git -prune -o -path ./gow3_pc/hdr/hdr_tone.spv -o \( -iname eboot.bin -o -iname '*.elf' \
     -o -iname sce_sys -o -iname savedata -o -iname '*.log' -o -iname 'probe*.ini' -o -iname '*.pkg' \
     -o -iname '*.psarc' -o -iname '*.pak' -o -iname 'boot*.bin' -o -iname '*.spv' -o -iname '*.dmp' \
-    -o -iname '*.sav' \) -print
+    -o -iname '*.sav' -o -iname 'fs_*_hdr.*' \) -print
     # 25 Oct 2026: extracted UI art under gow3_pc/assets/ui/ may carry these generic names
     find . -path ./.git -prune -o -path ./gow3_pc/assets/ui -prune -o \( -iname 'content.bin' \
         -o -iname 'entry.bin' -o -iname window_icon.bmp \) -print)  # 20 Oct 2026 audit: window_icon.bmp is generated from Sony's icon0.png

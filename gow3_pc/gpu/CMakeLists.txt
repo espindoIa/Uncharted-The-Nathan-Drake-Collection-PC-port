@@ -43,6 +43,9 @@ endif()
 find_package(Vulkan REQUIRED)
 find_package(fmt REQUIRED)
 find_package(SPIRV-Tools CONFIG REQUIRED)
+# gow3 26 Oct 2026: shim/gow3_hdr_tone.cpp links the HDR epilogue into the translated tone pass.
+find_package(SPIRV-Tools-opt CONFIG REQUIRED)
+find_package(SPIRV-Tools-link CONFIG REQUIRED)
 find_package(Boost REQUIRED)
 # gow3 (Windows): MSYS2 has no magic_enum/miniz packages; the submodules are used instead.
 find_package(magic_enum QUIET)
@@ -182,7 +185,7 @@ if (NOT WIN32)
     target_link_options(gow3gpu PRIVATE -Wl,--allow-shlib-undefined)
 endif()
 target_link_libraries(gow3gpu PRIVATE ffx-vulkan::portable ffx-vulkan::fsr4-v07-vulkan)
-target_link_libraries(gow3gpu PRIVATE SPIRV-Tools)
+target_link_libraries(gow3gpu PRIVATE SPIRV-Tools SPIRV-Tools-link)
 target_link_libraries(gow3gpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
     tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit)
 target_include_directories(gow3gpu PRIVATE third_party/xbyak)
@@ -362,6 +365,12 @@ target_include_directories(ui-composition-test PRIVATE ..)
 add_executable(hdr-session-test EXCLUDE_FROM_ALL ../tests/test_hdr_session.cpp)
 target_compile_options(hdr-session-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(hdr-session-test PRIVATE ..)
+
+add_executable(hdr-tone-test EXCLUDE_FROM_ALL ../tests/test_hdr_tone.cpp shim/gow3_hdr_tone.cpp)
+target_compile_options(hdr-tone-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_compile_definitions(hdr-tone-test PRIVATE
+    GOW3_HDR_EPILOGUE="${CMAKE_CURRENT_SOURCE_DIR}/../hdr/hdr_tone.spv")
+target_link_libraries(hdr-tone-test PRIVATE SPIRV-Tools SPIRV-Tools-link)
 
 add_executable(hud-layout-test EXCLUDE_FROM_ALL ../tests/test_hud_layout.cpp)
 target_compile_options(hud-layout-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)

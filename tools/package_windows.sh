@@ -76,10 +76,13 @@ else
 fi
 [[ ! -e $stage/gow3_pc/out/NvLowLatencyVk.dll ]] || { echo "NvLowLatencyVk.dll must not be packaged" >&2; exit 1; }
 
-# HDR tone replacement: only the checked-in SPIR-V (its HLSL source stays in the repository; the
-# RenoDX license goes with the others below).
+# HDR scene: only the port's own epilogue (hdr_tone.spv: RenoDX tone mapping, MIT, and the port's
+# code; the RenoDX license goes with the others below). The games' tone pass shader is Naughty Dog /
+# Sony Interactive Entertainment code and is never packaged: the runtime derives it from the
+# player's own game at run time (gow3_pc/gpu/shim/gow3_hdr_tone.cpp; owner's decision, 26 Oct 2026).
 mkdir -p "$stage/gow3_pc/out/hdr"
-cp gow3_pc/hdr/*.spv "$stage/gow3_pc/out/hdr/"
+cp gow3_pc/hdr/hdr_tone.spv "$stage/gow3_pc/out/hdr/"
+[[ $(ls "$stage/gow3_pc/out/hdr") == hdr_tone.spv ]] || { echo "the hdr folder must hold hdr_tone.spv only" >&2; exit 1; }
 cp gow3_pc/scripts/*.py "$stage/gow3_pc/scripts/"
 cp tools/probe_uncharted.py tools/hang_report.py tools/apply_update.py tools/play.py tools/install_update.py \
     tools/net_overlay.py "$stage/tools/"
@@ -208,7 +211,7 @@ find "$stage" -name __pycache__ -prune -exec rm -rf {} +
 # Nothing from the game or a player (game executables, saves, shader caches, logs) may ship.
 forbidden=$(find "$stage" \( -iname eboot.bin -o -iname '*.elf' -o -iname sce_sys -o -iname savedata \
     -o -iname cache -o -iname '*.log' -o -iname 'probe*.ini' -o -iname '*.pkg' -o -iname '*.psarc' \
-    -o -iname '*.pak' -o -iname 'boot*.bin' \) -print)
+    -o -iname '*.pak' -o -iname 'boot*.bin' -o -iname 'fs_*_hdr.*' \) -print)  # fs_*_hdr.*: the game's HDR tone pass
 if [[ -n $forbidden ]]; then
     echo "Package holds files that must not ship:" >&2
     echo "$forbidden" >&2

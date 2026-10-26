@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <vector>
 #include "common/assert.h"
+#include "gow3_hdr_tone.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
 namespace Vulkan {
@@ -103,6 +104,9 @@ vk::ShaderModule CompileSPV(std::span<const u32> code, vk::Device device) {
     auto [module_result, module] = device.createShaderModule(shader_info);
     ASSERT_MSG(module_result == vk::Result::eSuccess, "Failed to compile SPIR-V shader: {}",
                vk::to_string(module_result));
+    // gow3: the HDR10 scene derives its tone pass shadow shader from the translated tone pass
+    // (GraphicsPipeline asks for it by module).
+    Gow3HdrTone::Remember(u64(static_cast<VkShaderModule>(module)), code);
     return module;
 }
 

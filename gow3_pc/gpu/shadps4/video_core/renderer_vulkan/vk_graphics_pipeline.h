@@ -122,7 +122,7 @@ public:
     }
 
     /// gow3: HDR10 tone pass: this draw again with a replacement fragment shader
-    /// (hdr/fs_<hash>_hdr.spv) into an RGBA16F shadow target. Null for other pipelines.
+    /// (derived at run time, shim/gow3_hdr_tone.cpp) into an RGBA16F shadow target. Null for other pipelines.
     vk::Pipeline HdrShadowHandle() const noexcept {
         return *hdr_shadow_pipeline;
     }
@@ -142,7 +142,7 @@ public:
     }
 
 private:
-    void BuildDescSetLayout(bool preloading);
+    void BuildDescSetLayout(bool preloading, vk::ShaderModule fragment);
 
 private:
     GraphicsPipelineKey key;

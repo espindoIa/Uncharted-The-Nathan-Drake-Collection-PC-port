@@ -17,6 +17,7 @@
 
 #include "common/assert.h"
 #include "core/emulator_settings.h"
+#include "gow3_hdr_tone.h"
 #include "gow3_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_discard_frag.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
@@ -83,47 +84,13 @@ u64 NsSince(Clock::time_point start) {
     return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
 }
 
-// gow3: HDR10 tone pass replacements: SPIR-V fragment shaders named fs_<guest hash>_hdr.spv in
-// the hdr folder next to the executable (GOW3_HDR_SHADER_DIR overrides), read once per hash.
-// They keep the translated shader descriptors and push constants, plus a read-only settings
-// buffer at binding 12 for live peak and diffuse-white values.
-const std::vector<u32>* HdrShadowShader(u64 ps_hash) {
-    static std::mutex mutex;
-    static std::unordered_map<u64, std::vector<u32>> shaders;
-    std::scoped_lock lock{mutex};
-    const auto [it, fresh] = shaders.try_emplace(ps_hash);
-    if (fresh) {
-        std::filesystem::path dir;
-        if (const char* env = std::getenv("GOW3_HDR_SHADER_DIR"); env && *env) {
-            dir = env;
-        } else {
-#ifdef _WIN32
-            wchar_t path[MAX_PATH];
-            const DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
-            dir = std::filesystem::path(std::wstring(path, length)).parent_path() / "hdr";
-#else
-            std::error_code error;
-            const auto executable = std::filesystem::read_symlink("/proc/self/exe", error);
-            dir = (error ? std::filesystem::current_path() : executable.parent_path()) / "hdr";
-#endif
-        }
-        const auto file = dir / fmt::format("fs_{:08x}_hdr.spv", u32(ps_hash));
-        if (std::ifstream in{file, std::ios::binary | std::ios::ate}) {
-            const auto bytes = size_t(in.tellg());
-            if (bytes >= 20 && bytes % 4 == 0) {
-                it->second.resize(bytes / 4);
-                in.seekg(0);
-                in.read(reinterpret_cast<char*>(it->second.data()), std::streamsize(bytes));
-                if (!in || it->second[0] != 0x07230203) {
-                    it->second.clear();
-                    return nullptr;
-                }
-                std::printf("HDR: tone pass shader %s\n", file.string().c_str());
-                std::fflush(stdout);
-            }
-        }
-    }
-    return it->second.empty() ? nullptr : &it->second;
+// gow3: HDR10 tone pass shadow shader: the translated tone pass (guest hash 3371ae8d) with the
+// port's HDR epilogue linked in, derived at run time from the player's own game (shim/
+// gow3_hdr_tone.cpp; no game code is distributed). Keeps the translated descriptors and push
+// constants, plus a read-only settings buffer at binding 12 for live peak and diffuse-white
+// values. Empty when it cannot be derived: the scene stays SDR.
+std::vector<u32> HdrShadowShader(vk::ShaderModule fragment) {
+    return Gow3HdrTone::Shadow(u64(static_cast<VkShaderModule>(fragment)));
 }
 
 // gow3: the HDR10 chain's extra pipelines (float-target variants, the tone pass shadow and its
@@ -172,7 +139,7 @@ GraphicsPipeline::GraphicsPipeline(
     const auto started = Clock::now();
     const vk::Device device = instance.GetDevice();
     std::ranges::copy(infos, stages.begin());
-    BuildDescSetLayout(preloading);
+    BuildDescSetLayout(preloading, modules[u32(Shader::SwStage::Fragment)]);
     const auto debug_str = GetDebugString();
 
     const vk::PushConstantRange push_constants = {
@@ -613,15 +580,15 @@ GraphicsPipeline::GraphicsPipeline(
     // gow3: HDR10 tone pass shadow (TemporalUpscaler::HdrShadowTarget): this pipeline with the
     // replacement fragment shader and an RGBA16F target. Brightness comes from binding 12.
     const auto* fragment_info = stages[u32(Shader::SwStage::Fragment)];
-    const std::vector<u32>* shadow_code =
+    const std::vector<u32> shadow_code =
         hdr_settings_binding && fragment_info && key.num_color_attachments == 1 &&
                 !needs_square_pass
-            ? HdrShadowShader(fragment_info->pgm_hash)
-            : nullptr;
-    if (shadow_code && hdr_settings_binding) {
+            ? HdrShadowShader(modules[u32(Shader::SwStage::Fragment)])
+            : std::vector<u32>{};
+    if (!shadow_code.empty() && hdr_settings_binding) {
         const auto module = Check<"create HDR shadow shader">(device.createShaderModule({
-            .codeSize = shadow_code->size() * sizeof(u32),
-            .pCode = shadow_code->data(),
+            .codeSize = shadow_code.size() * sizeof(u32),
+            .pCode = shadow_code.data(),
         }));
         auto shadow_stages = shader_stages;
         for (auto& stage_ci : shadow_stages) {
@@ -707,7 +674,7 @@ template void GraphicsPipeline::GetVertexInputs(
     VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT>& divisors,
     VertexInputs<AmdGpu::Buffer>& guest_buffers, u32 step_rate_0, u32 step_rate_1) const;
 
-void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
+void GraphicsPipeline::BuildDescSetLayout(bool preloading, vk::ShaderModule fragment) {
     boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;
     u32 binding{};
 
@@ -751,7 +718,7 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
     const auto* ps = stages[u32(Shader::SwStage::Fragment)];
     hdr_settings_binding = ps && u32(ps->pgm_hash) == 0x3371ae8d && binding == 12 &&
                            HdrPipelines() && HdrShadowShaderUsable(instance) &&
-                           HdrShadowShader(ps->pgm_hash);
+                           !HdrShadowShader(fragment).empty();
     if (hdr_settings_binding) {
         bindings.push_back({.binding = binding++,
                             .descriptorType = vk::DescriptorType::eStorageBuffer,

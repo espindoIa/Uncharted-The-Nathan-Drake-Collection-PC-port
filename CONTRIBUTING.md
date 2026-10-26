@@ -101,6 +101,9 @@ Co-Authored-By: ...
   One exception (the owner, 25 Oct 2026): the games' UI art (font glyphs, button icons, HUD shapes and
   the textures or archive extracts they come from) may go in `gow3_pc/assets/ui/` only. Executables,
   PKGs, whole pak/psarc archives, saves, dumps, logs and shader caches stay out everywhere.
+  No game code either (owner, 26 Oct 2026): no decompiled or disassembled game shader or function, and
+  no SPIR-V or binary made from one, in the tree, the package or the public export. A fix that needs one
+  derives it at run time from the player's own files (as `gow3_pc/gpu/shim/gow3_hdr_tone.cpp` does).
   Stage files by name (`git add <file>`), not `git add -A`.
 
 `.gitmessage` holds the body layout. To have Git open it for every commit:

@@ -16,6 +16,8 @@ perf.data
 # Local leftovers: patch backups, generated SPIR-V, analysis outputs, test saves and routes
 *.orig
 /*.spv
+# The games' own tone pass (HDR) is derived at run time from the player's files, never committed
+/hdr/fs_*
 /1060/
 /docs/savedata_route/
 /docs/route*.txt
