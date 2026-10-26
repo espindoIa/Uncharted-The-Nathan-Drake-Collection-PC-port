@@ -276,6 +276,12 @@ enum : std::uint64_t {
     /// the scene jitter like the GOW3_JITTER_PS passes, and full-screen jitter is scaled to the
     /// pass's own size (25 Oct 2026, player: lamp shadows flicker on and off under DLSS/TAA/FSR).
     ShadowPassJitter = 1ull << 45,
+    /// Bit set: old behaviour (read live). Clear, motion-vector vertex shaders and their pipeline
+    /// keys go into the disk cache with placeholder buffer addresses (vk_motion_addresses.h) and
+    /// the loaders patch in the session's, so the warm-up builds them before gameplay (25 Oct 2026,
+    /// U1 boot: 97 ms stall at the first gameplay frame, 44 compiles = 20 motion vertex shaders
+    /// and 24 pipelines on every boot, because their SPIR-V held the session's addresses).
+    MotionShaderCache = 1ull << 52,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

@@ -6,6 +6,13 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Fix: Uncharted 1 no longer freezes for a moment when gameplay starts.** The shaders that give
+  moving objects their motion for DLSS, DLAA and FSR are now kept in the shader cache, so they are
+  prepared while the game loads instead of on the first frames of play (a 0.1-0.3 s hitch on every
+  start since 24 October). The first start after this update still prepares them once. To compare
+  with the old behaviour, set bit 52 (4503599627370496) in the second number of
+  `disabled-optimizations.txt` before starting the game.
+
 - **Launcher: the games' own lettering.** The title is the UNCHARTED of the Collection's logo, worn
   as on the games' title screens, and every text uses the font of the games' menus and subtitles.
   Both come from the games' files (the logo from Uncharted 1's menu, the font redrawn from its
