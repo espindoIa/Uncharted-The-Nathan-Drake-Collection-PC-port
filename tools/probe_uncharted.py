@@ -1663,15 +1663,18 @@ def run_game(args, game, executable, guest_args, loadexec, app0=None, overlays=(
         env.setdefault("GOW3_READBACKS", "2")
         print("Readbacks: precise (analysis/uncharted-user/precise-readbacks)")
     # Test settings for the next start without code changes: KEY=VALUE lines (# comments) in
-    # analysis/uncharted-user/test-env.txt; they override everything set above.
-    test_env = user / "test-env.txt"
-    if test_env.exists():
+    # analysis/uncharted-user/test-env.txt, then test-env-u1.txt (-u2, -u3) for one game only (qequ
+    # fork, 16 Oct: a mode can be tried in one game without touching the others); they override
+    # everything set above.
+    for test_env in (user / "test-env.txt", user / f"test-env-{game_key}.txt"):
+        if not test_env.exists():
+            continue
         for line in test_env.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 key, value = line.split("=", 1)
                 env[key.strip()] = value.strip()
-                print(f"Test setting: {key.strip()}={value.strip()}")
+                print(f"Test setting ({test_env.name}): {key.strip()}={value.strip()}")
     # GPU-written constants back to guest memory for the SRT walker: write "auto"/"off" or
     # "<lo> <hi>" (hex range, one-off) into this file. GOW3_SYNC_GPU_CONSTANTS=1 starts it on.
     if diagnostics:

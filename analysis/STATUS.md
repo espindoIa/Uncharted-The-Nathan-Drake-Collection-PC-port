@@ -5283,3 +5283,10 @@ Fork `qequ/Uncharted-The-Nathan-Drake-Collection-PC-port`, branch `uncharted` (r
 - Change: `eFragmentShader | eComputeShader` in that `Transit`, with the why as a comment. The upscaled branch (`DisplayOverride`) already ends with an `eAllCommands` barrier, so it is untouched. Cost: none measurable expected (a stage mask on an existing barrier).
 - Verified (26 Oct): `gow3_pc/build.sh` exit 0 in this worktree.
 - Not verified: any game run or frame capture; the bug on this PC's GPU (the symptom was seen on AMD only, this PC is NVIDIA: it may never have shown here, the barrier is required by the spec either way); no performance A/B.
+
+### Ported: per-game test settings (half of qequ e061a96)
+
+- `probe_uncharted.py` reads `analysis/uncharted-user/test-env-u1.txt` (`-u2`, `-u3`) after `test-env.txt`, so a `GOW3_*` experiment can run in one game without touching the others; the "Test setting" log line names the file. `session_recorder.py` copies the three files into a session's `config\` like `test-env.txt`. Absent files change nothing.
+- The other half of that commit, `GOW3_ASYNC_READBACK=0` by default for Uncharted 3, was not taken: see the decision list below.
+- Verified (26 Oct): `py_compile` of both scripts exit 0; `test_session_recorder` 15 tests exit 0. The loop itself has no test (it sits inside `run_game`).
+- Not verified: a boot that reads a `test-env-u3.txt`.

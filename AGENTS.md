@@ -52,7 +52,7 @@ The toolchain is MSYS2 CLANG64. From Git Bash, wrap commands like this:
    Its lettering is the games' own (`gow3_pc/assets/ui/`, built by `tools/build_ui_art.py` with a manual VectorCraft trace step): the menus' font as `drake-serial.ttf`, loaded privately by `art.load_game_font()` before Tk starts, and the Collection logo's UNCHARTED as `wordmark.svg`, rasterised at the exact size per screen scale by `art.svg_mask()`. Missing files fall back to Segoe UI / Bahnschrift and plain text.
    `launcher/art.py` draws the panels and icons at 4x and reduces them (`rounded_image`, `icon`), `launcher/widgets.py` holds the shared widgets, and `launcher/updater.py` the self-update.
 2. `tools/probe_uncharted.py` prepares the executable with `gow3_pc/scripts/` (patches, render-resolution rewrite, update 1.02 overlay). It turns the ini into `GOW3_*` environment variables and starts `gow3-probe.exe`. Some choices are decided there at start, which is why they need a restart: an upscaler on or off (camera source, scene size), the render resolution, readback modes.
-3. `UNCHARTED_*` variables and `analysis/uncharted-user/test-env.txt` override what it sets.
+3. `UNCHARTED_*` variables and `analysis/uncharted-user/test-env.txt` override what it sets; `test-env-u1.txt` (`-u2`, `-u3`) after it, for one game only (since 26 Oct, from the qequ fork).
 
 **Runtime (`gow3_pc/src/`).**
 - `probe.c` is the loader.

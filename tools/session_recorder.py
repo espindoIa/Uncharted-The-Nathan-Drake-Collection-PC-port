@@ -906,7 +906,8 @@ class Session:
                                              "from the ini files copied into config\\ plus test-env.txt.")
         config = self.dir / "config"
         config.mkdir(exist_ok=True)
-        for name in ("probe-u1.ini", "probe-u2.ini", "probe-u3.ini", "test-env.txt", "disabled-optimizations.txt"):
+        for name in ("probe-u1.ini", "probe-u2.ini", "probe-u3.ini", "test-env.txt", "test-env-u1.txt",
+                     "test-env-u2.txt", "test-env-u3.txt", "disabled-optimizations.txt"):
             if (self.user / name).exists():
                 shutil.copy2(self.user / name, config / name)
         write()
