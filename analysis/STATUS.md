@@ -41,6 +41,7 @@ New entries go at the end, dated, measured numbers only.
 - Community fork work taken in (26 Oct): `26 October 2026: fork work: U2 ultrawide HUD` (the shadows commit was already in 0.6.1), `26 October 2026: fork work: batched deferred fences and counter defaults`
 - Test fix: `upscaler-support-test` (the process-wide `GOW3_RENDER_RES` cache): `26 October 2026: upscaler-support-test fixed`
 - HDR10 output, scene HDR (RenoDX tone pass), movie white bar, U2 water reflections, device loss on display changes (moistman7, PR #156): `26 October 2026: fork work: HDR10 output`
+- qequ fork (Alvaro Frias, branch `uncharted`, based on upstream 0.1.2) reviewed commit by commit: what was ported, what was already here, what was skipped and why: `26 October 2026: fork work: qequ review`
 
 - HD UI textures (bigger DDS replacements keyed by content hash, GOW3_TEX_DUMP, how unsafe shader reads drop them): `HD UI textures (25 Oct 2026)`
 - HD UI editor finishing, native VectorCraft/PhotoCraft sources and 4096 px menu masks: `26 October 2026: UI art finishing in VectorCraft and PhotoCraft`
@@ -5257,3 +5258,14 @@ Verified (26 Oct 2026, exit codes): `gow3_pc/build.sh` 0 (full build in the work
 
 Not verified: any game run; HDR output on a real HDR10 display (brightness, PQ values, the RenoDX scene on NVIDIA, movies in HDR, display-mode changes with DLSS: moistman7 tested those on his machine, not here); the movie bar fix at 3440; the water reflection in game; that the fork's Frame Generation, Reflex and HUD paths behave with HDR on (the HDR path and Frame Generation were only merged, `PresentGenerated` skips frames whose HDR state differs from the swapchain's as before); other GPU vendors for the scene shader (it stays SDR inside HDR10 output there).
 
+
+## 26 October 2026: fork work: qequ review
+
+Fork `qequ/Uncharted-The-Nathan-Drake-Collection-PC-port`, branch `uncharted` (ref `refs/fk/qequ`), 18 commits not in this tree, written against upstream 0.1.2. Each was checked against what this tree already has before anything was taken. Ported items are below as they land; the decision for every commit is at the end of this section.
+
+### Ported: `gow3_pc/scripts/verify_dump.py` (qequ 7d3a503)
+
+- A read-only check of a game folder for the damage a bad dump or a PKG extraction leaves (zero-filled files or 64 KiB block ends, random bytes inside executables, wrong magic, missing files). Exit 0 nothing found, 1 damage, 2 could not check. `python gow3_pc/scripts/verify_dump.py <game folder> [--json out.json]`; it imports `parse_self`, `sfo`, `span`, `unpack` from `prepare.py` and changes nothing. Nothing in the repo did this: `install_update.py` only checks the update package.
+- Changed from the fork: the by-design zero file `sce_sys/psreserved.dat` is matched by path suffix. The Collection keeps one in `NATHANDRAKEPACK1/sce_sys/`, and the fork's exact-path test reported it as damage on the player's own CUSA02320; the closing message no longer points at the fork's `analysis/ROADMAP.md`.
+- Verified (26 Oct): `test_verify_dump` 12 tests OK (one new: the pack-folder reserved file); on the player's `Jogo\CUSA02320`: 15,185 files, exit 0 (1 false finding before the suffix fix). `test_prepare` exit 0.
+- Not verified: CUSA02344 (not on this PC); that the heuristics catch damage inside packed level data (the script says it cannot).
