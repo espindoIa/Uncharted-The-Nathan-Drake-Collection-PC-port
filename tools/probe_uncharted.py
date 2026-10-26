@@ -1303,8 +1303,12 @@ def native_hdr_composite(env, game_key, render_size, hdr_on):
     Read at start: switching HDR on in the game takes a restart for the scene.
     UNCHARTED_HDR_NATIVE=0 keeps the native path (anti-aliasing before post processing, SDR scene).
     The launcher cannot see the display: without HDR output (no HDR display) the renderer removes
-    the variables listed in GOW3_COMPOSITE_NATIVE_ENV and the session is the native one."""
+    the variables listed in GOW3_COMPOSITE_NATIVE_ENV and the session is the native one.
+    Only with the velocity camera (UNCHARTED_MOTION_SOURCE=velocity): GOW3_RENDER_RES sends the
+    fork's default camera (flat) to the old compatibility path, where the upscalers stop and
+    scene HDR needs VelocityMode(); with flat, HDR is the HDR10 encoding of the SDR image only."""
     if ("GOW3_RENDER_RES" in env or game_key not in ("u1", "u2", "u3") or not hdr_on
+            or os.environ.get("UNCHARTED_MOTION_SOURCE", "") != "velocity"
             or os.environ.get("UNCHARTED_TEMPORAL_AA", "1") == "0"
             or os.environ.get("UNCHARTED_HDR_NATIVE", "1") == "0"):
         return False

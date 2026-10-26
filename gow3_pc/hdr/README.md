@@ -5,6 +5,9 @@ Experimental HDR scene path for the Vulkan port. All three games use tone hash
 DLSS/DLAA, FSR 3/4, TAA and the stretch with upscaling off receive the HDR scene.
 At native resolution the launcher enables the same composition path at 1:1, and the
 renderer drops it again when the display offers no HDR10. `UNCHARTED_HDR_NATIVE=0` opts out.
+This needs the velocity camera (`UNCHARTED_MOTION_SOURCE=velocity`): with the fork's default flat
+camera the launcher does not set `GOW3_RENDER_RES` (it would end the upscalers), the scene HDR
+needs `VelocityMode()`, and only the HDR10 encoding of the SDR image exists.
 
 Nothing of this is built with HDR off: the float-target pipelines, the tone pass
 shadow and binding 12 exist only when HDR is on at start on an HDR10 display

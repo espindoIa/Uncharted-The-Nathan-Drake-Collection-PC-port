@@ -25,9 +25,11 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   reference white). On NVIDIA GPUs with the DLSS, FSR 3/4 or TAA anti-aliasing modes the scene itself
   also gets real highlights (a replacement of the games' tone pass, based on RenoDX, MIT; the package
   carries its license), at the game's own size too (the launcher then takes the upscaling path at
-  1:1; it is dropped again when the display offers no HDR10). Turning HDR on or off in the game
-  switches the output at once; the scene highlights need a restart. Without HDR the game is
-  unchanged. Environment: `UNCHARTED_HDR_NATIVE=0` keeps the plain native path. Not tested on a
+  1:1; it is dropped again when the display offers no HDR10). The scene highlights need the
+  velocity camera (`UNCHARTED_MOTION_SOURCE=velocity`); with the default flat camera HDR is only the
+  HDR10 encoding of the game's SDR picture and the upscalers keep working. Turning HDR on or off in
+  the game switches the output at once; the scene highlights need a restart. Without HDR the game
+  is unchanged. Environment: `UNCHARTED_HDR_NATIVE=0` keeps the plain native path. Not tested on a
   real HDR display here.
 - **Fix: movies above 1080p no longer have a white bar at the right edge** (moistman7; Uncharted 2
   at 3440 wide and other sizes that are not a multiple of 32).

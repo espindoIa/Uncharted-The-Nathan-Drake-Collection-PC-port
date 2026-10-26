@@ -5,7 +5,8 @@ from unittest import mock
 
 from probe_uncharted import native_hdr_composite
 
-OPT_OUTS = {"UNCHARTED_TEMPORAL_AA": "1", "UNCHARTED_HDR_NATIVE": "1"}
+OPT_OUTS = {"UNCHARTED_TEMPORAL_AA": "1", "UNCHARTED_HDR_NATIVE": "1",
+            "UNCHARTED_MOTION_SOURCE": "velocity"}
 
 
 class NativeHdrCompositeTests(unittest.TestCase):
@@ -39,6 +40,9 @@ class NativeHdrCompositeTests(unittest.TestCase):
             ({}, {"game": "other"}),
             ({}, {"UNCHARTED_HDR_NATIVE": "0"}),
             ({}, {"UNCHARTED_TEMPORAL_AA": "0"}),
+            # The default (flat) camera: GOW3_RENDER_RES would end its upscalers (19 Oct merge).
+            ({}, {"UNCHARTED_MOTION_SOURCE": "flat"}),
+            ({}, {"UNCHARTED_MOTION_SOURCE": ""}),
         ]
         for env, options in cases:
             before = dict(env)
