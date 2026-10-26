@@ -1731,22 +1731,24 @@ bool Presenter::PresentGenerated(Frame* frame) {
     }
     Dlss* dlss = Dlss::Get();
     const auto& inputs = frame->frame_gen_inputs;
-    const vk::Format format = swapchain.GetSurfaceFormat().format;
+    // gow3 26 Oct 2026: the frame images' format (10-bit while HDR10 output is on, RecreateFrame).
+    const vk::Format format = swapchain.GetImageFormat();
     const Dlss::FrameGenDesc desc{frame->width, frame->height, inputs.depth.width,
                                   inputs.depth.height, format};
     if (frame_gen_failed == desc) {
         return false;
     }
-    static const bool storable = [&] {
-        const auto features = instance.GetPhysicalDevice().getFormatProperties(format);
-        const bool ok = bool(features.optimalTilingFeatures & vk::FormatFeatureFlagBits::eStorageImage);
-        if (!ok) {
+    static std::array<bool, 2> storable_said{};
+    const bool storable = bool(instance.GetPhysicalDevice().getFormatProperties(format)
+                                   .optimalTilingFeatures &
+                               vk::FormatFeatureFlagBits::eStorageImage);
+    if (!storable) {
+        bool& said = storable_said[swapchain.GetHDR()];
+        if (!said) {
+            said = true;
             std::printf("Frame generation: off (%s cannot be a storage image)\n",
                         vk::to_string(format).c_str());
         }
-        return ok;
-    }();
-    if (!storable) {
         return false;
     }
     auto& scheduler = present_scheduler;
