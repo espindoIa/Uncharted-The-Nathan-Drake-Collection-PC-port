@@ -47,6 +47,7 @@ New entries go at the end, dated, measured numbers only.
 - U3 visual and frame-rate reports (24 Oct): `Market hitches: diagnostics, not reproduced (24 Oct 2026)`, `U3 Sully shirt stretched: LDS out of bounds (24 Oct 2026)`, `U3 chapter 2 frame drop: player capture, stage B limit, two opt-ins re-measured (24 Oct 2026)`, `Crowd skinning dispatch runs (24 Oct 2026, opt-in)`, `U3 blur suspects: jitter and DOF diagnostics (24 Oct 2026)`
 - DLAA LOD bias: `21 October 2026 (night): DLAA texture LOD bias -1 (toggle bit 4096)`
 - U1 treasure models: `24 October 2026 (night): U1 treasure models, synchronous shaders again`
+- U1 stall at the first gameplay frame (motion shaders now cached, `_ldsb` cache misses): `U1 gameplay-start stall: motion-vector shaders cached (25 Oct 2026)`
 - Launcher lettering (the games' font and logo, vector, `tools/build_ui_art.py`): `25 October 2026: launcher lettering from the games' files`
 
 - Launcher redesign (stage, per-game colour, 4K icons, trophy coins): `Launcher redesign and 4K-sharp drawing (25 Oct 2026)`
@@ -4985,3 +4986,72 @@ Second pass, same day (user: vectorize both and keep them sharp at other resolut
 - Checked: the launcher built at scale 1.0, 1.5 and 2.0 (fake Tk scaling, PrintWindow capture): logo and text sharp at 2x; 40 launcher UI tests OK. Not checked: real 4K display, ClearType on.
 
 Checked (first pass): the launcher from source at 1x (window capture): logo and font everywhere, Display layout as before (f_small at 11 pt wrapped the resolution choices, so it stays 10); `test_uncharted_launcher_ui` 40 tests OK. Not checked: 150% scale, the packaged zip, Wine/Proton (no gdi32 private fonts there: falls back), the Europe CUSA02344 pak offsets (the build script finds the texture by name, so it should work).
+
+## U1 gameplay-start stall: motion-vector shaders cached (25 Oct 2026)
+
+Symptom: since U1 compiles shaders synchronously again (24 Oct), every boot stalled once at the
+first gameplay frames: 97-277 ms frames with 44-73 compiles. 25 Oct 15:52 and 15:53 boots, same
+counts both times: "97.3 ms frame; ... 44 compiles 80.4 ms; graphics shaders 9 7.2 ms + variants
+11 8.5 ms, graphics pipelines 24 64.6 ms", after "Pipeline warm-up: 179 of 2525 pipelines".
+
+Two separate causes, both found in the on-disk cache (analysis/uncharted-user/cache/CUSA02320-eboot):
+
+1. Why the warm-up built only 179 of 2525. A replay of the warm-up's file checks (node script over
+   the keys, metas and binaries): 2,093 of the 2,476 graphics keys failed only because a stage's
+   SPIR-V existed under its pre-24-Oct name (`<hash>_<perm>.spv`) while the warm-up asked for
+   `<hash>_<perm>_ldsb.spv`. 4a489cf (24 Oct, LDS bounds) adds `_ldsb` to every shader's binary
+   name (ShaderBinaryName), graphics too, though the pass only changes compute shaders; the 1,541
+   metas of 21 Oct (version 12) still loaded. A boot rewrote only the binaries it compiled, so the
+   gap shrank slowly (1,326 missing files on 24 Oct 18:32, 1,102 on 25 Oct 15:53). Not changed
+   here: dc96dab (25 Oct 11:21, ShaderMetaVersion 14) accepts no older meta, so the first boot of a
+   current build rebuilds every shader it uses anyway (the 15:53 exe predated it: every meta on
+   disk was v12 or v13). The `_ldsb` name on graphics shaders is harmless after that; only a
+   change of GOW3_LDS_BOUNDS would rename them again for nothing.
+2. Why the same ~44 compiles came back on every boot. They were the object-motion vertex shaders
+   (hw.vs.motion_vectors, DLSS/DLAA/FSR motion) and their pipelines. Their SPIR-V held this
+   session's buffer device addresses (MotionVectors::params_address, positions_address) as 64-bit
+   constants, so LoadShaderMeta rejected them and RegisterPipelineData never saved their keys
+   (fbf5924, 21 Oct): they compiled at first use in every session. With async shaders (U1 until
+   24 Oct) that happened in the background; synchronous, it stalls. Evidence: the 15:53 boot
+   compiled 24 graphics pipelines and wrote no g_*.key file; it wrote 47 metas, 46 of them vertex
+   metas with hw.vs.motion_vectors = 1 (byte 132 of a v13 meta). Side effect: a motion variant
+   takes the next free permutation index of its program, and with few permutations loaded (cause
+   1) it overwrote the meta and binary of slots that saved non-motion keys pointed at (those 46),
+   so those keys failed at the next warm-up too.
+
+Fix (Disabled2 bit 52 `MotionShaderCache`, read live; set = old behaviour):
+- EmitVertexMotion uses exactly two address constants, the params and positions bases (the +16
+  of the offsets load is now an OpIAdd in the shader).
+- RegisterShaderBinary stores those two constants as placeholders (0x4d4f54494f4e0001/2,
+  `vk_motion_addresses.h`). A shader where only one base is found, or another 64-bit constant lies
+  within 4 GiB above a base (a derived address the swap would leave stale), is stored with its
+  literal addresses: the loaders refuse it and it compiles again.
+- LoadShaderMeta accepts motion vertex metas when the motion buffers exist (ObjectMotion is created
+  with the rasterizer, before any warm-up). Both loaders (WarmUp's LoadPipelineStage and the
+  background ReadWarmEntry) patch this session's addresses in after BinaryMatchesMeta (which
+  checks the bytes as stored); a motion binary without both placeholders is a miss and its meta
+  and binary are removed, as BinaryMatchesMeta does.
+- Motion pipeline keys are saved.
+- Pipeline binaries (GOW3_PIPELINE_BINARIES=1) are keyed by the driver from the patched module,
+  so a binary of another session is never restored; the same for the driver's VkPipelineCache.
+- Unit test `motion-addresses-test` (the SPIR-V walk: both bases swapped and back, a derived
+  constant counted and left alone, 32-bit constants untouched, a zero word count).
+
+Measured (4K, DLAA, multithreaded, worktree build through tools/play.py, 26 Oct): boot 1 rebuilt
+the cache (meta v14): warm-up 66 of 2543, gameplay start 755 ms worst frame, 219 compiles in its
+5 s window. Boot 2, the same route: "Pipeline warm-up: 285 of 2562 pipelines in 5.57 s"; the
+windows entering gameplay (1212-1345 draws/frame) had 0 compiles and 16.9-19.7 ms worst frames
+(was 97.3 ms with 44 compiles). One later window: 11 compiles, 31.6 ms (a new area). Cache after
+boot 2: 47 motion vertex metas referenced by saved keys, 47 binaries with the placeholders; no
+"no address placeholders" or "not cached" lines. Object motion ran (74,248-74,554 draws with
+history per 5 s, as on 25 Oct).
+
+Not verified: the motion vectors' image quality (no shot comparison; only that object motion ran
+with history); U2 and U3 (async shaders: there the cached motion pipelines should spare their
+skipped draws at gameplay start, not measured); whether the device addresses are the same on
+every boot (if not, the driver compiles the motion pipelines again in the warm-up each boot,
+in the background); the bit set (old behaviour) after the fix; a vertex shader that is not a
+motion one but holds both live addresses as 64-bit immediates would be stored with placeholders
+and not patched (not seen; the swap runs on every stored shader). The automated route answered
+U1's "Save game" list with GOW3_TEST_CHOICE=0 (the pad file does not reach the port's dialogs),
+so boot 1 added a new save in profile 1.
