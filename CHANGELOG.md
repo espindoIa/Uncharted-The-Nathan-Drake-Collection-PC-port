@@ -6,6 +6,11 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Launcher: starting from the source tree is easier to diagnose (from the qequ fork, 26 October).**
+  `Start-Uncharted.cmd` finds `pythonw` through the Python launcher (`py`) when Python is not on
+  PATH, the launcher raises its window once at start so it does not open behind the window in front,
+  and a missing Pillow shows a message box (pythonw has no console) instead of closing without a
+  word. The packaged launcher is unchanged.
 - **HDR10 output (off by default; from moistman7's `hdr-output` branch, upstream PR #156, 26
   October).** Launcher -> Display -> **HDR output** (and the in-game menu, Image tab) sends an HDR10
   picture to a display that has HDR turned on in Windows; the games still render SDR, so the

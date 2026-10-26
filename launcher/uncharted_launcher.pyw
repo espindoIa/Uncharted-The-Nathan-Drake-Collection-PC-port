@@ -24,7 +24,13 @@ import tkinter as tk
 import webbrowser
 from tkinter import font as tkfont, messagebox
 
-from PIL import Image, ImageDraw, ImageFilter, ImageTk
+try:
+    from PIL import Image, ImageDraw, ImageFilter, ImageTk
+except ImportError:
+    # pythonw has no console: say what is missing instead of closing without a word (qequ fork, 17 Oct).
+    ctypes.windll.user32.MessageBoxW(None, "The launcher needs Pillow. In a terminal run:\n\n"
+                                           "py -m pip install pillow", "Uncharted launcher", 0x10)
+    raise
 
 import art  # launcher/art.py: icons, anti-aliased shapes, the games' art (25 Oct 2026)
 try:  # launcher/net_lan.py: Uncharted 2 games hosted on this network (Multiplayer page). Optional:
@@ -4680,6 +4686,14 @@ def main():
     # Errors in button and timer callbacks go to the error log too (pythonw has no console).
     root.report_callback_exception = lambda kind, value, trace: log_launcher_error(kind, value, trace)
     Launcher(root, direct)
+    if not direct:
+        # Started through another program (the Python launcher, a shortcut), Windows may open the
+        # window behind the one in front and the launcher seems not to start: raise it once
+        # (qequ fork, 16 Oct).
+        root.lift()
+        root.attributes("-topmost", True)
+        root.after(500, lambda: root.attributes("-topmost", False))
+        root.focus_force()
     root.mainloop()
 
 

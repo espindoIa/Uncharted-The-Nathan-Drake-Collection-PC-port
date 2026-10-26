@@ -5269,3 +5269,10 @@ Fork `qequ/Uncharted-The-Nathan-Drake-Collection-PC-port`, branch `uncharted` (r
 - Changed from the fork: the by-design zero file `sce_sys/psreserved.dat` is matched by path suffix. The Collection keeps one in `NATHANDRAKEPACK1/sce_sys/`, and the fork's exact-path test reported it as damage on the player's own CUSA02320; the closing message no longer points at the fork's `analysis/ROADMAP.md`.
 - Verified (26 Oct): `test_verify_dump` 12 tests OK (one new: the pack-folder reserved file); on the player's `Jogo\CUSA02320`: 15,185 files, exit 0 (1 false finding before the suffix fix). `test_prepare` exit 0.
 - Not verified: CUSA02344 (not on this PC); that the heuristics catch damage inside packed level data (the script says it cannot).
+
+### Ported: launcher start robustness (qequ 10ae7f5 + 76f156c)
+
+- `Start-Uncharted.cmd`: `pythonw` on PATH, else the `pythonw.exe` next to the Python that `py -3` picks (python.org's installer puts `py` in `C:\Windows` even when Python is not on PATH), else a message saying how to install Python and Pillow. The fork's first version went through `pyw`; its second (taken here) starts `pythonw` itself because a window opened by `pyw`'s child process can come up behind the one in front.
+- `launcher/uncharted_launcher.pyw`: `main()` lifts the window once (topmost for 0.5 s, `focus_force`), not for `--play` (the window is withdrawn there); a missing Pillow shows a message box before the exception, since pythonw has no console. The fork's other change in that commit, a message box and `launcher-error.log` when `main()` raises, was already here (`log_launcher_error`, `__main__` handler).
+- Verified (26 Oct): launcher syntax check exit 0; `test_uncharted_launcher_ui` 49 tests exit 0; `py -3 -c "...with_name('pythonw.exe')"` prints this PC's `pythonw.exe` (exit 0) and `pythonw` is also on PATH.
+- Not verified: the raise at start on a real double-click while another window has the focus; the `.cmd` on a PC without Python on PATH (only the `py` lookup line was run); a launch without Pillow.
