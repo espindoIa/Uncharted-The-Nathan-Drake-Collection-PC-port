@@ -50,6 +50,7 @@ New entries go at the end, dated, measured numbers only.
 - Launcher lettering (the games' font and logo, vector, `tools/build_ui_art.py`): `25 October 2026: launcher lettering from the games' files`
 
 - Launcher redesign (stage, per-game colour, 4K icons, trophy coins): `Launcher redesign and 4K-sharp drawing (25 Oct 2026)`
+- Tried and removed (25 Oct): U2 SRT sync fetch (98% of syncs have the write in the open batch), U3 variant-check filter skip (+0.2 FPS, inside noise), latent early-tick issue in `FetchOldGpuBytes`: `25 October 2026: SRT sync fetch and variant filter skip (U2, U3) - measured, rejected, code removed`
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
@@ -4985,3 +4986,20 @@ Second pass, same day (user: vectorize both and keep them sharp at other resolut
 - Checked: the launcher built at scale 1.0, 1.5 and 2.0 (fake Tk scaling, PrintWindow capture): logo and text sharp at 2x; 40 launcher UI tests OK. Not checked: real 4K display, ClearType on.
 
 Checked (first pass): the launcher from source at 1x (window capture): logo and font everywhere, Display layout as before (f_small at 11 pt wrapped the resolution choices, so it stays 10); `test_uncharted_launcher_ui` 40 tests OK. Not checked: 150% scale, the packaged zip, Wine/Proton (no gdi32 private fonts there: falls back), the Europe CUSA02344 pak offsets (the build script finds the texture by name, so it should work).
+
+## 25 October 2026: SRT sync fetch and variant filter skip (U2, U3) - measured, rejected, code removed
+
+Two ideas from the 25 Oct logs, built, reviewed three times and measured in game; neither earned its code, so both were removed (AGENTS.md "Repository upkeep"). Nothing is left in the tree; the numbers are here so nobody retries them blind.
+
+**1. U2 SRT sync waits for all GPU work.** Evidence: U2 `boot.log` (DLSS Quality, 4K output): 30-123 SRT syncs per 5 s, about 7 ms each, up to 915 ms per 5 s at `DownloadRanges`' `scheduler.Finish()` on the GPU command thread (about 18%). U1 1-5 per 5 s, U3 1-3.
+- Idea: for a table whose GPU write is in an already submitted batch, fetch its pages by waiting for that write only (`ReadFinishedGpuPage` / `CopyFinishedGpuPage`, as the write fault does) instead of `Finish()`.
+- Measured (`C:/dev/bench/perf_20261025_u2verify.txt`, U2 4K, 30 s, verify on): 0 mismatches in 3 verified fetches (small sample), no ASSERT / device lost. But 7 windows of 5 s show 47-64 syncs each with **0-1 on the fast path**: 98% were refused as "open batch" (the GPU write is still in the command buffer being recorded, so only a full `Finish()` gets it). Mean `DownloadRanges` wait 6.7-7.2 ms. The A/B was skipped (a 2% hit rate cannot move frame time).
+- Cause of the miss: the SRT walker reads a table in the same frame that a dispatch wrote it, so the write is never in an older batch. A real fix has to avoid the dependency (submit earlier, or have stage A not need the bytes), not fetch faster.
+- A review found a latent issue in code that stays: `FetchOldGpuBytes` and `GpuBytesInFlight` / the `SweepTracking` erase judge GPU bytes final from the raw window and `page_writes` ticks. A bind that submits mid-way (texture readback resolve, stream copy waiting for room) stamps its pages one batch early, so the write-fault shared-write path could fetch before the command ran. Never seen in a log (a counter of such binds read 0 in every 5 s window of the U2 run above). If it is ever pursued: record `{from, to}` late ticks in an `EndBind` after `BindResources` and raise them in `FetchableWindowTick`, and make `FetchOldGpuBytes` require `FetchableWindowTick(page, false)` non-zero.
+
+**2. U3 variant check repeats the garbage filter.** Evidence: U3 stage A profile `C:/dev/bench/prof_runs` (24 Oct): `MatchesComputeBuffers` about 6.9% of stage A.
+- Idea: apply the cut `ForEachBufferSharp` already makes (22 Oct) inside `MatchesComputeBuffers`.
+- Measured: `GOW3_STAGEA_VERIFY=1` in the Cartagena street (`perf_20261025_u3verify.txt`, 30 s): effect-filter mismatches 0, 1,741 filter checks skipped per frame. A/B at 4K (`opt_ab.py`, 4 windows each, alternating, `perf_20261025_u3ab.txt`): bit clear 66.6 / 67.2 / 67.2 / 67.0 FPS (mean 67.0) against bit set 67.5 / 66.2 / 66.6 / 67.0 (mean 66.8); p99 about 22-24 ms in both. Difference +0.2 FPS, inside the 0.3 FPS A/A noise. External load 2.2-3.6 cores (other sessions building), so it is weak evidence, but the effect is not visible.
+- Reading: the repeated `ClampRangeSize` lookup is a small part of the 6.9%; the rest of `MatchesComputeBuffers` is `GetSharp` itself and `DescribeBuffer`. Next candidate if stage A is pursued again: `CollectRingBindings` (26% of stage A) or the whole-match memo (needs a hit-rate count first).
+
+**Not verified:** the A/B windows overlap other sessions' CPU load; U1; other chapters; laptops. The `Disabled2` bits 48 and 49 were never committed, so they are free again.
