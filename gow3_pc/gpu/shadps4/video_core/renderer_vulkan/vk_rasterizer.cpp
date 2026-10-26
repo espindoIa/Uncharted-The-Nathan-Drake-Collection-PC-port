@@ -3590,18 +3590,27 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     if (hud_draw) {
         float min_x = 0.0f, max_x = 0.0f;
         std::string detail;
-        const bool valid = HudExtent(pipeline, is_indexed, index_offset, min_x, max_x,
-                                     hud_trace ? &detail : nullptr);
-        // Only the in-game HUD is split by thirds in wide mode; menus stay in the 16:9 area.
-        hud_anchor = HudLayout::Classify(valid, min_x, max_x, false);
-        hud_split = hud_wide && hud_tracker.last_over_frame && hud_anchor != HudLayout::Anchor::Full;
+        // gow3 26 Oct 2026 (review): the trace text (16 reads and a format) is built only for the
+        // first 3 draws of each shader, the ones printed below; the trace is on by default for
+        // the U2 ultrawide HUD, so every HUD draw of every frame paid for it before.
+        bool print = false;
+        const u64 ps = fragment ? fragment->pgm_hash : 0;
         if (hud_trace) {
             static std::mutex trace_mutex;
             static std::unordered_map<u64, u32> traced;
-            const u64 ps = fragment ? fragment->pgm_hash : 0;
             std::scoped_lock lock{trace_mutex};
             if (auto& n = traced[ps]; n < 3 && traced.size() <= 32) {
                 ++n;
+                print = true;
+            }
+        }
+        const bool valid = HudExtent(pipeline, is_indexed, index_offset, min_x, max_x,
+                                     print ? &detail : nullptr);
+        // Only the in-game HUD is split by thirds in wide mode; menus stay in the 16:9 area.
+        hud_anchor = HudLayout::Classify(valid, min_x, max_x, false);
+        hud_split = hud_wide && hud_tracker.last_over_frame && hud_anchor != HudLayout::Anchor::Full;
+        if (print) {
+            {
                 static constexpr const char* kNames[] = {"centre", "left", "right", "full"};
                 std::printf("HUD draw: vs %08x ps %08x %u %s, x %s %.3f..%.3f -> %s%s\n",
                             u32(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash), u32(ps),

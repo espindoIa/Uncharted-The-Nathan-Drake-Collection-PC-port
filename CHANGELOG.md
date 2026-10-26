@@ -10,6 +10,9 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   longer closes the game (26 October).** The swapchain asked for HDR10 again when it was recreated
   and failed; it now asks the display first and falls back to SDR, as with HDR off. Turning HDR on
   again takes a restart. Not tested on an HDR display here.
+- **Fix: less CPU spent on the Uncharted 2 ultrawide HUD trace (26 October).** Its text (sixteen
+  memory reads and a format) was built for every HUD draw of every frame; it is now built only for
+  the first three draws of each shader, the ones that are printed.
 - **Fix: the sharpening and upscaling pass could read a frame before the game finished drawing it
   (from the qequ fork, 26 October).** On the paths where the port's own FSR 1 or RCAS pass runs
   (window the size of the game's image with sharpening on, or a larger window with FSR 1), logos,
