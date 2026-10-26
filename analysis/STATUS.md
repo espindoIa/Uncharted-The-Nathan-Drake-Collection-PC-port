@@ -37,6 +37,7 @@ New entries go at the end, dated, measured numbers only.
 - Game FXAA skipped under temporal AA: `Game FXAA skipped under temporal AA (24 Oct 2026)`
 - Text and subtitles at 4K (font atlases, text shader sharpening): `Sharp text above 1080p (25 Oct 2026)`
 - Main menu/subtitle fonts with less smoothing, original metrics retained: `26 October 2026: main-font contour fidelity`
+- Integrated HD art/font package installed with player data preserved: `26 October 2026: integrated UI package and player installation`
 
 - HD UI textures (bigger DDS replacements keyed by content hash, GOW3_TEX_DUMP, how unsafe shader reads drop them): `HD UI textures (25 Oct 2026)`
 - HD UI editor finishing, native VectorCraft/PhotoCraft sources and 4096 px menu masks: `26 October 2026: UI art finishing in VectorCraft and PhotoCraft`
@@ -5161,3 +5162,31 @@ Goal: the games' UI art (button icons, in-world prompts, panels) is 1080p-era; a
 - Short source-game runs used one instance at a time, PlayStation prompts, requested 3840x2160, FG off and backed-up worktree saves restored after each run. Runtime limits: 130 s (the first U3-on run 100 s), outer harness 220 s and shell 240 s. All six final on/off runs ended at the expected probe timeout (124), with harness exit 0 and no DEVICE_LOST, assertion, unhandled exception or unsupported-import entry found by the log check. Wall times in seconds, on/off: U1 146.3/149.3, U2 147.1/143.4, U3 113.1/143.9. These are smoke runs, not frame-rate benchmarks. U1 falls back to a 2880x1620 scene because the requested 4K render targets exceed the guest heap; live snapshots are 2560x1440, so these captures do not prove native 4K presentation.
 - Visually confirmed in HD-on menus: cross, circle and OPTIONS in all three games, including the joint U3 colour/alpha atlas. All three HD-on runs reached gameplay and pause menus. U1/U2 off runs also show pistol/rifle, ammo, grenade and reticle while aiming, but the HD-on captures had the HUD hidden; that is not a matched HUD acceptance pair. U3-off captures were saved before the owner's deferral and remain unreviewed. Other atlas glyphs, individual weapons/HUD icons, world triangle/HOLD prompts, map and ornament on screen remain explicitly unverified. Upload hits alone are recorded as `loaded_not_individually_verified_on_screen` in the inventory.
 - Further tests and comparisons deferred by owner: matching HUD/weapon pairs, unobserved prompts and glyphs, controller/keyboard switching, other drivers and validation layers. No performance claim and no installation/package acceptance claim. No test game was left running.
+
+## 26 October 2026: integrated UI package and player installation
+
+The owner explicitly requested pushing all completed work and installing it. Main now combines
+the refined main-font atlases, all seven HD UI commits through be1ac4c and origin/main's U1
+motion shader cache fix. Merge conflicts retained both independent atlas upload paths and the
+separate HD UI / motion-cache toggle bits. The known-font upload still precedes generic HD
+replacement; its original host-scaled image allocation is unchanged.
+
+- Integrated runtime build: exit 0, 1800-second hard timeout. Windows package: exit 0,
+  1200-second timeout, explicit Windows Python 3.13 with Pillow/numpy, DLSS bridge and the six
+  redistributable Streamline DLLs. The first package attempt selected a Python without Pillow
+  and was discarded; the successful package includes all expected NVIDIA redistributables.
+- Installed source revision: e7cca8f. Package ZIP: 93,955,531 bytes; the package contains 60 HD
+  DDS replacements and three current main-font PNG atlases. Package font SHA-256 values match
+  the source assets. Player-owned nvngx DLLs and NvLowLatencyVk.dll are refused in the package.
+- Installation replaced the existing player folder only after staging and checking package
+  contents. SHA-256 checks cover every packaged file and all 24,935 retained player-data files
+  (including saves, settings and caches; the package's default optimization-mask file is retained,
+  as in the existing updater). Both player DLLs, nvngx_dlss.dll and nvngx_dlssg.dll, match their
+  preceding hashes. Final installed runtime SHA-256:
+  B9E2EB9BE43046427EDDD72203F3FABBBFCBCCFA5202F8F43D7EBD5263AEE007.
+- Installer exit 0, 900-second hard timeout. The old folder was removed only after installed
+  files and preserved data verified; no second installation remains. The game-data folder was
+  not modified. Local receipt and build logs are ignored under analysis/ui-release.
+- Per the owner's earlier deferral, no new game session, visual comparison or unit suite was
+  run. This verifies compilation, packaging and installed file integrity, not full in-game
+  font/HUD/prompt fidelity or performance. Missing prompt references remain pending.
