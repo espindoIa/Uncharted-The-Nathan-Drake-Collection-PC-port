@@ -253,6 +253,8 @@ INI_DEFAULTS = {
     "async_shaders": "1", "fsr1": "0", "rcas": "1", "rcas_strength": "75", "show_fps": "1",
     "upscaler": "off", "preset": "0", "dlss_model": "k", "gpu_id": "-1", "anisotropy": "16",
     "reflex": "0", "frame_gen": "0", "hd_ui": "1",
+    # HDR10 output (off; brightness in nits: the peak, the game's white, the HUD and menus).
+    "hdr": "0", "hdr_peak_nits": "1000", "hdr_game_nits": "203", "hdr_ui_nits": "203",
     # The performance counter (Display section): the items on its line, its corner, layout, text size
     # and background opacity. The runtime's defaults; the in-game Overlay tab writes them too.
     # Items as the runtime starts (DefaultItems: FPS, frame time, GPU and CPU use with their
@@ -2839,6 +2841,22 @@ class Launcher:
                         "the game's own art (the hd-textures folder). Takes effect for textures that load "
                         "afterwards. Also in the in-game menu.",
                         short="Sharper button icons, prompts and panels at 4K.")
+        self.ini_toggle(page, "hdr", "HDR output",
+                        "HDR10 picture for a display with HDR turned on in Windows. The games render SDR: "
+                        "brighter highlights and the HUD at its own brightness, no change to the game. Takes "
+                        "effect the next time the game starts (also in the in-game menu, Image tab). Without an "
+                        "HDR display it does nothing.",
+                        short="HDR10 picture for a display with HDR turned on in Windows.")
+        nits = lambda values: [(str(v), str(v)) for v in values]
+        self.ini_choice(page, "hdr_peak_nits", "HDR peak brightness",
+                        "The brightest highlights, in nits: set it to your display's peak.",
+                        nits((600, 1000, 1500, 2000, 4000)))
+        self.ini_choice(page, "hdr_game_nits", "HDR game brightness",
+                        "The brightness of white surfaces in the game, in nits (203 is the HDR reference).",
+                        nits((150, 203, 250, 300)), recommended="203")
+        self.ini_choice(page, "hdr_ui_nits", "HDR HUD brightness",
+                        "The brightness of the HUD and menus, in nits.",
+                        nits((150, 203, 250, 300)), recommended="203")
         self.ini_toggle(page, "show_fps", "Show performance counter",
                         "FPS, temperatures and memory in a corner of the screen. Insert, then the Overlay "
                         "tab, changes it in the game too.",
