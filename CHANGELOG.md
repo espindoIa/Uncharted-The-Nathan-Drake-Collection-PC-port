@@ -6,6 +6,16 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **HD UI textures (setting "HD UI textures", on by default).** The games' button icons, the
+  triangle prompt, HUD icons, weapon pictures and a few menu pieces are redrawn at 4x the size and
+  shown in their place, so they stay sharp at 4K: the circle, square, triangle and cross buttons,
+  the d-pad, L1, L2, R1, R2, the sticks, OPTIONS and SHARE, the prompt that shows a triangle for a
+  chest or a ledge, the reload and no-ammo icons, weapon icons and more (60 pictures in all three
+  games). Keyboard and mouse prompts are not touched. Also in the in-game menu (Textures); it
+  applies to textures that load afterwards. To compare, set bit 48 (281474976710656) in the
+  second number of `disabled-optimizations.txt`. Tried so far in Uncharted 1's title screen and
+  gameplay.
+
 - **Launcher: the games' own lettering.** The title is the UNCHARTED of the Collection's logo, worn
   as on the games' title screens, and every text uses the font of the games' menus and subtitles.
   Both come from the games' files (the logo from Uncharted 1's menu, the font redrawn from its
