@@ -5290,3 +5290,24 @@ Fork `qequ/Uncharted-The-Nathan-Drake-Collection-PC-port`, branch `uncharted` (r
 - The other half of that commit, `GOW3_ASYNC_READBACK=0` by default for Uncharted 3, was not taken: see the decision list below.
 - Verified (26 Oct): `py_compile` of both scripts exit 0; `test_session_recorder` 15 tests exit 0. The loop itself has no test (it sits inside `run_game`).
 - Not verified: a boot that reads a `test-env-u3.txt`.
+
+### Decision for every qequ commit (newest first; all 18 of `git cherry`)
+
+| Commit | Decision | Why |
+|---|---|---|
+| 14b1ae0 HUD prompts show keys or Xbox buttons | Already here | `gow3_prompts.cpp` redraws the same in-world BC1 pictures (face, HOLD, L1/L2/R1/R2, d-pad up; hashes of mip 0), keyboard and Xbox, per game (STATUS "In-world button pictures", "Controller icons"). The fork reads the HUD paks at start instead of hashing; no gain to justify swapping a verified, HD-art-aware path. |
+| 52ad9fa installed play folder | Skipped | Fork's workflow (`F:/Uncharted-PC`, `install_local.sh`, `--play` through the starter, launcher.json in the folder, updater pointed at qequ's releases). This tree already has `--play`, the player's folder in AGENTS "Locations", and its own updater repository; the repository switch would break updates. |
+| 3989bbd screenshots from the presenter | Skipped | Serves the fork's `playtest_reports.py`; this tree has `CaptureLiveView`, the session recorder and the flight recorder. Its `.part` rename for raw dumps is a possible fix for a reader seeing a half-written file; no such failure recorded here. |
+| fc1d782 FSR pass waits for the frame | Ported | Same missing compute stage here (see section above). |
+| 76f156c launcher raise, start errors | Ported (partly) | Raise and Pillow message ported; the start-error box and log already exist (`log_launcher_error`). |
+| 10ae7f5 Start-Uncharted.cmd fallback | Ported | In the final form of 76f156c (`py -3` lookup). |
+| 259b097 Launcher Controls on the game's settings file | Already here | `save_controls` writes the games' settings (`probe-u*.ini`, shared with the in-game menu). |
+| 017d054 keyboard page on Controller Layout | Skipped | 1,900 new lines (`gow3_ui.cpp` PSARC/BMFont/TGA readers, `gow3_controls.cpp`, rasterizer hook on the DS4 picture), tied to the fork's glyph system and settings keys, and not testable without game runs. This tree has the Controls tab in the Insert menu and the launcher. The one thing it adds is the rebinding screen inside the game's own menu; worth a separate task if wanted. |
+| 633eb8e button icons follow the device | Already here | `gow3_prompts.cpp` (`GOW3_PROMPTS`, atlas redraw, device from `runtime_pad.c`). |
+| 6c52db5 unwind without the loader lock | Skipped | Only touches `runtime_report.c`, which does not exist here (see 8b4ad64). The same hazard in this tree is already handled in `gow3_profiler.cpp` (own unwinder, 16 Oct 0.1.2); `probe.c`'s fatal-exception unwind runs on the faulting thread, no suspended thread. |
+| e061a96 U3 waits for readbacks | Half ported | Per-game `test-env-<game>.txt` taken. The U3 default `GOW3_ASYNC_READBACK=0` skipped: it worked around unprotected readbacks (the 0.1.0 default); this tree runs U2/U3 on protected readbacks (1) since 16 Oct (`probe_uncharted.py`, "U3 crash-free for 6 minutes"), and waiting costs frame rate (U2 ~20 FPS measured then). The fork's evidence (RX 9060 XT, pub fight) predates that. |
+| 5f04869 play-testing guide, roadmap | Skipped | The fork's documents. |
+| 8b4ad64 play-test reports | Skipped | 21 files, 1,157 lines: in-process crash/freeze watchdog, fault-handler hook, F8 mark key (F8 is already a session-recorder hotkey here), launcher tab. Overlaps `session_recorder.py`, the hang watchdog (`hang_report.py`, minidump) and `tools/hangdump`; changes runtime behaviour on every start; cannot be checked without game runs. |
+| 0fd8b5c, 1f06a08 `sync_upstream.sh` | Skipped | Repository tooling for the fork's own sync; this tree merges upstream by hand with recorded choices. |
+| 1d0c023, 3eaf4ec roadmap, guide updates | Skipped | The fork's documents (`ROADMAP.md` here is ours). |
+| 7d3a503 verify_dump.py | Ported | Nothing here checks the game folder; found and fixed one false finding on the player's own dump. |
