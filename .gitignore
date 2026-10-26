@@ -13,3 +13,5 @@ __pycache__/
 *.pyc
 # 20 Oct 2026 audit: generated at launch from the game icon0.png (Sony artwork), must not be tracked or exported
 /launcher/assets/window_icon.bmp
+# 26 Oct 2026: the HD UI textures' .dds files are built from gow3_pc/assets/ui/hd/src by tools/build_ui_art.py hd
+/gow3_pc/assets/ui/hd/u[123]/

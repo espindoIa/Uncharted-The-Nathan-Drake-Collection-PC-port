@@ -22,8 +22,11 @@
 #include "video_core/texture_cache/aliasing.h"
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "gow3_hdtex.h"
 #include "gow3_prompts.h"
 #include "gow3_atlas.h"
+#include "gow3_settings.h"
+#include "gow3_texdump.h"
 #include "video_core/texture_cache/tile_manager.h"
 
 // src/runtime_videodec.c: the last decoded video frame buffer (diagnostics).
@@ -1331,6 +1334,15 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, ViewMemo* memo,
                                      bool refresh) {
     Image& image = slot_images[image_id];
+    // gow3 25 Oct 2026 (HD UI textures): a larger replacement shows the shader a different size,
+    // so a texel fetch, size query, offset or unnormalized sample (ImageResource::needs_native)
+    // and any write need the guest-size backing. Dropped for good, before UpdateImage can make
+    // another replacement. A shader seen later with such a read finds the image already here.
+    // No hd_off guard: UseGuestBacking is a no-op once off, and a stale flag must never let
+    // UsingHd() reach a native read.
+    if (desc.type == BindingType::Storage || desc.needs_guest_size) {
+        image.UseGuestBacking(true);
+    }
     if (desc.type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
         if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
@@ -1373,6 +1385,7 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
         QueueTinyReadback(image_id, image);
     }
     image.usage.render_target = 1u;
+    image.UseGuestBacking(true); // HD UI textures
     UpdateImage(image_id);
     PublishAliasWrite(image_id);
 
@@ -1396,6 +1409,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
     image.usage.depth_target = 1u;
+    image.UseGuestBacking(true); // HD UI textures
     UpdateImage(image_id);
 
     // Register meta data for this depth buffer
@@ -1441,6 +1455,124 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
     }
 
     return image.FindView(desc.view_info, false);
+}
+
+// gow3 25 Oct 2026: the formats the games' UI art comes in, 8-bit UNORM/sRGB colour and the BC
+// family. A first GOW3_TEX_DUMP run wrote render targets too (1920x1080 R16G16B16A16Sfloat,
+// R32Sfloat, R8Uint: 16 MB a file): float and integer images are never art.
+static bool IsUiArtFormat(vk::Format format) {
+    switch (format) {
+    case vk::Format::eR8G8B8A8Unorm:
+    case vk::Format::eR8G8B8A8Srgb:
+    case vk::Format::eB8G8R8A8Unorm:
+    case vk::Format::eB8G8R8A8Srgb:
+    case vk::Format::eR8Unorm:
+    case vk::Format::eR8G8Unorm:
+    case vk::Format::eBc1RgbaUnormBlock:
+    case vk::Format::eBc1RgbaSrgbBlock:
+    case vk::Format::eBc2UnormBlock:
+    case vk::Format::eBc2SrgbBlock:
+    case vk::Format::eBc3UnormBlock:
+    case vk::Format::eBc3SrgbBlock:
+    case vk::Format::eBc4UnormBlock:
+    case vk::Format::eBc5UnormBlock:
+    case vk::Format::eBc7UnormBlock:
+    case vk::Format::eBc7SrgbBlock:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// A sampled 2D colour texture the CPU wrote: one layer, one sample, no GPU write so far (render
+// target, depth, storage, copy destination), sharing memory with no other image (an alias is how
+// a target gets read back as a texture), not a decoded movie frame (Gow3Movie, remapped every
+// frame). The usage bits are what the image has been bound as until now: a target that is first
+// sampled passes here, which is why the format filter above matters too; UseGuestBacking drops a
+// replacement at the first later use as a target.
+static bool IsUiArtCandidate(const Image& image, u32 num_layers, bool is_gpu_modified) {
+    const auto& info = image.info;
+    const VAddr movie_lo = runtime_video_frame_lo, movie_hi = runtime_video_frame_hi;
+    return num_layers == 1 && !is_gpu_modified && info.type == AmdGpu::ImageType::Color2D &&
+           info.num_samples == 1 && info.size.width >= 8 && info.size.height >= 8 &&
+           info.mips_layout[0].size != 0 && !info.props.is_depth && !info.props.is_volume &&
+           IsUiArtFormat(info.pixel_format) && False(image.flags & ImageFlagBits::Aliased) &&
+           !image.usage.storage && !image.usage.render_target && !image.usage.depth_target &&
+           !image.usage.vo_surface && !image.binding.is_target &&
+           !(movie_lo && info.guest_address < movie_hi &&
+             info.guest_address + info.guest_size > movie_lo);
+}
+
+// gow3 25 Oct 2026: HD UI textures (gow3_hdtex.cpp). A texture whose mip 0 guest bytes hash to
+// the name of a <hash>_<w>x<h>.dds gets that bigger image: the 1080p-era icons and panels are soft at 4K.
+// Why it happens here, after the guest upload, and not when FindImage makes the image: the guest
+// data may still change after the image exists (a streamed texture pool reuses the address), and
+// every such change comes through RefreshImage, so the hash is always of the bytes just uploaded;
+// a texture whose new data has no file goes back to the guest backing (UseGuestBacking above).
+// The VkImage extent is fixed at creation, so the replacement is a second backing of the image
+// (the way SetBackingSamples keeps an MSAA one), with its own views; info, guest_size and
+// mips_layout stay the guest's and FindImage, aliasing and readbacks never see the difference.
+// The guest backing is uploaded as well, so a drop (UseGuestBacking: a render target, a copy,
+// storage, a shader reading texels by integer coordinates) costs nothing but the switch.
+static void UploadHdReplacement(Vulkan::Runtime& runtime, Image& image, u32 num_mips) {
+    const auto& info = image.info;
+    // Before the hash: most uploads are world textures, and no file is for their size.
+    if (image.hd_off || !Gow3Settings::Get().hd_ui.load(std::memory_order_relaxed) ||
+        Gow3Toggle::Disabled2(Gow3Toggle::HdUiTextures) ||
+        !Gow3HdTex::HasGuestSize(info.size.width, info.size.height)) {
+        return;
+    }
+    const u64 hash = Gow3HdTex::Hash(reinterpret_cast<const void*>(info.guest_address),
+                                     info.mips_layout[0].size);
+    const auto* replacement =
+        Gow3HdTex::Find(hash, static_cast<Gow3HdTex::Format>(info.pixel_format), info.size.width,
+                        info.size.height, num_mips);
+    // 26 Oct 2026: GOW3_HD_LOG=1 lists the textures that have a file for their size but whose
+    // hash matches none (the games' menus load a different copy than the one a dump saw).
+    static const bool hd_log = std::getenv("GOW3_HD_LOG") != nullptr;
+    if (hd_log && !replacement) {
+        static std::atomic<u32> logged{0};
+        if (logged.fetch_add(1) < 400) {
+            std::printf("HD UI textures: size match, no file: %016llx %ux%u fmt %d tile %d\n",
+                        static_cast<unsigned long long>(hash), info.size.width, info.size.height,
+                        static_cast<int>(info.pixel_format), static_cast<int>(info.tile_mode));
+        }
+    }
+    if (!replacement ||
+        !image.EnsureHdBacking(static_cast<vk::Format>(replacement->format), replacement->width,
+                               replacement->height, replacement->mips)) {
+        return;
+    }
+    // The same file again (the guest bytes were rewritten as they were) on a backing that was
+    // not remade: it still holds the picture.
+    if (image.hd_hash == hash) {
+        image.UseHdBacking();
+        return;
+    }
+    const auto staging =
+        runtime.GetStagingPool().Request(replacement->data.size(), MemoryType::HostUncached, 16);
+    std::memcpy(staging.mapped, replacement->data.data(), replacement->data.size());
+    staging.Flush();
+    boost::container::small_vector<vk::BufferImageCopy, 14> copies;
+    for (u32 m = 0; m < replacement->mips; ++m) {
+        const auto& mip = replacement->layout[m];
+        copies.push_back({
+            .bufferOffset = staging.offset + mip.offset,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource{
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .mipLevel = m,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {mip.width, mip.height, 1},
+        });
+    }
+    image.UseHdBacking();
+    runtime.UploadImage(&image, staging.buffer, copies, image.hd.format);
+    image.hd_hash = hash;
 }
 
 void TextureCache::RefreshImage(Image& image) {
@@ -1549,6 +1681,18 @@ void TextureCache::RefreshImage(Image& image) {
     const bool bc1 = image.info.pixel_format == vk::Format::eBc1RgbaUnormBlock ||
                      image.info.pixel_format == vk::Format::eBc1RgbaSrgbBlock;
     const u32 w = image.info.size.width, h = image.info.size.height;
+    // gow3 25 Oct 2026: GOW3_TEX_DUMP=<dir> (gow3_texdump.cpp) writes each distinct UI art
+    // texture; the HD UI textures (UploadHdReplacement) look at the same ones.
+    const bool ui_art = IsUiArtCandidate(image, num_layers, is_gpu_modified);
+    // The uploads below fill the guest backing, which stays complete beside a replacement.
+    image.UseGuestBacking(false);
+    if (ui_art) {
+        Gow3TexDump::Dump({image.info.guest_address, image.info.mips_layout[0].size, w, h,
+                           image.info.pitch, image.info.num_bits / 8, num_mips,
+                           static_cast<u32>(image.info.tile_mode),
+                           static_cast<u32>(image.info.pixel_format),
+                           bool(image.info.props.is_block)});
+    }
     if (num_layers == 1 && !is_gpu_modified &&
         ((w == 512 && h == 512 && image.info.num_bits == 32 && num_mips == 1) ||
          (bc1 && w >= 64 && w <= 512 && h >= 64 && h <= 512))) {
@@ -1566,6 +1710,13 @@ void TextureCache::RefreshImage(Image& image) {
                 copy.bufferRowLength = mip.row;
                 copy.bufferImageHeight = mip.height;
             }
+            // 25 Oct 2026 (HD UI textures): this return is what keeps a replacement away from
+            // redrawn key caps. The HD file is keyed by the hash of the guest bytes, which are the
+            // controller glyphs, so with keyboard art in the guest backing (UseGuestBacking(false)
+            // above) UploadHdReplacement must not run. When the player switches back, the prompts
+            // invalidate every atlas/picture they have seen (InvalidateSeen: CpuDirty, so a new
+            // refresh), Replacement returns nothing, and the guest bytes hash to the same value as
+            // before: hd_hash matches and the HD backing, untouched meanwhile, is selected again.
             runtime.UploadImage(&image, staging.buffer, image_copies);
             return;
         }
@@ -1579,6 +1730,9 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     runtime.UploadImage(&image, buffer, image_copies);
+    if (ui_art) {
+        UploadHdReplacement(runtime, image, num_mips);
+    }
 }
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,

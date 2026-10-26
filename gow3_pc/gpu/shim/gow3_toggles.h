@@ -282,6 +282,11 @@ enum : std::uint64_t {
     /// U1 boot: 97 ms stall at the first gameplay frame, 44 compiles = 20 motion vertex shaders
     /// and 24 pipelines on every boot, because their SPIR-V held the session's addresses).
     MotionShaderCache = 1ull << 52,
+    /// Bit set: no new HD UI texture replacements (a texture whose data is uploaded while it is
+    /// set stays at the guest size; replacements already made keep showing until their image is
+    /// evicted or dropped). Read live at the upload (texture_cache.cpp, gow3_hdtex.cpp), 25 Oct
+    /// 2026. Bits 17-18 are taken by work in progress; 46 and 47 are GameFxaa, JitterSmallDraws.
+    HdUiTextures = 1ull << 48,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

@@ -7,7 +7,7 @@
 #   gow3_pc\scripts\         the preparation scripts; gow3_pc\out\ the runtime and its DLLs
 # No game files ship: each player selects their own copy of the game in the launcher.
 # Run after building the runtime (gow3_pc/build.sh), from Git Bash or an MSYS2 CLANG64 shell.
-# PYTHON_HOME is a Windows Python 3.10+ with Pillow (default: the `python` on PATH).
+# PYTHON_HOME is a Windows Python 3.10+ with Pillow and numpy (default: the `python` on PATH).
 set -euo pipefail
 cd -- "$(dirname -- "$0")/.."
 # The Windows Python (looked up before the CLANG64 tools go first on PATH: MSYS2 has its own).
@@ -92,6 +92,24 @@ cp launcher/assets/uncharted.ico launcher/assets/icon.png launcher/assets/grain.
 mkdir -p "$stage/gow3_pc/assets/ui/fonts"
 cp gow3_pc/assets/ui/wordmark.svg "$stage/gow3_pc/assets/ui/"
 cp gow3_pc/assets/ui/fonts/drake-serial.ttf "$stage/gow3_pc/assets/ui/fonts/"
+# HD UI textures (gow3_pc/gpu/shim/gow3_hdtex.cpp): the <hash16hex>_<w>x<h>.dds files of
+# gow3_pc/assets/ui/hd/<set>/ next to the exe, where the runtime looks. The folder ships even empty.
+# Flattened, so two sets must not hold the same file name (the second would overwrite the first).
+mkdir -p "$stage/gow3_pc/out/hd-textures"
+# The .dds files are generated (not committed) from the art in gow3_pc/assets/ui/hd/src: PNG and SVG
+# redrawn at 4x, with their mips and compression (needs numpy beside Pillow).
+if [[ -d gow3_pc/assets/ui/hd/src ]]; then
+    "$python" tools/build_ui_art.py hd || exit 1
+fi
+if [[ -d gow3_pc/assets/ui/hd ]]; then
+    while IFS= read -r -d '' dds; do
+        if [[ -e "$stage/gow3_pc/out/hd-textures/${dds##*/}" ]]; then
+            echo "HD UI textures: ${dds##*/} is in two sets (second: $dds)" >&2
+            exit 1
+        fi
+        cp -- "$dds" "$stage/gow3_pc/out/hd-textures/"
+    done < <(find gow3_pc/assets/ui/hd -type f -name '*.dds' -print0)
+fi
 # The launcher's icons: the 192 px masters only (their VectorCraft sources in icons/src stay in the repo).
 mkdir -p "$stage/launcher/assets/icons"
 cp launcher/assets/icons/*.png "$stage/launcher/assets/icons/"

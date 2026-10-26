@@ -17,6 +17,7 @@
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "gow3_flight.h"
+#include "gow3_hdtex.h"
 #include "gow3_settings.h"
 #include "gow3_toggles.h"
 #include "gow3_trigger_files.h"
@@ -6818,7 +6819,10 @@ bool Rasterizer::TexturesBindableOnHelper(const Shader::Info& stage,
             image_id = depth_image_id;
             image = &texture_cache.GetImage(image_id);
         }
+        // HD UI textures: a native-size read drops the replacement (FindTexture), which changes
+        // image state: on the GPU command thread, not here.
         if (image->binding.needs_rebind || !texture_cache.IsUpToDate(image_id) ||
+            ((image_desc.needs_native || image_desc.unnormalized_sampler) && image->UsingHd()) ||
             scene_targets->Tracks(image->image_uid) ||
             (upscaler->Enabled() && upscaler->RedirectsSampled(image_id))) {
             return false;
@@ -8289,7 +8293,9 @@ Rasterizer::ImageDescCacheEntry& Rasterizer::CachedImageDescEntry(const AmdGpu::
                                                                    u64 hash) {
     std::array<u64, 4> key;
     std::memcpy(key.data(), &sharp, sizeof(key));
-    const u32 flags = u32(res.is_written) | u32(res.is_depth) << 1 | u32(res.is_array) << 2;
+    const u32 flags = u32(res.is_written) | u32(res.is_depth) << 1 | u32(res.is_array) << 2 |
+                      u32(res.needs_native || res.unnormalized_sampler)
+                          << 3; // ImageDesc::needs_guest_size (HD UI textures)
     // Two-way set associative: a frame binds a few thousand distinct T#s.
     auto* set = &image_desc_cache[(hash % (image_desc_cache.size() / 2)) * 2];
     const auto matches = [&](const ImageDescCacheEntry& e) {
@@ -8686,6 +8692,7 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
         auto ssharp =
             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
         ForceAnisotropy(ssharp, sampler, stage, prepared);
+        WidenSamplerForHdMips(ssharp, sampler, stage, prepared);
         // gow3 25 Oct 2026 (player: blurred or wrong materials): Vulkan adds mipLodBias to
         // explicit-LOD samples too, so a sampler the shader uses with a chosen mip gets no
         // scene bias (one used both ways neither: the safe side). BiasExplicitLod: old way.
@@ -8714,6 +8721,55 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
         set_write.descriptorType = vk::DescriptorType::eSampler;
         set_write.pImageInfo = &image_infos.back();
     }
+}
+
+// gow3 26 Oct 2026 (HD UI textures): a replacement image has the file's whole mip chain and is
+// 2-4x the guest's size, and the guest's S# was written for the small one: with MaxLod 0 and no mip
+// filter it would read level 0 only. The game draws a 4x file ~3x smaller than it is, and level 0
+// alone skips texels (thin strokes and soft glows lose brightness). A sampler whose paired images
+// are all unmipped (the T# has one level; the pairing is SamplerResource::image_mask) and one of
+// them has a file (its guest size is named by one) gets the full LOD range and a linear mip
+// filter. For a one-level image Vulkan clamps the LOD to level 0 whatever the sampler says, so a
+// guest image is read exactly as before. 26 Oct log (GOW3_HD_LOG=1) of the title/menu screens:
+// the icon samplers of U1-U3 use derivative LODs ("implicit"), so the larger image picks its own
+// level; an explicit-LOD-only sampler would need a bias, none was seen and none is added.
+void Rasterizer::WidenSamplerForHdMips(AmdGpu::Sampler& sharp, const Shader::SamplerResource& sampler,
+                                       const Shader::Info& stage, const PreparedStage* prepared) const {
+    static const bool any_files = Gow3HdTex::AnyFiles();
+    static const bool hd_log = std::getenv("GOW3_HD_LOG") != nullptr;
+    if (!any_files || sampler.is_depth || !Gow3Settings::Get().hd_ui.load(std::memory_order_relaxed) ||
+        Gow3Toggle::Disabled2(Gow3Toggle::HdUiTextures) ||
+        (sharp.xy_min_filter != AmdGpu::Filter::Bilinear &&
+         sharp.xy_min_filter != AmdGpu::Filter::AnisoLinear) ||
+        sampler.image_mask == 0 || sampler.image_mask == ~0u) {
+        return;
+    }
+    bool has_file = false;
+    for (u32 mask = sampler.image_mask; mask != 0; mask &= mask - 1) {
+        const u32 index = static_cast<u32>(std::countr_zero(mask));
+        if (index >= stage.images.size()) {
+            return;
+        }
+        const auto tsharp = prepared ? prepared->image_sharps[index] : stage.images[index].GetSharp(stage);
+        if (tsharp.last_level != tsharp.base_level) {
+            return; // a mipped guest image: the game's own LOD range
+        }
+        has_file |= Gow3HdTex::HasGuestSize(tsharp.width + 1, tsharp.height + 1);
+    }
+    if (!has_file) {
+        return; // none of the paired textures has a file for its size
+    }
+    if (hd_log) {
+        static std::atomic<u32> logged{0};
+        if (logged.fetch_add(1) < 30) {
+            std::printf("HD sampler widened: min %u mag %u mip %u maxlod %u explicit %d implicit %d images %08x\n",
+                        u32(sharp.xy_min_filter.Value()), u32(sharp.xy_mag_filter.Value()),
+                        u32(sharp.mip_filter.Value()), u32(sharp.max_lod.Value()), sampler.explicit_lod,
+                        sampler.implicit_lod, sampler.image_mask);
+        }
+    }
+    sharp.max_lod.Assign(15 * 256);
+    sharp.mip_filter.Assign(AmdGpu::MipFilter::Linear);
 }
 
 // gow3 21 Oct 2026 (ported from the Bloodborne PC port, same core): the PS4 builds sample most scene

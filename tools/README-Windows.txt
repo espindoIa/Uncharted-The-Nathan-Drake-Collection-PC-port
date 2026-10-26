@@ -28,6 +28,10 @@ How to play
    CONTROLS section. Alt+Tab or Insert frees the mouse.
 
 Notes
+- HD UI textures (Display in the launcher, Textures in the in-game menu) replaces the
+  collected controller icons and HUD art with larger masters. Main menu/subtitle fonts
+  use separate high-resolution atlases automatically above 1080p. Some prompts still
+  use original art; the latest font/HUD fidelity changes await further game checks.
 - The first start of each game prepares files and compiles shaders: expect a slow first load
   and some stutter until the shader cache has filled.
 - Settings are kept per game. Saves and logs are kept in analysis\ next to the launcher.

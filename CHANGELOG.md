@@ -18,6 +18,29 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
   with the old behaviour, set bit 52 (4503599627370496) in the second number of
   `disabled-optimizations.txt` before starting the game.
 
+- **UI fidelity refinement (26 October).** The controller cross has a finer stroke,
+  the world triangle has rounder corners, five weapon/grenade pictures have tones
+  closer to the originals, and the foliage ornament has more relief. Native
+  VectorCraft/PhotoCraft projects are kept with the art. All 60 HD sources were
+  compared with the originals; soft effects retain their fades. Missing prompt
+  references and icons not seen in short game checks are listed individually in
+  the art inventory, rather than counted as complete.
+
+- **UI art refinement (26 October).** Controller button sheets receive a restrained
+  sharpness pass that preserves their transparency and colours. The triangle
+  prompt has a less heavy rim, and the U1/U2 menu-frame masks now use 4096-pixel
+  masters. This editor pass has not yet been checked in game.
+
+- **HD UI textures (setting "HD UI textures", on by default).** The games' button icons, the
+  triangle prompt, HUD icons, weapon pictures and a few menu pieces are redrawn at 4x the size and
+  shown in their place, so they stay sharp at 4K: the circle, square, triangle and cross buttons,
+  the d-pad, L1, L2, R1, R2, the sticks, OPTIONS and SHARE, the prompt that shows a triangle for a
+  chest or a ledge, the reload and no-ammo icons, weapon icons and more (60 pictures in all three
+  games). Keyboard and mouse prompts are not touched. Also in the in-game menu (Textures); it
+  applies to textures that load afterwards. To compare, set bit 48 (281474976710656) in the
+  second number of `disabled-optimizations.txt`. Tried so far in Uncharted 1's title screen and
+  gameplay.
+
 - **Launcher: the games' own lettering.** The title is the UNCHARTED of the Collection's logo, worn
   as on the games' title screens, and every text uses the font of the games' menus and subtitles.
   Both come from the games' files (the logo from Uncharted 1's menu, the font redrawn from its

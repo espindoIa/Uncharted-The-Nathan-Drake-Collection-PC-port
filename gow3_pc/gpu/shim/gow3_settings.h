@@ -86,6 +86,10 @@ struct Values {
     /// gow3 21 Oct 2026: anisotropic filtering forced on scene samplers (0 = the game's own, 2, 4,
     /// 8 or 16 times). Live; Rasterizer::ForceAnisotropy.
     std::atomic<int> anisotropy{16};
+    /// gow3 25 Oct 2026: HD UI textures (hd_ui, GOW3_HD_UI; gow3_hdtex.h): bigger replacement images
+    /// for the games' UI art, found in the hd-textures folder. Read when a texture is uploaded, so
+    /// a change shows for textures that load afterwards.
+    std::atomic<bool> hd_ui{true};
     /// Set by the presenter: sharpening ran on the last frame (it needs FSR 1 when the game's
     /// image is smaller than the window).
     std::atomic<bool> rcas_applied{false};

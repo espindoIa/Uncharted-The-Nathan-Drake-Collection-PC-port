@@ -373,6 +373,9 @@ private:
                       Shader::Backend::Bindings& binding, u32& write_index);
     void ForceAnisotropy(AmdGpu::Sampler& sharp, const Shader::SamplerResource& sampler,
                          const Shader::Info& stage, const PreparedStage* prepared) const;
+    /// gow3 26 Oct 2026: full LOD range for samplers of unmipped images (HD UI texture mips).
+    void WidenSamplerForHdMips(AmdGpu::Sampler& sharp, const Shader::SamplerResource& sampler,
+                               const Shader::Info& stage, const PreparedStage* prepared) const;
     /// gow3: a stage's resolved textures remembered by its prepared T# hashes
     /// (TextureSetMemo): a hit only redoes the per-draw effects (binding flags, transitions).
     struct TextureSetEntry {

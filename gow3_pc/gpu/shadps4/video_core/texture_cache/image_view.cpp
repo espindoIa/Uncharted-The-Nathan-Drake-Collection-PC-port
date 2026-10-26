@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/logging/log.h"
+#include "gow3_hdtex.h"
 #include "shader_recompiler/resource.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -98,6 +99,13 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
     if (!info.is_storage) {
         usage_ci.usage &= ~vk::ImageUsageFlagBits::eStorage;
     }
+    vk::FormatFeatureFlags2 features = image.format_features;
+    const bool hd = image.UsingHd();
+    if (hd) {
+        // gow3 25 Oct 2026: the replacement backing is sampled only (Image::EnsureHdBacking).
+        usage_ci.usage = vk::ImageUsageFlagBits::eSampled;
+        features = vk::FormatFeatureFlagBits2::eSampledImage;
+    }
     vk::ImageViewMinLodCreateInfoEXT min_lod_ci{};
     if (info.min_lod != 0 && instance.IsImageViewMinLodSupported()) {
         const float last_level =
@@ -117,6 +125,14 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
         Vulkan::LiverpoolToVK::IsFormatStencilCompatible(format)) {
         format = image.info.pixel_format;
         aspect = vk::ImageAspectFlagBits::eStencil;
+    }
+
+    if (hd) {
+        // The T#'s view format is the guest's (BC1, say); the replacement has its own, in the
+        // colour space this view asks for.
+        format = static_cast<vk::Format>(Gow3HdTex::WithColorSpace(
+            static_cast<Gow3HdTex::Format>(image.hd.format),
+            Gow3HdTex::IsSrgb(static_cast<Gow3HdTex::Format>(info.format))));
     }
 
     // gow3: storage writes never convert to sRGB and sRGB formats cannot be storage images
@@ -144,16 +160,20 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
         }
     }
 
+    // 26 Oct 2026: a replacement has the file's whole mip chain, more levels than the guest's T#
+    // names (an atlas: one). The view reaches all of them from level 0, the sampler is widened to
+    // match (Rasterizer::BindSamplers); a T# that starts above level 0 keeps its range.
+    const bool hd_all_levels = hd && info.range.base.level == 0;
     const vk::ImageViewCreateInfo image_view_ci = {
         .pNext = &usage_ci,
         .image = image.GetImage(),
         .viewType = ConvertImageViewType(info.type),
-        .format = instance.GetSupportedFormat(format, image.format_features),
+        .format = instance.GetSupportedFormat(format, features),
         .components = info.mapping,
         .subresourceRange{
             .aspectMask = aspect,
             .baseMipLevel = info.range.base.level,
-            .levelCount = info.range.extent.levels,
+            .levelCount = hd_all_levels ? image.hd.levels : info.range.extent.levels,
             .baseArrayLayer = info.range.base.layer,
             .layerCount = info.range.extent.layers,
         },

@@ -607,6 +607,77 @@ ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_sam
     return (*slot_image_views)[view_id];
 }
 
+bool Image::EnsureHdBacking(vk::Format format, u32 width, u32 height, u32 levels) {
+    if (hd_backing && hd.format == format && hd.width == width && hd.height == height &&
+        hd.levels == levels) {
+        return true;
+    }
+    const auto& instance = runtime->GetInstance();
+    // Sampled only: a replacement is never a target, storage or a copy source (those drop it,
+    // UseGuestBacking), and block-compressed formats rarely allow more.
+    constexpr auto usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst;
+    constexpr auto flags = vk::ImageCreateFlagBits::eMutableFormat; // sRGB and UNORM views
+    if (!instance.IsFormatSupported(format, vk::FormatFeatureFlagBits2::eSampledImage |
+                                                vk::FormatFeatureFlagBits2::eTransferDst)) {
+        LOG_WARNING(Render_Vulkan, "HD UI texture {:#x}: format {} is not supported", info.guest_address,
+                    vk::to_string(format));
+        hd_off = true; // not tried again at every refresh
+        return false;
+    }
+    const auto properties = instance.GetPhysicalDevice().getImageFormatProperties2(
+        vk::PhysicalDeviceImageFormatInfo2{.format = format,
+                                           .type = vk::ImageType::e2D,
+                                           .tiling = vk::ImageTiling::eOptimal,
+                                           .usage = usage,
+                                           .flags = flags});
+    if (properties.result != vk::Result::eSuccess ||
+        properties.value.imageFormatProperties.maxExtent.width < width ||
+        properties.value.imageFormatProperties.maxExtent.height < height ||
+        properties.value.imageFormatProperties.maxMipLevels < levels) {
+        LOG_WARNING(Render_Vulkan, "HD UI texture {:#x}: {}x{} {} is too large for the device",
+                    info.guest_address, width, height, vk::to_string(format));
+        hd_off = true;
+        return false;
+    }
+    runtime->BeforeImageAccess(); // the binding helper must not read the image while it changes
+    auto image_ci = backing_images.front().image.image_ci; // the guest backing's
+    image_ci.flags = flags;
+    image_ci.format = format;
+    image_ci.extent = vk::Extent3D{width, height, 1};
+    image_ci.mipLevels = levels;
+    image_ci.samples = vk::SampleCountFlagBits::e1;
+    image_ci.usage = usage;
+
+    // A replacement of another size or format (the texture's data changed to another file) gets
+    // a new backing; the old one waits for the image to go (in-flight frames may still read it).
+    auto& created = backing_images.emplace_back();
+    created.num_samples = 1;
+    created.image = UniqueImage{instance.GetDevice(), instance.GetAllocator()};
+    created.image.Create(image_ci);
+    Vulkan::SetObjectName(instance.GetDevice(), created.image.image,
+                          "Image {}x{} {} {:#x}:{:#x} M:{} (HD replacement)", width, height,
+                          vk::to_string(format), info.guest_address, info.guest_size, levels);
+    hd_backing = &created;
+    hd = {format, width, height, levels};
+    hd_hash.reset();
+    return true;
+}
+
+void Image::UseHdBacking() {
+    // The rasterizer's texture binding helper reads `backing`: it is joined first, like for
+    // every other change of image state.
+    runtime->BeforeImageAccess();
+    backing = hd_backing;
+}
+
+void Image::UseGuestBacking(bool permanent) {
+    hd_off |= permanent;
+    if (UsingHd()) {
+        runtime->BeforeImageAccess();
+        backing = &backing_images.front();
+    }
+}
+
 void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
                         vk::PipelineStageFlags2 dst_stage,
                         std::optional<SubresourceRange> subres_range) {

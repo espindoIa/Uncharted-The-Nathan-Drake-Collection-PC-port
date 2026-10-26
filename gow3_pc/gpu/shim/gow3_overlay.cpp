@@ -514,6 +514,9 @@ void ImageTab() {
         ChoiceRow("Texture filtering", s.anisotropy, aniso_labels, aniso_values, int(std::size(aniso_values)),
                   "Sharper textures on floors and walls seen at an angle (anisotropic filtering). Game's is "
                   "how the PS4 drew them. Applied on the next draw.");
+        CheckRow("HD UI textures", s.hd_ui,
+                 "Sharper button icons, prompts and panels where the game's own art has an HD version "
+                 "(hd-textures folder). Applies to textures that load afterwards.");
         ImGui::EndTable();
     }
     ImGui::SeparatorText("Draw distance (experimental)");

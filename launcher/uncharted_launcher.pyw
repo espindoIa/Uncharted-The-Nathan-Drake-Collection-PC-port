@@ -197,7 +197,7 @@ INI_DEFAULTS = {
     "display_mode": "windowed", "vsync": "1", "fps_limit": "60", "frames_queued": "1",
     "async_shaders": "1", "fsr1": "0", "rcas": "1", "rcas_strength": "75", "show_fps": "1",
     "upscaler": "off", "preset": "0", "dlss_model": "k", "gpu_id": "-1", "anisotropy": "16",
-    "reflex": "0", "frame_gen": "0",
+    "reflex": "0", "frame_gen": "0", "hd_ui": "1",
     # The performance counter (Display section): the items on its line, its corner, layout, text size
     # and background opacity. The runtime's defaults; the in-game Overlay tab writes them too.
     # Items as the runtime starts (DefaultItems: FPS, frame time, upscaler) until the game has
@@ -2595,6 +2595,11 @@ class Launcher:
                         "how the PS4 drew them.",
                         [("0", "Game's"), ("4", "4x"), ("8", "8x"), ("16", "16x")], recommended="16",
                         short="Sharper textures on floors and walls seen at an angle. Game's is the PS4 look.")
+        self.ini_toggle(page, "hd_ui", "HD UI textures",
+                        "Sharper button icons, prompts and panels at 4K, where the package has an HD version of "
+                        "the game's own art (the hd-textures folder). Takes effect for textures that load "
+                        "afterwards. Also in the in-game menu.",
+                        short="Sharper button icons, prompts and panels at 4K.")
         self.ini_toggle(page, "show_fps", "Show performance counter",
                         "FPS, temperatures and memory in a corner of the screen. Insert, then the Overlay "
                         "tab, changes it in the game too.",

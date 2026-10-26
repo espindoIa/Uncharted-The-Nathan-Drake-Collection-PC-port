@@ -329,6 +329,10 @@ add_executable(aliasing-test EXCLUDE_FROM_ALL ../tests/test_aliasing.cpp
 target_compile_options(aliasing-test PRIVATE -UNDEBUG)
 target_include_directories(aliasing-test PRIVATE shim shadps4 third_party/gcn/include)
 target_link_libraries(aliasing-test PRIVATE Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum)
+# gow3 25 Oct 2026: HD UI texture loader (DDS parser, size and colour-space rules, lookup by hash).
+add_executable(hd-texture-test EXCLUDE_FROM_ALL ../tests/test_hd_texture.cpp shim/gow3_hdtex.cpp)
+target_compile_options(hd-texture-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(hd-texture-test PRIVATE Vulkan::Headers PkgConfig::XXHASH)
 add_executable(blend-rewrite-test EXCLUDE_FROM_ALL ../tests/test_blend_rewrite.cpp)
 target_compile_options(blend-rewrite-test PRIVATE -UNDEBUG)
 target_include_directories(blend-rewrite-test PRIVATE shim shadps4 third_party/gcn/include)

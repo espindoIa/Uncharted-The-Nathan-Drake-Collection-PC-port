@@ -256,8 +256,20 @@ Runtime::TransferMark::~TransferMark() {
 }
 
 void Runtime::UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
-                          std::span<const vk::BufferImageCopy> upload_copies) {
-    SetBackingSamples(dst, dst->info.num_samples, false);
+                          std::span<const vk::BufferImageCopy> upload_copies,
+                          vk::Format host_format) {
+    // gow3 25 Oct 2026: a replacement upload fills the HD backing the caller made current; the
+    // guest path must not switch it back.
+    const bool hd = host_format != vk::Format::eUndefined;
+    const vk::Format copy_format = hd ? host_format : dst->info.pixel_format;
+    if (!hd) {
+        // A guest upload says nothing about the image's eligibility (SetBackingSamples drops it).
+        // Joined first: the flag is read after any pending change to it has landed.
+        BeforeImageAccess();
+        const bool hd_off = dst->hd_off;
+        SetBackingSamples(dst, dst->info.num_samples, false);
+        dst->hd_off = hd_off;
+    }
     scheduler.EndRendering();
     const TransferMark mark{*this, "image upload", *dst};
 
@@ -265,7 +277,7 @@ void Runtime::UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
         Transit(dst, vk::ImageLayout::eTransferDstOptimal, vk::PipelineStageFlagBits2::eCopy,
                 vk::AccessFlagBits2::eTransferWrite);
     for (const auto& copy : upload_copies) {
-        const auto copy_size = BufferImageCopySize(copy, dst->info.pixel_format);
+        const auto copy_size = BufferImageCopySize(copy, copy_format);
         needs_flush |= IsBufferAccessed(src, copy.bufferOffset, copy_size);
     }
     if (needs_flush) {
@@ -279,7 +291,7 @@ void Runtime::UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
     });
 
     for (const auto& copy : upload_copies) {
-        const auto copy_size = BufferImageCopySize(copy, dst->info.pixel_format);
+        const auto copy_size = BufferImageCopySize(copy, copy_format);
         AccessBuffer(src, copy.bufferOffset, copy_size, vk::PipelineStageFlagBits2::eCopy,
                      vk::AccessFlagBits2::eTransferRead);
     }
@@ -564,6 +576,8 @@ void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32
 }
 
 void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
+    src->UseGuestBacking(true); // HD UI textures; CopyImage below does the same
+    dst->UseGuestBacking(true);
     if (src->info.num_samples == 1 && dst->info.num_samples == 1) {
         if (instance.IsMaintenance8Supported() ||
             src->info.props.is_depth == dst->info.props.is_depth) {
@@ -713,6 +727,7 @@ void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
 
 void Runtime::ClearImage(VideoCore::Image* dst, const VideoCore::SubresourceRange& range,
                          const vk::ClearValue& clear_value) {
+    dst->UseGuestBacking(true); // HD UI textures: a cleared image is not UI art
     scheduler.EndRendering();
 
     const bool needs_flush =
@@ -740,6 +755,10 @@ void Runtime::ClearImage(VideoCore::Image* dst, const VideoCore::SubresourceRang
 
 void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool copy_backing) {
     BeforeImageAccess();
+    // gow3 25 Oct 2026 (HD UI textures): anything but a sampled read of the image (a copy, a
+    // resolve, a download, a render target) works on the guest backing, which holds the guest
+    // data too, and the image gets no replacement again.
+    image->UseGuestBacking(true);
     auto& backing = image->backing;
     auto& backing_images = image->backing_images;
     const auto& info = image->info;

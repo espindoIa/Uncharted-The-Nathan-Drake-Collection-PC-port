@@ -780,6 +780,13 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
     const auto handle = inst.Arg(0);
     const auto& sampler_res = info.samplers[(handle.U32() >> 16) & 0xFFFF];
     const auto sampler = sampler_res.GetSharp(info);
+    // gow3 25 Oct 2026 (HD UI textures): a sampler that forces unnormalized coordinates is a
+    // texel-coordinate read like the instruction flag (below it divides by the queried size).
+    // PatchImageSharp cannot see the sampler, so the image is marked here. Not needs_native: that
+    // one also keeps scene proxies off (vk_rasterizer.cpp proxy_candidate).
+    if (sampler.force_unnormalized) {
+        info.images[handle.U32() & 0xFFFF].unnormalized_sampler = true;
+    }
 
     IR::IREmitter ir{*inst.GetParent(), IR::Block::InstructionList::s_iterator_to(inst)};
     const auto inst_info = inst.Flags<IR::TextureInstInfo>();

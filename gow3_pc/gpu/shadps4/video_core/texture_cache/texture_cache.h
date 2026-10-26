@@ -78,11 +78,16 @@ public:
         ImageInfo info;
         ImageViewInfo view_info;
         BindingType type{BindingType::Texture};
+        /// gow3 25 Oct 2026 (HD UI textures): the shader reads texels by integer coordinates,
+        /// sizes, offsets or an unnormalized sampler (Shader::ImageResource::needs_native,
+        /// unnormalized_sampler): it must see the guest-size image.
+        bool needs_guest_size{};
 
         ImageDesc() = default;
         ImageDesc(const AmdGpu::Image& image, const Shader::ImageResource& desc)
             : info{image, desc}, view_info{image, desc},
-              type{desc.is_written ? BindingType::Storage : BindingType::Texture} {}
+              type{desc.is_written ? BindingType::Storage : BindingType::Texture},
+              needs_guest_size{desc.needs_native || desc.unnormalized_sampler} {}
         ImageDesc(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint)
             : info{buffer, hint}, view_info{buffer}, type{BindingType::RenderTarget} {}
         ImageDesc(const AmdGpu::DepthBuffer& buffer, AmdGpu::DepthView view,
