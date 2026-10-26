@@ -209,7 +209,7 @@ tag `v0.1.1`; GitHub Actions then builds the package and publishes the release w
 | `tools/play.py` | Scripted play for tests and agents: start a game, hold buttons and sticks for a time, get the current screen as a PNG after each step (taken inside the port), record and replay routes, compare shots, measure frame times. `python tools/play.py --help`. |
 | `tools/release.sh`, `tools/release-notes/` | Publishes a release (see above). |
 | `gow3_pc/` | The runtime: C runtime (`src/`), GPU library (`gpu/`: shadPS4 video core and shims), preparation scripts (`scripts/`). |
-| `gow3_pc/assets/ui/` | The games' UI art the launcher uses (their font, the Collection logo), built by `tools/build_ui_art.py`; `hd/src/` holds the 4x redrawn UI textures (button icons, prompts, HUD, weapons) that the runtime shows in their place (`hd/u1..u3/*.dds` are generated). |
+| `gow3_pc/assets/ui/` | The games' UI art the launcher uses (their font, the Collection logo), built by `tools/build_ui_art.py`; `hd/src/` holds the redrawn UI textures (button icons, prompts, HUD, weapons), `hd/editable/` their VectorCraft/PhotoCraft editor sources and finishing recipes (`hd/u1..u3/*.dds` are generated). |
 | `analysis/` | The engineering log (`STATUS.md`, index at the top) and the old 15 Oct plan (`PLAN.md`, history). |
 
 ### Documentation

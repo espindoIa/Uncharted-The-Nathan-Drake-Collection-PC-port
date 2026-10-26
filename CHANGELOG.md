@@ -6,6 +6,11 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **UI art refinement (26 October).** Controller button sheets receive a restrained
+  sharpness pass that preserves their transparency and colours. The triangle
+  prompt has a less heavy rim, and the U1/U2 menu-frame masks now use 4096-pixel
+  masters. This editor pass has not yet been checked in game.
+
 - **HD UI textures (setting "HD UI textures", on by default).** The games' button icons, the
   triangle prompt, HUD icons, weapon pictures and a few menu pieces are redrawn at 4x the size and
   shown in their place, so they stay sharp at 4K: the circle, square, triangle and cross buttons,
