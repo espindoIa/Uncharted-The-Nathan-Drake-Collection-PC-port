@@ -38,7 +38,7 @@ New entries go at the end, dated, measured numbers only.
 - Text and subtitles at 4K (font atlases, text shader sharpening): `Sharp text above 1080p (25 Oct 2026)`
 - Main menu/subtitle fonts with less smoothing, original metrics retained: `26 October 2026: main-font contour fidelity`
 - Integrated HD art/font package installed with player data preserved: `26 October 2026: integrated UI package and player installation`
-- Community fork work taken in (26 Oct): `26 October 2026: fork work: U2 ultrawide HUD`, `26 October 2026: fork work: U2 ultrawide shadows`, `26 October 2026: fork work: batched deferred fences and launcher counter defaults`
+- Community fork work taken in (26 Oct): `26 October 2026: fork work: U2 ultrawide HUD` (the shadows commit was already in 0.6.1), `26 October 2026: fork work: batched deferred fences and counter defaults`
 
 - HD UI textures (bigger DDS replacements keyed by content hash, GOW3_TEX_DUMP, how unsafe shader reads drop them): `HD UI textures (25 Oct 2026)`
 - HD UI editor finishing, native VectorCraft/PhotoCraft sources and 4096 px menu masks: `26 October 2026: UI art finishing in VectorCraft and PhotoCraft`
@@ -5220,3 +5220,13 @@ Cherry-picked f457cc4 from feros's fork (upstream PR #191, not merged upstream),
 Conflicts with the fork: `DrawRecord` keeps the `GOW3_TARGET_DUMP` hook after the HUD passes (the HUD change turned the record lambda into `record_draw`); the launcher rows use the fork's `short=` hint lines and sit under the render-size note; the public `tools/github/CHANGELOG.md` is not touched (release time).
 
 Verified (26 Oct 2026, exit codes): `gow3_pc/build.sh` 0; `hud-layout-test` 0 (its `setenv`/`unsetenv` calls did not compile on Windows: now a `SetEnv` helper as in test_flight.cpp); launcher syntax check and `test_uncharted_launcher_ui` 49 tests 0 (the new HUD rows needed `short=` lines: a hint over 110 characters must have one). Not verified: any game run, so the layout rules are only checked by the unit test and by reading `DrawRecord`, not by eye on a 21:9 or 32:9 screen; the Wide mode is experimental upstream too.
+
+## 26 October 2026: fork work: batched deferred fences and counter defaults
+
+From BilalReloaded's `meme-igpu` branch (bdbb7cb renderer, c057f4e launcher; f0e143a only adds screenshots of the old launcher layout, left out). The IGPU card of c057f4e was already ported in the 0.7.0 merge (fork variant: 540p/720p, never 360p); this takes the rest.
+
+- **Batched deferred fences (`GOW3_COALESCE_FENCES=1`, off by default, unvalidated upstream too).** `Scheduler::SignalAfterHostCopies` queues the signal in a thread-local batch (64 at most) that `FlushDeferredSignals` records as one command; `WaitDeferredSignals`, `SyncRecording` and the draw pipe (`DrawPipe::FlushIfCaughtUp`, before it publishes `consumed`, so a `Drain` never leaves a fence unrecorded) flush it first. Order is unchanged, only the record, the chunk handoff and the copy-thread epoch are shared. Conflicts with the fork: the toggle bit. The branch used bit 56 of the first word, which is `RingReuse` here; it is `Disabled2` bit 53 (`CoalescedFences`, set = per-fence path). `DrawPipe` kept the fork's `GOW3_DRAWREC_STATS` code and gained the optional flush hook.
+- **Launcher.** Performance has "Batch GPU fences (experimental)" (`coalesce_fences`, `UNCHARTED_COALESCE_FENCES`; `probe_uncharted.py` sets `GOW3_COALESCE_FENCES=1`, an explicit `GOW3_*` value wins). The upstream branch made the IGPU preset turn it on; here it does not, because nothing has measured it and the 0.7.0 release left it out.
+- **Counter defaults.** `overlay_items` 7 -> 59 and `DefaultItems` = FPS, frame time, GPU, CPU, RAM; the launcher's `INI_DEFAULTS` match (kept equal, as in 51377ce). RAM is `ullTotalPhys - ullAvailPhys` again (0.6.0 had made it the process working set); the Overlay tab says "RAM (system)". Saved ini values are untouched.
+
+Verified (26 Oct 2026, exit codes): `gow3_pc/build.sh` 0 (the renderer and shim files compile and link); `perf-overlay-test` 0 (new defaults); launcher syntax check and `test_uncharted_launcher_ui` 49 tests 0; `test_prepare` 0. Not verified: any game run, so the batching is only built, not exercised (no ordering soak, no integrated GPU, no U2 run with `GOW3_COALESCE_FENCES=1`); the Performance row by eye; the new counter line in game.

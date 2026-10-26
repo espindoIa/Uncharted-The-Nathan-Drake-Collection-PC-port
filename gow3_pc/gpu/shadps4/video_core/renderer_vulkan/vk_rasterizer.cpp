@@ -316,7 +316,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
                 instance, 0, StaticMeshCapacity, VideoCore::MemoryType::Stream, "static crowd snapshots");
             ASSERT(!static_mesh_buffer->mapped_data.empty());
         }
-        draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
+        draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this, &FlushDrawPipeSignals, this);
     }
     // gow3: this thread joins the texture binding helper before it changes image state.
     runtime.SetImageAccessHook(&JoinBindHelper, this);
@@ -2993,6 +2993,10 @@ void Rasterizer::RunCommandInOrder(Common::UniqueFunction<void>&& command) {
         (*owned)();
     };
     RunInOrder(task, &heap, sizeof(heap));
+}
+
+void Rasterizer::FlushDrawPipeSignals(void* rasterizer) {
+    static_cast<Rasterizer*>(rasterizer)->scheduler.FlushDeferredSignals();
 }
 
 void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {

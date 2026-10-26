@@ -255,10 +255,11 @@ INI_DEFAULTS = {
     "reflex": "0", "frame_gen": "0", "hd_ui": "1",
     # The performance counter (Display section): the items on its line, its corner, layout, text size
     # and background opacity. The runtime's defaults; the in-game Overlay tab writes them too.
-    # Items as the runtime starts (DefaultItems: FPS, frame time, upscaler) until the game has
-    # written its ini once.
-    "overlay_fps": "1", "overlay_frametime": "1", "overlay_gpu": "0", "overlay_cpu": "0",
-    "overlay_ram": "0", "overlay_vram": "0", "overlay_upscaler": "1", "overlay_corner": "1",
+    # Items as the runtime starts (DefaultItems: FPS, frame time, GPU and CPU use with their
+    # temperatures, system RAM; 25 Oct 2026, from the community fork) until the game has written
+    # its ini once.
+    "overlay_fps": "1", "overlay_frametime": "1", "overlay_gpu": "1", "overlay_cpu": "1",
+    "overlay_ram": "1", "overlay_vram": "0", "overlay_upscaler": "0", "overlay_corner": "1",
     "overlay_layout": "0", "overlay_scale": "100", "overlay_opacity": "50",
 }
 # FSR/DLSS quality modes (the runtime's preset key, also in the in-game menu): 0 draws the scene at
@@ -344,7 +345,7 @@ HINT_MAX = 110  # a settings row's hint longer than this needs a `short` line (<
 SHORT_MAX = 100
 ALL_GAMES = "ALL GAMES"  # the badge on settings that apply to all three games (launcher config, not a game's ini)
 LAUNCHER_DEFAULTS = {"game": "u1", "diagnostics": True, "game_dir": "", "check_updates": True, "language": "1",
-                     "unlock": False}
+                     "unlock": False, "coalesce_fences": False}
 
 # The PS4's system language (its id, as sceSystemServiceParamGetInt reports it) for the 22 languages
 # the Collection has text for (all three games; text1/ps4/<n>.common in core.psarc). Each game's main
@@ -2998,6 +2999,17 @@ class Launcher:
             "in Drake's Fortune if its guns flicker grey.", multithreaded,
             short="Prepares the picture on a second CPU core: more FPS on some PCs. Turn off if a game hangs.")
 
+        def batched_fences(parent):
+            return Toggle(parent, self.s, bool(self.config.get("coalesce_fences", False)),
+                          lambda v: self.change_config("coalesce_fences", v))
+        self.widgets["coalesce_fences"] = self.row(
+            page, "Batch GPU fences (experimental)",
+            "Multithreaded rendering makes the GPU thread hand over up to ~45,000 completion signals a "
+            "second in Uncharted 2; recording them in groups takes that bookkeeping off the CPU. Needs "
+            "Multithreaded rendering (Drake's Fortune never uses it). Not measured yet: turn it off if a "
+            "game hangs or stutters.", batched_fences,
+            short="Records GPU completion signals in groups: less CPU work, untested. Needs multithreaded rendering.")
+
         def job_threads(parent):
             value = "off" if self.config.get("job_sleep", "auto") == "off" else "on"
             return Segmented(parent, (("on", "Sleep"), ("off", "Spin")), value,
@@ -3994,6 +4006,7 @@ class Launcher:
         env["UNCHARTED_DIAGNOSTICS"] = "1" if self.config.get("diagnostics", True) else "0"
         env["UNCHARTED_TORCH_FORWARD"] = "1" if self.config.get("torch_forward", True) else "0"
         env["UNCHARTED_JOB_SLEEP"] = "0" if self.config.get("job_sleep", "auto") == "off" else "1"
+        env["UNCHARTED_COALESCE_FENCES"] = "1" if self.config.get("coalesce_fences", False) else "0"
         env["UNCHARTED_LANGUAGE"] = str(self.config.get("language", "1"))
         env["UNCHARTED_SPEAKERS"] = str(self.config.get("speakers", "auto"))
         env["UNCHARTED_U3_EXPOSURE"] = str(self.config.get("u3_exposure", "0"))

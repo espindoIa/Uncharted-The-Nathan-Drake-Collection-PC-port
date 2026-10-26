@@ -287,6 +287,10 @@ enum : std::uint64_t {
     /// evicted or dropped). Read live at the upload (texture_cache.cpp, gow3_hdtex.cpp), 25 Oct
     /// 2026. Bits 17-18 are taken by work in progress; 46 and 47 are GameFxaa, JitterSmallDraws.
     HdUiTextures = 1ull << 48,
+    /// gow3 25 Oct 2026 (GOW3_COALESCE_FENCES=1, off by default): deferred compute-release and
+    /// end-of-pipe fences are recorded in batches instead of one record and one kick each. Bit
+    /// set: the old per-fence path. Bit 53 of this word because bit 56 of the first is RingReuse.
+    CoalescedFences = 1ull << 53,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

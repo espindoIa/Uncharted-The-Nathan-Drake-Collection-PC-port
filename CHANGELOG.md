@@ -6,6 +6,17 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Performance counter: new defaults, and RAM is the system's** (26 October; from BilalReloaded's
+  `meme-igpu` branch, 25 October). A fresh install shows FPS, frame time, GPU and CPU use (with
+  their temperatures) and RAM on one line, top right. RAM is the system's memory in use, what
+  Task Manager calls "In use", not the game's own working set; the in-game Overlay tab's item says
+  "RAM (system)". Players who already saved their counter settings keep them.
+- **Batch GPU fences (Performance, experimental, off by default).** With multithreaded rendering
+  Uncharted 2 hands the GPU command thread up to ~45,000 compute completion signals a second, each
+  recorded and handed over on its own; with this option they are recorded in groups of up to 64.
+  Not measured on any PC yet (the author had no integrated GPU); the IGPU preset does not turn it
+  on. Environment: `UNCHARTED_COALESCE_FENCES=1` (runtime `GOW3_COALESCE_FENCES=1`).
+
 - **Uncharted 2 ultrawide: the HUD and menus are no longer stretched** (26 October; from
   feros's fork, upstream PR #191; launcher -> Display -> HUD). At 21:9 and 32:9, **16:9** (the
   default) draws them in the middle 16:9 of the screen; full-screen fades and backdrops still
