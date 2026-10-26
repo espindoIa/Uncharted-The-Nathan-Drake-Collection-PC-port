@@ -23,12 +23,14 @@
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "common/thread.h"
 #include "gow3_overlay.h"
+#include "gow3_toggles.h"
 #include "shader_recompiler/ir/passes/ir_passes.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_motion_addresses.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_warmup_inbox.h"
@@ -590,9 +592,10 @@ void RegisterPipelineData(const GraphicsPipelineKey& key, u64 hash,
     if (!Storage::DataBase::Instance().IsOpened()) {
         return;
     }
-    // gow3 21 Oct 2026: motion-vector vertex stages are never loaded from disk (LoadShaderMeta
-    // rejects them), so their keys only failed on every start.
-    if (key.motion_vectors) {
+    // gow3 21 Oct 2026: motion-vector vertex stages were never loaded from disk (LoadShaderMeta
+    // rejected them), so their keys only failed on every start. 25 Oct 2026: they load now (the
+    // binary carries address placeholders), unless MotionShaderCache is set.
+    if (key.motion_vectors && Gow3Toggle::Disabled2(Gow3Toggle::MotionShaderCache)) {
         return;
     }
 
@@ -736,6 +739,30 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
         return;
     }
 
+    // 25 Oct 2026: the live module was made from the original SPIR-V before this call, so the
+    // stored copy can carry placeholders for the session's motion addresses (the hash below is
+    // of the bytes saved). A shader that does not rewrite cleanly is stored as it is: the
+    // loader refuses it (no placeholders) and it compiles again.
+    namespace MA = MotionAddresses;
+    if (!Gow3Toggle::Disabled2(Gow3Toggle::MotionShaderCache) &&
+        Shader::MotionVectors::positions_address != 0) {
+        const u64 params = Shader::MotionVectors::params_address;
+        const u64 positions = Shader::MotionVectors::positions_address;
+        const auto counts = MA::Rewrite(spv, params, positions, MA::CachedParams, MA::CachedPositions);
+        if (counts.params + counts.positions != 0 &&
+            !(counts.params >= 1 && counts.positions >= 1 && counts.derived == 0 && !counts.malformed)) {
+            MA::Rewrite(spv, MA::CachedParams, MA::CachedPositions, params, positions);
+            static std::atomic<u32> reported{0};
+            if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+                std::printf("Pipeline cache: motion vertex shader %#llx permutation %zu not "
+                            "cached (addresses: %u/%u, derived %u)\n",
+                            static_cast<unsigned long long>(pgm_hash), perm_idx, counts.params,
+                            counts.positions, counts.derived);
+                std::fflush(stdout);
+            }
+        }
+    }
+
     {
         std::scoped_lock lock{g_binary_hash_mutex};
         g_binary_hashes[HashCombine(pgm_hash, u64(perm_idx))] =
@@ -784,6 +811,38 @@ static bool LooksLikeSpirv(const std::vector<u32>& spv) {
     return spv.size() >= 5 && spv[0] == 0x07230203u;
 }
 
+/// Puts this session's motion buffer addresses into a stored motion vertex shader (after
+/// BinaryMatchesMeta, which checks the bytes as stored). False: no placeholders to replace, the
+/// stage is unusable like a missing binary.
+static bool RestoreMotionAddresses(std::vector<u32>& spv, const Shader::Info& info,
+                                   const Shader::StageSpecialization& spec, size_t perm_idx) {
+    if (info.hw_stage != Shader::HwStage::Vertex || !spec.runtime_info.hw.vs.motion_vectors) {
+        return true;
+    }
+    namespace MA = MotionAddresses;
+    const auto counts = MA::Rewrite(spv, MA::CachedParams, MA::CachedPositions,
+                                    Shader::MotionVectors::params_address,
+                                    Shader::MotionVectors::positions_address);
+    if (counts.params >= 1 && counts.positions >= 1 && !counts.malformed) {
+        return true;
+    }
+    // A literal-address binary (another build, or the bit set) is never usable: drop the pair so
+    // the permutation compiles and saves anew, as BinaryMatchesMeta does.
+    auto& db = Storage::DataBase::Instance();
+    db.Remove(Storage::BlobType::ShaderMeta,
+              fmt::format("{:#018x}", HashCombine(info.pgm_hash, u64(perm_idx))));
+    db.Remove(Storage::BlobType::ShaderBinary,
+              Serialization::ShaderBinaryName(info.pgm_hash, perm_idx));
+    static std::atomic<u32> reported{0};
+    if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+        std::printf("Pipeline cache: motion vertex shader %#llx permutation %zu has no address "
+                    "placeholders; compiled again\n",
+                    static_cast<unsigned long long>(info.pgm_hash), perm_idx);
+        std::fflush(stdout);
+    }
+    return false;
+}
+
 bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
                     std::optional<Shader::Gcn::FetchShaderData>& fetch_shader_data,
                     Shader::StageSpecialization& spec, size_t& perm_idx, u64& binary_hash) {
@@ -813,9 +872,12 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     spec.Deserialize(ar);
     info.Deserialize(ar);
 
-    // Motion vertex shaders embed session-local buffer device addresses. They must be
-    // recompiled for the current allocation, never loaded from a previous process.
-    if (info.hw_stage == Shader::HwStage::Vertex && spec.runtime_info.hw.vs.motion_vectors) {
+    // Motion vertex shaders embed session-local buffer device addresses. Stored ones carry
+    // placeholders that the loaders replace (RestoreMotionAddresses; 25 Oct 2026). Without
+    // MotionShaderCache, or before the motion buffers exist, they are recompiled as before.
+    if (info.hw_stage == Shader::HwStage::Vertex && spec.runtime_info.hw.vs.motion_vectors &&
+        (Gow3Toggle::Disabled2(Gow3Toggle::MotionShaderCache) ||
+         Shader::MotionVectors::positions_address == 0)) {
         return false;
     }
 
@@ -999,7 +1061,8 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
         NoteCorruptCacheEntry(spv_name, "not SPIR-V");
         return false;
     }
-    if (!BinaryMatchesMeta(spv, binary_hash, program->info.pgm_hash, perm_idx)) {
+    if (!BinaryMatchesMeta(spv, binary_hash, program->info.pgm_hash, perm_idx) ||
+        !RestoreMotionAddresses(spv, program->info, spec, perm_idx)) {
         return false;
     }
 
@@ -1363,7 +1426,9 @@ void PipelineCache::ReadWarmEntry(BackgroundWarmup& warm, std::vector<u8>&& data
                                 NoteCorruptCacheEntry(spv_name, "not SPIR-V");
                             } else if (BinaryMatchesMeta(spv, binary_hash,
                                                          stage->program->info.pgm_hash,
-                                                         stage->perm_idx)) {
+                                                         stage->perm_idx) &&
+                                       RestoreMotionAddresses(spv, stage->program->info,
+                                                              stage->spec, stage->perm_idx)) {
                                 const auto module_started = std::chrono::steady_clock::now();
                                 stage->module = CompileSPV(spv, stage->device);
                                 module_time = ElapsedNs(module_started);
