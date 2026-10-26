@@ -6,6 +6,14 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **UI fidelity refinement (26 October).** The controller cross has a finer stroke,
+  the world triangle has rounder corners, five weapon/grenade pictures have tones
+  closer to the originals, and the foliage ornament has more relief. Native
+  VectorCraft/PhotoCraft projects are kept with the art. All 60 HD sources were
+  compared with the originals; soft effects retain their fades. Missing prompt
+  references and icons not seen in short game checks are listed individually in
+  the art inventory, rather than counted as complete.
+
 - **UI art refinement (26 October).** Controller button sheets receive a restrained
   sharpness pass that preserves their transparency and colours. The triangle
   prompt has a less heavy rim, and the U1/U2 menu-frame masks now use 4096-pixel
