@@ -18,7 +18,20 @@ ucclogo-eng.tga and its -alpha twin, 1024x256 BC1 / BC4, PS4 1D-thin tiled and s
     # paths 60, corners 60, noise 3, ignore white), export wordmark.svg. The launcher draws that
     # SVG at the exact size each screen scale needs (launcher/art.py svg_mask): no bitmap resize.
 
-Needs Pillow; fontTools for `font` (build time only: the launcher only loads the results).
+The HD textures. Replacements for the games' UI textures that the runtime swaps in (gow3_hdtex.cpp):
+
+    python tools/build_ui_art.py hd [--only <hash prefix>] [--preview] [--rgba] [--src DIR] [--out DIR]
+
+    Reads  gow3_pc/assets/ui/hd/src/<u1|u2|u3>/<hash16hex>_<w>x<h>_<vkformat>.<png|svg>  (the name of the
+    texture dump, w x h = the guest size; PNG already at the target size, SVG drawn at it: 4x up to 512 px
+    on the long side, 2x up to 1024, 1x above), writes  hd/<game>/<hash16hex>_<w>x<h>.dds  with the full mip
+    chain (premultiplied box filter, linear light for *Srgb* guests) and a DX10 header. Format by guest:
+    Bc4/R8 -> BC4 (the R channel), Bc5/R8G8 -> BC5, opaque Bc1 -> BC1, everything else -> BC3; a name ending
+    in .rgba.png / .rgba.svg (or --rgba) keeps uncompressed RGBA8. --preview writes before/after PNGs to
+    analysis/ui-hd-preview/ (before = analysis/ui-dump/ PNG, bilinear to the target size; after = our DDS decoded).
+    The SVG rasteriser and block encoders are in tools/hd_art.py (numpy + Pillow).
+
+Needs Pillow; fontTools for `font` (build time only: the launcher only loads the results); numpy for `hd`.
 """
 import io
 import json
@@ -283,5 +296,86 @@ def logo(game):
     print(f"-> {out}")
 
 
+HD_NAME = re.compile(r"([0-9a-f]{16})_(\d+)x(\d+)_(\w+)")
+
+
+def hd_scale(width, height):
+    """HD factor over the guest size: 4x up to 512 px on the long side, 2x up to 1024, else 1x."""
+    return 4 if max(width, height) <= 512 else 2 if max(width, height) <= 1024 else 1
+
+
+def hd_kind(fmt, opaque):
+    """DDS format the runtime accepts for a guest format (Fit: channels must match the guest's)."""
+    if fmt.startswith(("Bc4", "R8Unorm")):
+        return "bc4"
+    if fmt.startswith(("Bc5", "R8G8Unorm")):
+        return "bc5"
+    return "bc1" if fmt.startswith("Bc1") and opaque else "bc3"
+
+
+def hd(argv=()):
+    """Turns hd/src/<game>/<hash>_<w>x<h>_<fmt>.{png,svg} into hd/<game>/<hash>_<w>x<h>.dds (see the docstring)."""
+    import argparse
+    import numpy as np
+    import hd_art
+    ap = argparse.ArgumentParser(prog="build_ui_art.py hd")
+    ap.add_argument("--only", default="", help="hash prefix")
+    ap.add_argument("--preview", action="store_true", help="side-by-side PNGs in analysis/ui-hd-preview/")
+    ap.add_argument("--rgba", action="store_true", help="keep uncompressed RGBA8 for every texture")
+    ap.add_argument("--src", type=Path, default=UI / "hd" / "src")
+    ap.add_argument("--out", type=Path, default=UI / "hd")
+    args = ap.parse_args(list(argv))
+    done = 0
+    for game in sorted(p for p in args.src.glob("*") if p.is_dir()) if args.src.is_dir() else []:
+        for file in sorted(game.iterdir()):
+            raw = file.name[:-len(file.suffix)]
+            keep_rgba = raw.endswith(".rgba")
+            m = HD_NAME.fullmatch(raw[:-5] if keep_rgba else raw)
+            if file.suffix not in (".png", ".svg") or not m or not m.group(1).startswith(args.only):
+                continue
+            hashname, gw, gh, fmt = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4)
+            k = hd_scale(gw, gh)
+            tw, th = gw * k, gh * k
+            if file.suffix == ".svg":
+                rgba, warnings = hd_art.render_svg(file, tw, th)
+            else:
+                img = Image.open(file).convert("RGBA")
+                warnings = []
+                if img.width % gw or img.height % gh or img.width // gw != img.height // gh:
+                    warnings.append(f"{img.size} is not a multiple of {gw}x{gh}: resized to {tw}x{th}")
+                    img = img.resize((tw, th), Image.LANCZOS)
+                rgba = np.asarray(img)
+            for w in warnings:
+                print(f"{file.name}: {w}")
+            kind = "rgba" if keep_rgba or args.rgba else hd_kind(fmt, bool((rgba[..., 3] == 255).all()))
+            if kind in ("bc4", "bc5"):  # the mask is what shows through: R (and G) over black
+                rgba = rgba.copy()
+                rgba[..., :3] = rgba[..., :3].astype(np.uint16) * rgba[..., 3:] // 255
+                rgba[..., 3] = 255
+            data = hd_art.build_dds(rgba, kind, "Srgb" in fmt)
+            target = args.out / game.name / f"{hashname}_{gw}x{gh}.dds"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            done += 1
+            print(f"{game.name}/{target.name}: {rgba.shape[1]}x{rgba.shape[0]} {kind}, {len(data)} bytes")
+            if args.preview:
+                dump = ROOT / "analysis" / "ui-dump" / game.name / f"{raw[:-5] if keep_rgba else raw}.png"
+                th, tw = rgba.shape[:2]  # a source PNG may be larger than the default scale (e.g. 2x parchment)
+                before = (Image.open(dump).convert("RGBA").resize((tw, th), Image.BILINEAR) if dump.exists()
+                          else Image.new("RGBA", (tw, th), (255, 0, 255, 255)))
+                payload = data[148:148 + len(hd_art.encode_level(rgba, kind))]
+                after = Image.fromarray(hd_art.decode_level(payload, kind, tw, th), "RGBA")
+                sheet_ = Image.new("RGBA", (tw * 2 + 8, th), (128, 128, 128, 255))
+                for i, part in enumerate((before, after)):
+                    sheet_.alpha_composite(part, (i * (tw + 8), 0))
+                out = ROOT / "analysis" / "ui-hd-preview" / game.name
+                out.mkdir(parents=True, exist_ok=True)
+                sheet_.convert("RGB").save(out / f"{target.stem}.png")
+    print(f"{done} texture(s) -> {args.out}")
+
+
 if __name__ == "__main__":
-    {"sheet": sheet, "font": font, "logo": logo}[sys.argv[1]](*sys.argv[2:])
+    if sys.argv[1] == "hd":
+        hd(sys.argv[2:])
+    else:
+        {"sheet": sheet, "font": font, "logo": logo}[sys.argv[1]](*sys.argv[2:])

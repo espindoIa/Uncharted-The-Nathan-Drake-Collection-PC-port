@@ -194,6 +194,10 @@ struct ImageResource {
     /// gow3: read other than by normalized sampling without offsets (texel loads, size
     /// queries, offsets): needs the native-size image, not a reduced scene proxy.
     bool needs_native{};
+    /// gow3 25 Oct 2026 (HD UI textures): a sampler with force_unnormalized reads it (texel
+    /// coordinates, like needs_native, but not a reason to keep a scene proxy off): only the
+    /// replacement of a UI texture by a larger one looks at it.
+    bool unnormalized_sampler{};
     u8 constant_mip_index{};
     MipStorageFallbackMode mip_fallback_mode{};
     SharpFetchPostOp post_op{};

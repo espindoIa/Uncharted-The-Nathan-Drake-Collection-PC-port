@@ -129,6 +129,22 @@ struct Image {
 
     ImageView& FindView(const ImageViewInfo& view_info, bool ensure_guest_samples = true);
 
+    /// gow3 25 Oct 2026 (HD UI textures, gow3_hdtex.cpp): whether sampling reads the larger
+    /// replacement backing. info, guest_size and mips_layout always describe the guest image;
+    /// only the VkImage, its views and the upload differ.
+    bool UsingHd() const {
+        return hd_backing && backing == hd_backing;
+    }
+    /// Creates (once per size and format) the replacement backing; false when the device cannot
+    /// (logged once: the image gets no replacement again, hd_off).
+    bool EnsureHdBacking(vk::Format format, u32 width, u32 height, u32 levels);
+    /// Makes the replacement backing the one sampled (after its upload is queued).
+    void UseHdBacking();
+    /// Samples the guest backing again. permanent: the image is no longer eligible (render
+    /// target, storage, copy source or destination, or a shader reading texels by integer
+    /// coordinates), so no replacement is made for it again.
+    void UseGuestBacking(bool permanent);
+
     using Barriers = boost::container::small_vector<vk::ImageMemoryBarrier2, 32>;
     void GetBarriers(Barriers& out_barriers, vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
                      vk::PipelineStageFlags2 dst_stage,
@@ -189,7 +205,19 @@ public:
         u32 last_view = 0; ///< gow3: index of the view FindView returned last
         u32 num_samples;
     };
-    std::deque<BackingImage> backing_images;
+    std::deque<BackingImage> backing_images; ///< [0] is the guest backing
+    /// HD UI textures: the replacement backing (in backing_images) and its format and size. The
+    /// guest backing holds the guest data too (uploaded with every refresh), so going back to it
+    /// needs no copy.
+    BackingImage* hd_backing{};
+    struct {
+        vk::Format format = vk::Format::eUndefined;
+        u32 width = 0, height = 0, levels = 0;
+    } hd;
+    bool hd_off = false; ///< no replacement for this image (any more)
+    /// Hash of the guest bytes whose replacement the HD backing holds (none: nothing uploaded
+    /// since it was made), so an unchanged texture is not uploaded again.
+    std::optional<u64> hd_hash;
     boost::container::static_vector<u64, 16> mip_hashes{};
     u64 lru_id{};
     u64 hash{};

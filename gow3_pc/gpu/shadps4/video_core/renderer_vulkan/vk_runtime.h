@@ -72,8 +72,11 @@ public:
         GpuProfiler* profiler = nullptr;
         u64 resume = 0;
     };
+    /// host_format: gow3 HD UI textures, the format of the replacement backing the copies fill
+    /// (dst->backing is already it); eUndefined is the guest image.
     void UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
-                     std::span<const vk::BufferImageCopy> upload_copies);
+                     std::span<const vk::BufferImageCopy> upload_copies,
+                     vk::Format host_format = vk::Format::eUndefined);
     void DownloadImage(VideoCore::Image* src, const VideoCore::Buffer* dst,
                        std::span<const vk::BufferImageCopy> download_copies);
 

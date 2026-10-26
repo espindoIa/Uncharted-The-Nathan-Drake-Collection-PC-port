@@ -276,6 +276,11 @@ enum : std::uint64_t {
     /// the scene jitter like the GOW3_JITTER_PS passes, and full-screen jitter is scaled to the
     /// pass's own size (25 Oct 2026, player: lamp shadows flicker on and off under DLSS/TAA/FSR).
     ShadowPassJitter = 1ull << 45,
+    /// Bit set: no new HD UI texture replacements (a texture whose data is uploaded while it is
+    /// set stays at the guest size; replacements already made keep showing until their image is
+    /// evicted or dropped). Read live at the upload (texture_cache.cpp, gow3_hdtex.cpp), 25 Oct
+    /// 2026. Bits 17-18 are taken by work in progress; 46 and 47 are GameFxaa, JitterSmallDraws.
+    HdUiTextures = 1ull << 48,
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;
