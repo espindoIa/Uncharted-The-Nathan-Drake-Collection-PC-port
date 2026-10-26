@@ -48,9 +48,11 @@ New entries go at the end, dated, measured numbers only.
 - U3 visual and frame-rate reports (24 Oct): `Market hitches: diagnostics, not reproduced (24 Oct 2026)`, `U3 Sully shirt stretched: LDS out of bounds (24 Oct 2026)`, `U3 chapter 2 frame drop: player capture, stage B limit, two opt-ins re-measured (24 Oct 2026)`, `Crowd skinning dispatch runs (24 Oct 2026, opt-in)`, `U3 blur suspects: jitter and DOF diagnostics (24 Oct 2026)`
 - DLAA LOD bias: `21 October 2026 (night): DLAA texture LOD bias -1 (toggle bit 4096)`
 - U1 treasure models: `24 October 2026 (night): U1 treasure models, synchronous shaders again`
+- U1 stall at the first gameplay frame (motion shaders now cached, `_ldsb` cache misses): `U1 gameplay-start stall: motion-vector shaders cached (25 Oct 2026)`
 - Launcher lettering (the games' font and logo, vector, `tools/build_ui_art.py`): `25 October 2026: launcher lettering from the games' files`
 
 - Launcher redesign (stage, per-game colour, 4K icons, trophy coins): `Launcher redesign and 4K-sharp drawing (25 Oct 2026)`
+- Tried and removed (25 Oct): U2 SRT sync fetch (98% of syncs have the write in the open batch), U3 variant-check filter skip (+0.2 FPS, inside noise), latent early-tick issue in `FetchOldGpuBytes`: `25 October 2026: SRT sync fetch and variant filter skip (U2, U3) - measured, rejected, code removed`
 
 Target: CUSA02344 v01.00, eboot.bin (Drake’s Fortune).
 
@@ -5018,3 +5020,91 @@ excluded from this commit. No launcher, icon, runtime or shader change.
   for this revision. Menu/subtitle appearance, all letters at usage size, live asset acceptance,
   other resolutions and the installed package remain unverified. No performance claim, push or
   reinstall. The launcher's TTF and classic/Russian/CJK fonts are unchanged.
+
+## 25 October 2026: SRT sync fetch and variant filter skip (U2, U3) - measured, rejected, code removed
+
+Two ideas from the 25 Oct logs, built, reviewed three times and measured in game; neither earned its code, so both were removed (AGENTS.md "Repository upkeep"). Nothing is left in the tree; the numbers are here so nobody retries them blind.
+
+**1. U2 SRT sync waits for all GPU work.** Evidence: U2 `boot.log` (DLSS Quality, 4K output): 30-123 SRT syncs per 5 s, about 7 ms each, up to 915 ms per 5 s at `DownloadRanges`' `scheduler.Finish()` on the GPU command thread (about 18%). U1 1-5 per 5 s, U3 1-3.
+- Idea: for a table whose GPU write is in an already submitted batch, fetch its pages by waiting for that write only (`ReadFinishedGpuPage` / `CopyFinishedGpuPage`, as the write fault does) instead of `Finish()`.
+- Measured (`C:/dev/bench/perf_20261025_u2verify.txt`, U2 4K, 30 s, verify on): 0 mismatches in 3 verified fetches (small sample), no ASSERT / device lost. But 7 windows of 5 s show 47-64 syncs each with **0-1 on the fast path**: 98% were refused as "open batch" (the GPU write is still in the command buffer being recorded, so only a full `Finish()` gets it). Mean `DownloadRanges` wait 6.7-7.2 ms. The A/B was skipped (a 2% hit rate cannot move frame time).
+- Cause of the miss: the SRT walker reads a table in the same frame that a dispatch wrote it, so the write is never in an older batch. A real fix has to avoid the dependency (submit earlier, or have stage A not need the bytes), not fetch faster.
+- A review found a latent issue in code that stays: `FetchOldGpuBytes` and `GpuBytesInFlight` / the `SweepTracking` erase judge GPU bytes final from the raw window and `page_writes` ticks. A bind that submits mid-way (texture readback resolve, stream copy waiting for room) stamps its pages one batch early, so the write-fault shared-write path could fetch before the command ran. Never seen in a log (a counter of such binds read 0 in every 5 s window of the U2 run above). If it is ever pursued: record `{from, to}` late ticks in an `EndBind` after `BindResources` and raise them in `FetchableWindowTick`, and make `FetchOldGpuBytes` require `FetchableWindowTick(page, false)` non-zero.
+
+**2. U3 variant check repeats the garbage filter.** Evidence: U3 stage A profile `C:/dev/bench/prof_runs` (24 Oct): `MatchesComputeBuffers` about 6.9% of stage A.
+- Idea: apply the cut `ForEachBufferSharp` already makes (22 Oct) inside `MatchesComputeBuffers`.
+- Measured: `GOW3_STAGEA_VERIFY=1` in the Cartagena street (`perf_20261025_u3verify.txt`, 30 s): effect-filter mismatches 0, 1,741 filter checks skipped per frame. A/B at 4K (`opt_ab.py`, 4 windows each, alternating, `perf_20261025_u3ab.txt`): bit clear 66.6 / 67.2 / 67.2 / 67.0 FPS (mean 67.0) against bit set 67.5 / 66.2 / 66.6 / 67.0 (mean 66.8); p99 about 22-24 ms in both. Difference +0.2 FPS, inside the 0.3 FPS A/A noise. External load 2.2-3.6 cores (other sessions building), so it is weak evidence, but the effect is not visible.
+- Reading: the repeated `ClampRangeSize` lookup is a small part of the 6.9%; the rest of `MatchesComputeBuffers` is `GetSharp` itself and `DescribeBuffer`. Next candidate if stage A is pursued again: `CollectRingBindings` (26% of stage A) or the whole-match memo (needs a hit-rate count first).
+
+**Not verified:** the A/B windows overlap other sessions' CPU load; U1; other chapters; laptops. The `Disabled2` bits 48 and 49 were never committed, so they are free again.
+
+## U1 gameplay-start stall: motion-vector shaders cached (25 Oct 2026)
+
+Symptom: since U1 compiles shaders synchronously again (24 Oct), every boot stalled once at the
+first gameplay frames: 97-277 ms frames with 44-73 compiles. 25 Oct 15:52 and 15:53 boots, same
+counts both times: "97.3 ms frame; ... 44 compiles 80.4 ms; graphics shaders 9 7.2 ms + variants
+11 8.5 ms, graphics pipelines 24 64.6 ms", after "Pipeline warm-up: 179 of 2525 pipelines".
+
+Two separate causes, both found in the on-disk cache (analysis/uncharted-user/cache/CUSA02320-eboot):
+
+1. Why the warm-up built only 179 of 2525. A replay of the warm-up's file checks (node script over
+   the keys, metas and binaries): 2,093 of the 2,476 graphics keys failed only because a stage's
+   SPIR-V existed under its pre-24-Oct name (`<hash>_<perm>.spv`) while the warm-up asked for
+   `<hash>_<perm>_ldsb.spv`. 4a489cf (24 Oct, LDS bounds) adds `_ldsb` to every shader's binary
+   name (ShaderBinaryName), graphics too, though the pass only changes compute shaders; the 1,541
+   metas of 21 Oct (version 12) still loaded. A boot rewrote only the binaries it compiled, so the
+   gap shrank slowly (1,326 missing files on 24 Oct 18:32, 1,102 on 25 Oct 15:53). Not changed
+   here: dc96dab (25 Oct 11:21, ShaderMetaVersion 14) accepts no older meta, so the first boot of a
+   current build rebuilds every shader it uses anyway (the 15:53 exe predated it: every meta on
+   disk was v12 or v13). The `_ldsb` name on graphics shaders is harmless after that; only a
+   change of GOW3_LDS_BOUNDS would rename them again for nothing.
+2. Why the same ~44 compiles came back on every boot. They were the object-motion vertex shaders
+   (hw.vs.motion_vectors, DLSS/DLAA/FSR motion) and their pipelines. Their SPIR-V held this
+   session's buffer device addresses (MotionVectors::params_address, positions_address) as 64-bit
+   constants, so LoadShaderMeta rejected them and RegisterPipelineData never saved their keys
+   (fbf5924, 21 Oct): they compiled at first use in every session. With async shaders (U1 until
+   24 Oct) that happened in the background; synchronous, it stalls. Evidence: the 15:53 boot
+   compiled 24 graphics pipelines and wrote no g_*.key file; it wrote 47 metas, 46 of them vertex
+   metas with hw.vs.motion_vectors = 1 (byte 132 of a v13 meta). Side effect: a motion variant
+   takes the next free permutation index of its program, and with few permutations loaded (cause
+   1) it overwrote the meta and binary of slots that saved non-motion keys pointed at (those 46),
+   so those keys failed at the next warm-up too.
+
+Fix (Disabled2 bit 52 `MotionShaderCache`, read live; set = old behaviour):
+- EmitVertexMotion uses exactly two address constants, the params and positions bases (the +16
+  of the offsets load is now an OpIAdd in the shader).
+- RegisterShaderBinary stores those two constants as placeholders (0x4d4f54494f4e0001/2,
+  `vk_motion_addresses.h`). A shader where only one base is found, or another 64-bit constant lies
+  within 4 GiB above a base (a derived address the swap would leave stale), is stored with its
+  literal addresses: the loaders refuse it and it compiles again.
+- LoadShaderMeta accepts motion vertex metas when the motion buffers exist (ObjectMotion is created
+  with the rasterizer, before any warm-up). Both loaders (WarmUp's LoadPipelineStage and the
+  background ReadWarmEntry) patch this session's addresses in after BinaryMatchesMeta (which
+  checks the bytes as stored); a motion binary without both placeholders is a miss and its meta
+  and binary are removed, as BinaryMatchesMeta does.
+- Motion pipeline keys are saved.
+- Pipeline binaries (GOW3_PIPELINE_BINARIES=1) are keyed by the driver from the patched module,
+  so a binary of another session is never restored; the same for the driver's VkPipelineCache.
+- Unit test `motion-addresses-test` (the SPIR-V walk: both bases swapped and back, a derived
+  constant counted and left alone, 32-bit constants untouched, a zero word count).
+
+Measured (4K, DLAA, multithreaded, worktree build through tools/play.py, 26 Oct): boot 1 rebuilt
+the cache (meta v14): warm-up 66 of 2543, gameplay start 755 ms worst frame, 219 compiles in its
+5 s window. Boot 2, the same route: "Pipeline warm-up: 285 of 2562 pipelines in 5.57 s"; the
+windows entering gameplay (1212-1345 draws/frame) had 0 compiles and 16.9-19.7 ms worst frames
+(was 97.3 ms with 44 compiles). One later window: 11 compiles, 31.6 ms (a new area). Cache after
+boot 2: 47 motion vertex metas referenced by saved keys, 47 binaries with the placeholders; no
+"no address placeholders" or "not cached" lines. Object motion ran (74,248-74,554 draws with
+history per 5 s, as on 25 Oct).
+
+Not verified: the motion vectors' image quality (no shot comparison; only that object motion ran
+with history); U2 and U3 (async shaders: there the cached motion pipelines should spare their
+skipped draws at gameplay start, not measured); whether the device addresses are the same on
+every boot (if not, the driver compiles the motion pipelines again in the warm-up each boot,
+in the background); the bit set (old behaviour) after the fix; a vertex shader that is not a
+motion one but holds both live addresses as 64-bit immediates would be stored with placeholders
+and not patched (not seen; the swap runs on every stored shader). The automated route answered
+U1's "Save game" list with GOW3_TEST_CHOICE=0 (the pad file does not reach the port's dialogs),
+so boot 1 added a new save in profile 1.
+
+**Checked in U2 and U3 (26 Oct 2026, this branch's build, 4K DLAA, multithreaded, `validate_u1branch.sh`-style: boot with the cache filling, boot with it used, boot with bit 52 set; logs and screenshots `C:/dev/bench/u1br_<game>_<arm>.{log,png}`).** No ASSERT / device lost / VK_ERROR in any of the 6 boots. Stalls with compiles only on U3's first (cold) boot: 167 and 136 ms, 4 compiles each; 0 with the cache used. The old path (bit 52 set) had no gameplay-start stall in U2 or U3 either, so the gain is U1's. Screenshots after a camera turn show no ghosting or smearing in either path (pixel diff 2.0 U2, 9.0 U3, from slightly different camera stops, not artefacts). Not checked: FPS, device-address stability across boots, laptops.
