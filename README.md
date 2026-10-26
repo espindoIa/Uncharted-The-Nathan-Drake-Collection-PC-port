@@ -9,7 +9,7 @@ This is the **Expedition Edition** fork by [espindoIa](https://github.com/espind
 DLSS/DLAA in all three games, multithreaded rendering, smoother frame pacing and freeze fixes, a
 launcher of its own, and the US version (CUSA02320) with update 1.02 tested. It builds on the port
 by **BilalReloaded** ([GitHub](https://github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port)),
-whose releases up to 0.3.1 are merged in. What changed and when: [CHANGELOG.md](CHANGELOG.md).
+whose releases up to 0.6.0 are merged in. What changed and when: [CHANGELOG.md](CHANGELOG.md).
 How commits and pull requests are written: [CONTRIBUTING.md](CONTRIBUTING.md). The plan up to
 1.0: [ROADMAP.md](ROADMAP.md).
 
@@ -210,7 +210,7 @@ tag `v0.1.1`; GitHub Actions then builds the package and publishes the release w
 | `tools/play.py` | Scripted play for tests and agents: start a game, hold buttons and sticks for a time, get the current screen as a PNG after each step (taken inside the port), record and replay routes, compare shots, measure frame times. `python tools/play.py --help`. |
 | `tools/release.sh`, `tools/release-notes/` | Publishes a release (see above). |
 | `gow3_pc/` | The runtime: C runtime (`src/`), GPU library (`gpu/`: shadPS4 video core and shims), preparation scripts (`scripts/`). |
-| `gow3_pc/assets/ui/` | The games' UI art the launcher uses (their font, the Collection logo), built by `tools/build_ui_art.py`. |
+| `gow3_pc/assets/ui/` | The games' UI art: the launcher's font and logo (`tools/build_ui_art.py`) and the main font atlases redrawn at 4x for 1440p and 4K (`tools/ui_assets/`). |
 | `analysis/` | The engineering log (`STATUS.md`, index at the top) and the old 15 Oct plan (`PLAN.md`, history). |
 
 ### Documentation
