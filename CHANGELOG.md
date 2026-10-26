@@ -6,6 +6,25 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **HDR10 output (off by default; from moistman7's `hdr-output` branch, upstream PR #156, 26
+  October).** Launcher -> Display -> **HDR output** (and the in-game menu, Image tab) sends an HDR10
+  picture to a display that has HDR turned on in Windows; the games still render SDR, so the
+  picture is the game's own brightened to the peak you set, with the HUD, menus and the in-game
+  overlay at their own brightness (**HDR peak / game / HUD brightness**, in nits: 203 is the HDR
+  reference white). On NVIDIA GPUs with the DLSS, FSR 3/4 or TAA anti-aliasing modes the scene itself
+  also gets real highlights (a replacement of the games' tone pass, based on RenoDX, MIT; the package
+  carries its license), at the game's own size too (the launcher then takes the upscaling path at
+  1:1; it is dropped again when the display offers no HDR10). Turning HDR on or off in the game
+  switches the output at once; the scene highlights need a restart. Without HDR the game is
+  unchanged. Environment: `UNCHARTED_HDR_NATIVE=0` keeps the plain native path. Not tested on a
+  real HDR display here.
+- **Fix: movies above 1080p no longer have a white bar at the right edge** (moistman7; Uncharted 2
+  at 3440 wide and other sizes that are not a multiple of 32).
+- **Fix: Uncharted 2 ultrawide, water reflections as wide as the view** (moistman7). The reflection
+  camera kept the 16:9 view, so the water streaked outside the 16:9 area.
+- **Fix: the device was lost when the display mode changed with DLSS on** (moistman7): the swapchain
+  is now recreated under the submit lock and the HDR UI image is released after its last use.
+
 - **Performance counter: new defaults, and RAM is the system's** (26 October; from BilalReloaded's
   `meme-igpu` branch, 25 October). A fresh install shows FPS, frame time, GPU and CPU use (with
   their temperatures) and RAM on one line, top right. RAM is the system's memory in use, what

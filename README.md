@@ -212,6 +212,7 @@ tag `v0.1.1`; GitHub Actions then builds the package and publishes the release w
 | `tools/uc2mp_*.py`, `tools/net_overlay.py`, `analysis/MULTIPLAYER-*.md` | Upstream's Uncharted 2 / 3 LAN multiplayer research and local test launchers (hidden preview, see AGENTS.md); `launcher/net_lan.py` and `launcher/steam_library.py` are the launcher's network search and "Add to Steam". |
 | `gow3_pc/` | The runtime: C runtime (`src/`), GPU library (`gpu/`: shadPS4 video core and shims), preparation scripts (`scripts/`). |
 | `gow3_pc/assets/ui/` | The launcher's font and logo (`tools/build_ui_art.py`), the main font atlases redrawn at 4x (`tools/ui_assets/`), and the HD icons, prompts, HUD and weapons in `hd/src/`; `hd/editable/` keeps native art projects and recipes, `hd/inventory.csv` records references and verification limits (`hd/u1..u3/*.dds` are generated). |
+| `gow3_pc/hdr/` | The HDR scene's tone pass replacement (HLSL source, checked-in SPIR-V, RenoDX include snapshot under its MIT license); see its README. |
 | `analysis/` | The engineering log (`STATUS.md`, index at the top) and the old 15 Oct plan (`PLAN.md`, history). |
 
 ### Documentation
