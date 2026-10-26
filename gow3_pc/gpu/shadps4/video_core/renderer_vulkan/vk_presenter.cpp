@@ -1005,8 +1005,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         }
         ++frame_dump_index;
     }
+    // gow3 26 Oct 2026 (review): the frame's own format (10-bit while HDR10 output is on); the
+    // surface format would read those pixels as 8-bit. The PQ values are written as they are.
     CaptureLiveView(instance, draw_scheduler, cmdbuf, frame->image, frame->width, frame->height,
-                    swapchain.GetSurfaceFormat().format);
+                    swapchain.GetImageFormat());
 
     // Flush frame creation commands.
     frame->ready_semaphore = draw_scheduler.GetWorkSemaphore()->Handle();
