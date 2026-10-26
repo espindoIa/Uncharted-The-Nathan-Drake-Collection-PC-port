@@ -36,6 +36,7 @@ New entries go at the end, dated, measured numbers only.
 - Lamp shadow passes found by what they sample and jittered: `25 October 2026: lamp shadow passes get the scene jitter`
 - Game FXAA skipped under temporal AA: `Game FXAA skipped under temporal AA (24 Oct 2026)`
 - Text and subtitles at 4K (font atlases, text shader sharpening): `Sharp text above 1080p (25 Oct 2026)`
+- Main menu/subtitle fonts with less smoothing, original metrics retained: `26 October 2026: main-font contour fidelity`
 - Freezes and crashes (20-21 Oct): `20 October 2026: freezes before cutscenes and with multithreading (U3), upstream's fixes`, `21 October 2026: freezes after cutscenes = garbage V#s specialized compute shaders`, `20 October 2026: U1 0x64011f crash (red zone) and the nested-task leak`, `20 October 2026 (afternoon): 10 player crash logs (downloaded with the user's OK)`, `Evidence (player's install logs, 20-21 Oct)`
 - Write faults and load stalls (21 Oct): `21 October 2026: chapter-load write faults from file reads`, `21 October 2026: write faults in gameplay: prewait for GPU-written pages`, `21 October 2026: first-gameplay-frame DLSS stall; slow-submit detail`, `21 October 2026 (afternoon): post-movie stall, alley-load stalls, chapter 2 FPS`, `21 October 2026 (evening): chapter 2 CPU limit, SRT pipe drains`
 - Laptops and memory (20 Oct): `20 October 2026 (evening): hybrid-laptop freezes = present under the submit lock (fix built)`, `20 October 2026 (night): laptop freezes = port on a USB exFAT drive`, `20 October 2026 (night): GitHub #95 memory, proper fix (built, laptop test pending)`, `20 October 2026 (night): CPU savings confirmed on the NVIDIA GPU; 780M memory placement`
@@ -4985,3 +4986,35 @@ Second pass, same day (user: vectorize both and keep them sharp at other resolut
 - Checked: the launcher built at scale 1.0, 1.5 and 2.0 (fake Tk scaling, PrintWindow capture): logo and text sharp at 2x; 40 launcher UI tests OK. Not checked: real 4K display, ClearType on.
 
 Checked (first pass): the launcher from source at 1x (window capture): logo and font everywhere, Display layout as before (f_small at 11 pt wrapped the resolution choices, so it stays 10); `test_uncharted_launcher_ui` 40 tests OK. Not checked: 150% scale, the packaged zip, Wine/Proton (no gdi32 private fonts there: falls back), the Europe CUSA02344 pak offsets (the build script finds the texture by name, so it should work).
+
+## 26 October 2026: main-font contour fidelity
+
+The owner asked for menu and subtitle lettering closer to the original, with less smoothing,
+at high resolution. This revision uses the existing main-font atlas generator and runtime on
+the current checkout, rather than adding a second font-replacement path to the separate HD-icon
+worktree. Existing unrelated edits in AGENTS.md, README.md and .claude/ship.md are preserved and
+excluded from this commit. No launcher, icon, runtime or shader change.
+
+- `glyphfit4.fit_glyph`: curve preparation Gaussian sigma 0.5 -> 0.4 source pixels; initial
+  Bezier fit tolerance 0.12 -> 0.08 pixels. Less rounding is introduced before the coverage fit.
+  Corner detection, G1 joins, coverage target, small-loop rules and retry remain unchanged.
+  The result is still area-rasterised vector art, not a sharpened resize of the preceding PNG.
+- All three PNG/SVG pairs rebuilt: U1 `b4337ad64e659f14` (1024x512), U2
+  `188453145becdc37` (1024x512), U3 `35ce544569cac222` (1024x1024), each 4x its
+  guest dimensions. Original U1 game3 and U2 main TGA/BMFont references are now retained under
+  `assets/ui/fonts/src/u1` and `src/u2`; U3 reuses the existing main source. No archive is added.
+- All 566 visible glyphs generated (U1 199, U2 181, U3 186); original blank-glyph metrics,
+  positions, spacing/kerning, accent codepoints and packed channel assignments remain the game's.
+  RGB/A are independent coverage planes, not colour plus transparency; no raster-editor alpha
+  premultiplication or finishing blur was applied. The existing runtime still chooses 1x/2x/4x
+  and validates replacement assets against guest texels. Its acceptance thresholds are unchanged.
+- Generator exits: U1 0 in 88 s, U2 0 in 82 s, U3 0 in 123 s, each with an 1800 s hard timeout.
+  The generator's built-in round-trip report (4x area render reduced to the original, 0-255
+  coverage levels): U1 mean MAE 0.72, worst glyph 2.15, pixel max-error p95 57; U2 0.71 / 2.15 /
+  57; U3 0.53 / 1.13 / 41. Previous recorded means were 0.97 / 0.96 / 0.70 respectively.
+  These are source-reconstruction numbers, not proof of perceived sharpness or runtime acceptance.
+  Installation checks cover every output's RGBA mode, dimensions and generated glyph count.
+- Per owner's deferral, no unit suite, new visual comparison or U1/U2/U3 game session was run
+  for this revision. Menu/subtitle appearance, all letters at usage size, live asset acceptance,
+  other resolutions and the installed package remain unverified. No performance claim, push or
+  reinstall. The launcher's TTF and classic/Russian/CJK fonts are unchanged.

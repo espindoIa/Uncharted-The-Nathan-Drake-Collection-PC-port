@@ -6,6 +6,11 @@ Technical details of every item: [analysis/STATUS.md](analysis/STATUS.md).
 
 ## Unreleased (fork, after 0.5.0)
 
+- **Menus and subtitles: font fidelity (26 October).** The three main high-resolution
+  font atlases are rebuilt with less contour smoothing to keep the letters closer to
+  their original shapes. The typeface, spacing, accents and shadows are retained;
+  the launcher font is unchanged. This revision has not yet been checked in game.
+
 - **Launcher: the games' own lettering.** The title is the UNCHARTED of the Collection's logo, worn
   as on the games' title screens, and every text uses the font of the games' menus and subtitles.
   Both come from the games' files (the logo from Uncharted 1's menu, the font redrawn from its

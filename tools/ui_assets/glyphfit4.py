@@ -341,7 +341,7 @@ def turn_at(C, k):
     return np.degrees(abs(np.angle(np.exp(1j * (np.arctan2(vout[1], vout[0]) - np.arctan2(vin[1], vin[0]))))))
 
 
-def fit_glyph(window, x0=0, y0=0, sigma_px=0.5, tol=0.12, prior=0.01, min_turn_kept=28.0, min_area=0.8):
+def fit_glyph(window, x0=0, y0=0, sigma_px=0.4, tol=0.08, prior=0.01, min_turn_kept=28.0, min_area=0.8):
     """v4 outlines of one glyph. After a first fit: loops smaller than min_area px^2 (one-texel specks) are
     dropped, corners that came out nearly straight (< min_turn_kept degrees) become smooth joins, and every
     other corner stays. The 1080p atlases are hinted, so a staircase step reads as two short straight
